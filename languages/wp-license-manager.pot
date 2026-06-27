@@ -1,0 +1,427 @@
+# Copyright (C) 2026 WPLM Contributors
+# This file is distributed under the same license as the WP License Manager plugin.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: WP License Manager 1.0.0\n"
+"Report-Msgid-Bugs-To: https://github.com/wplm/wp-license-manager/issues\n"
+"POT-Creation-Date: 2026-06-15T00:00:00+00:00\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"PO-Revision-Date: 2026-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
+"X-Generator: WP-CLI i18n 2.x\n"
+"X-Domain: wp-license-manager\n"
+
+#. Plugin Name of the plugin
+msgid "WP License Manager"
+msgstr ""
+
+#. Description of the plugin
+msgid "Industry-grade software licensing for WooCommerce. Issue, validate, activate, monitor, and revoke license keys with a full REST API and native subscription engine."
+msgstr ""
+
+#: wp-license-manager.php
+msgid "WP License Manager requires PHP %1$s or higher. You are running PHP %2$s."
+msgstr ""
+
+#: src/Admin/Menu.php
+msgid "License Manager"
+msgstr ""
+
+#: src/Admin/Menu.php
+msgid "Dashboard"
+msgstr ""
+
+#: src/Admin/Menu.php
+msgid "Licenses"
+msgstr ""
+
+#: src/Admin/Menu.php
+msgid "Subscriptions"
+msgstr ""
+
+#: src/Admin/Menu.php
+msgid "Devices"
+msgstr ""
+
+#: src/Admin/Menu.php
+msgid "Generators"
+msgstr ""
+
+#: src/Admin/Menu.php
+msgid "Releases"
+msgstr ""
+
+#: src/Admin/Menu.php
+msgid "Webhooks"
+msgstr ""
+
+#: src/Admin/Menu.php
+msgid "Blacklist"
+msgstr ""
+
+#: src/Admin/Menu.php
+msgid "Settings"
+msgstr ""
+
+#: src/Admin/Menu.php
+msgid "You do not have permission to do this."
+msgstr ""
+
+#: src/Admin/Settings/SettingsPage.php
+msgid "General"
+msgstr ""
+
+#: src/Admin/Settings/SettingsPage.php
+msgid "Security"
+msgstr ""
+
+#: src/Admin/Settings/SettingsPage.php
+msgid "Activation"
+msgstr ""
+
+#: src/Admin/Settings/SettingsPage.php
+msgid "Monitoring"
+msgstr ""
+
+#: src/Admin/Settings/SettingsPage.php
+msgid "Dunning"
+msgstr ""
+
+#: src/Cron/Scheduler.php
+msgid "Every 5 Minutes (WPLM)"
+msgstr ""
+
+#: src/Integrations/WooCommerce/MyAccountSubscriptions.php
+msgid "My Licenses"
+msgstr ""
+
+#: src/Integrations/WooCommerce/MyAccountSubscriptions.php
+msgid "My Subscriptions"
+msgstr ""
+
+#: src/Integrations/WooCommerce/ProductPanel.php
+msgid "License Data"
+msgstr ""
+
+#: src/Integrations/WooCommerce/ProductPanel.php
+msgid "Enable Licensing"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "WPLM Subscription"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "WPLM Variable Subscription"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Recurring Price"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Amount charged each billing cycle."
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Billing Period"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "How often the customer is charged."
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Daily"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Weekly"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Monthly"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Yearly"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Billing Interval"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Charge every N periods, e.g. 3 = every 3 months."
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Sign-up Fee"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "One-time fee charged on first order only. Leave blank for none."
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Free Trial Days"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Number of free trial days before first charge. 0 = no trial."
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Subscription Length (cycles)"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Maximum number of billing cycles. 0 = until cancelled."
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "One per customer"
+msgstr ""
+
+#: src/Integrations/WooCommerce/SubscriptionProductType.php
+msgid "Prevent customers from purchasing this subscription more than once."
+msgstr ""
+
+#: src/Integrations/Qr/QrGenerator.php
+msgid "License QR Code"
+msgstr ""
+
+#: src/Rest/Controllers/ApiKeysController.php
+msgid "API key not found."
+msgstr ""
+
+#: src/Rest/Controllers/ApiKeysController.php
+msgid "Failed to create API key."
+msgstr ""
+
+#: src/Rest/Controllers/LicensesController.php
+msgid "Either key_string or a valid generator_id is required."
+msgstr ""
+
+#: src/Rest/Controllers/LicensesController.php
+msgid "No updatable fields provided."
+msgstr ""
+
+#: src/Rest/Controllers/LicensesController.php
+msgid "License not found."
+msgstr ""
+
+#: src/Rest/Controllers/LicensesController.php
+msgid "Failed to delete license."
+msgstr ""
+
+#: src/Rest/Controllers/LicensesController.php
+msgid "expires_at is required."
+msgstr ""
+
+#: src/Rest/Controllers/LicensesController.php
+msgid "Pass confirm: true to permanently terminate a license."
+msgstr ""
+
+#: src/Rest/Controllers/WebhooksController.php
+msgid "Webhook not found."
+msgstr ""
+
+#: src/Rest/Controllers/WebhooksController.php
+msgid "No valid events provided. See /api-keys endpoint for allowed event names."
+msgstr ""
+
+#: src/Rest/Controllers/WebhooksController.php
+msgid "Failed to create webhook."
+msgstr ""
+
+#: templates/myaccount/wplm-licenses.php
+msgid "License Key"
+msgstr ""
+
+#: templates/myaccount/wplm-licenses.php
+msgid "Status"
+msgstr ""
+
+#: templates/myaccount/wplm-licenses.php
+msgid "Activations"
+msgstr ""
+
+#: templates/myaccount/wplm-licenses.php
+msgid "Expires"
+msgstr ""
+
+#: templates/myaccount/wplm-licenses.php
+msgid "Actions"
+msgstr ""
+
+#: templates/myaccount/wplm-licenses.php
+msgid "You have no license keys yet. Purchase a licensed product to get started."
+msgstr ""
+
+#: templates/myaccount/wplm-licenses.php
+msgid "Never"
+msgstr ""
+
+#: templates/myaccount/wplm-licenses.php
+msgid "View Devices"
+msgstr ""
+
+#: templates/myaccount/wplm-subscriptions.php
+#: templates/emails/subscription-created.php
+msgid "Manage Subscriptions"
+msgstr ""
+
+#: templates/myaccount/wplm-subscriptions.php
+msgid "#"
+msgstr ""
+
+#: templates/myaccount/wplm-subscriptions.php
+msgid "Amount"
+msgstr ""
+
+#: templates/myaccount/wplm-subscriptions.php
+msgid "Next Payment"
+msgstr ""
+
+#: templates/myaccount/wplm-subscriptions.php
+msgid "You have no active subscriptions."
+msgstr ""
+
+#: templates/myaccount/wplm-subscriptions.php
+msgid "Pause"
+msgstr ""
+
+#: templates/myaccount/wplm-subscriptions.php
+msgid "Cancel"
+msgstr ""
+
+#: templates/myaccount/wplm-subscriptions.php
+msgid "Resume"
+msgstr ""
+
+#: templates/emails/subscription-created.php
+msgid "Subscription ID"
+msgstr ""
+
+#: templates/emails/subscription-created.php
+#: templates/emails/subscription-cancelled.php
+msgid "Status"
+msgstr ""
+
+#: templates/emails/subscription-created.php
+msgid "Trial Ends"
+msgstr ""
+
+#: templates/emails/subscription-created.php
+msgid "License Key"
+msgstr ""
+
+#: templates/emails/renewal-processed.php
+msgid "Amount Charged"
+msgstr ""
+
+#: templates/emails/renewal-processed.php
+msgid "Date"
+msgstr ""
+
+#: templates/emails/renewal-processed.php
+msgid "Transaction ID"
+msgstr ""
+
+#: templates/emails/renewal-processed.php
+msgid "License Valid Until"
+msgstr ""
+
+#: templates/emails/renewal-processed.php
+msgid "Never expires"
+msgstr ""
+
+#: templates/emails/renewal-processed.php
+msgid "View Invoice"
+msgstr ""
+
+#: templates/emails/payment-failed.php
+msgid "We were unable to process your renewal payment. Please update your payment method to keep your subscription active."
+msgstr ""
+
+#: templates/emails/payment-failed.php
+msgid "Amount Due"
+msgstr ""
+
+#: templates/emails/payment-failed.php
+msgid "Next Retry"
+msgstr ""
+
+#: templates/emails/payment-failed.php
+msgid "Retries Remaining"
+msgstr ""
+
+#: templates/emails/payment-failed.php
+msgid "All retry attempts have been exhausted. Your subscription has been cancelled."
+msgstr ""
+
+#: templates/emails/payment-failed.php
+msgid "To keep your subscription active, please update your payment method:"
+msgstr ""
+
+#: templates/emails/payment-failed.php
+msgid "Update Payment Method"
+msgstr ""
+
+#: templates/emails/payment-failed.php
+#: templates/emails/subscription-cancelled.php
+msgid "View Subscription"
+msgstr ""
+
+#: templates/emails/subscription-cancelled.php
+msgid "Your subscription has been set to cancel at the end of the current billing period. You will continue to have access until then."
+msgstr ""
+
+#: templates/emails/subscription-cancelled.php
+msgid "Your subscription has been cancelled. Access to any associated software licenses has been revoked."
+msgstr ""
+
+#: templates/emails/subscription-cancelled.php
+msgid "Access Ends"
+msgstr ""
+
+#: templates/emails/subscription-cancelled.php
+msgid "View Subscriptions"
+msgstr ""
+
+#: templates/emails/subscription-expired.php
+msgid "Your subscription has expired. To continue using the software, please renew or start a new subscription."
+msgstr ""
+
+#: templates/emails/subscription-expired.php
+msgid "Expired On"
+msgstr ""
+
+#: templates/emails/subscription-expired.php
+msgid "Renew Subscription"
+msgstr ""
+
+#: templates/emails/trial-ending.php
+msgid "Your free trial ends in %d day. After that, your subscription will automatically renew at the standard rate."
+msgstr ""
+
+#: templates/emails/trial-ending.php
+msgid "Your free trial ends in %d days. After that, your subscription will automatically renew at the standard rate."
+msgstr ""
+
+#: templates/emails/trial-ending.php
+msgid "First Charge"
+msgstr ""
+
+#: templates/emails/trial-ending.php
+msgid "Manage Subscription"
+msgstr ""

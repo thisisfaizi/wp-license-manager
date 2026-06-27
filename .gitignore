@@ -1,0 +1,17 @@
+# Local-only / AI tooling
+/CLAUDE.md
+/docs-site
+
+# Composer / Node dependencies (run `composer install` after clone)
+/vendor/
+/node_modules/
+
+# Build & test artifacts
+/.phpunit.cache/
+.phpunit.result.cache
+*.log
+.DS_Store
+
+# IDE
+/.idea/
+/.vscode/

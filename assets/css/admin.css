@@ -1,0 +1,104 @@
+/* WP License Manager — Admin Stylesheet */
+
+/* ── Dashboard widgets ───────────────────────────────────────────────── */
+.wplm-dashboard-widgets {
+	display: grid;
+	grid-template-columns: repeat( auto-fit, minmax( 240px, 1fr ) );
+	gap: 16px;
+	margin-top: 20px;
+}
+
+.wplm-widget {
+	background: #fff;
+	border: 1px solid #c3c4c7;
+	border-radius: 4px;
+	padding: 16px 20px;
+	box-shadow: 0 1px 2px rgba( 0, 0, 0, .05 );
+}
+
+.wplm-widget h3 {
+	margin: 0 0 12px;
+	font-size: 13px;
+	font-weight: 600;
+	color: #1d2327;
+	text-transform: uppercase;
+	letter-spacing: .04em;
+}
+
+.wplm-widget .wplm-big-number {
+	font-size: 32px;
+	font-weight: 700;
+	color: #2271b1;
+	line-height: 1;
+	margin-bottom: 4px;
+}
+
+.wplm-widget .wplm-sub-label {
+	font-size: 12px;
+	color: #646970;
+}
+
+.wplm-widget table {
+	border-collapse: collapse;
+	width: 100%;
+	font-size: 13px;
+}
+
+.wplm-widget table th,
+.wplm-widget table td {
+	text-align: left;
+	padding: 4px 0;
+	border-bottom: 1px solid #f0f0f1;
+}
+
+.wplm-widget table th {
+	color: #646970;
+	font-weight: 600;
+}
+
+/* ── License status badges ───────────────────────────────────────────── */
+.wplm-badge {
+	display: inline-block;
+	padding: 2px 8px;
+	border-radius: 3px;
+	font-size: 11px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: .04em;
+	white-space: nowrap;
+}
+
+/* 0 pending */
+.wplm-status-0  { background: #fff3cd; color: #664d03; }
+/* 1 active */
+.wplm-status-1  { background: #d1e7dd; color: #0f5132; }
+/* 2 inactive */
+.wplm-status-2  { background: #e2e3e5; color: #41464b; }
+/* 3 expired */
+.wplm-status-3  { background: #f8d7da; color: #842029; }
+/* 4 suspended */
+.wplm-status-4  { background: #cff4fc; color: #055160; }
+/* 5 revoked */
+.wplm-status-5  { background: #f8d7da; color: #842029; }
+/* 6 terminated */
+.wplm-status-6  { background: #1d2327; color: #fff; }
+
+/* ── List table extras ───────────────────────────────────────────────── */
+.wplm-key-preview {
+	font-family: monospace;
+	font-size: 12px;
+	color: #1d2327;
+}
+
+/* ── Product panel conditional fields ───────────────────────────────── */
+.wplm-license-conditional { display: none; }
+
+/* ── Settings page ───────────────────────────────────────────────────── */
+.wplm-settings-notice {
+	background: #f6f7f7;
+	border-left: 4px solid #2271b1;
+	padding: 10px 14px;
+	margin: 12px 0;
+	font-size: 13px;
+	color: #50575e;
+}
