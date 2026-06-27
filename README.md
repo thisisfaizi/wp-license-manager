@@ -8,13 +8,13 @@
 
 <div align="center">
 
-[![CI](https://img.shields.io/github/actions/workflow/status/wplm/wp-license-manager/ci.yml?style=for-the-badge&label=CI&logo=github-actions&logoColor=white)](https://github.com/wplm/wp-license-manager/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/wplm/wp-license-manager/ci.yml?style=for-the-badge&label=CI&logo=github-actions&logoColor=white)](https://github.com/thisisfaizi/wp-license-manager/actions)
 [![Coverage](https://img.shields.io/codecov/c/github/wplm/wp-license-manager?style=for-the-badge&logo=codecov&logoColor=white)](https://codecov.io/gh/wplm/wp-license-manager)
 [![PHP](https://img.shields.io/badge/PHP-7.4%2B-777BB4?style=for-the-badge&logo=php&logoColor=white)](https://php.net)
 [![WordPress](https://img.shields.io/badge/WordPress-5.8%2B-21759B?style=for-the-badge&logo=wordpress&logoColor=white)](https://wordpress.org)
 [![WooCommerce](https://img.shields.io/badge/WooCommerce-6.0%2B-96588A?style=for-the-badge&logo=woocommerce&logoColor=white)](https://woocommerce.com)
 [![License](https://img.shields.io/badge/License-GPL--2.0--or--later-green?style=for-the-badge)](LICENSE)
-[![Version](https://img.shields.io/github/v/release/wplm/wp-license-manager?style=for-the-badge&color=blue)](https://github.com/wplm/wp-license-manager/releases)
+[![Version](https://img.shields.io/github/v/release/wplm/wp-license-manager?style=for-the-badge&color=blue)](https://github.com/thisisfaizi/wp-license-manager/releases)
 
 </div>
 
@@ -87,10 +87,10 @@ Sell licenses through WooCommerce, verify them offline in milliseconds, and mana
 <td width="50%">
 
 ### 📦 Client SDKs
-- **[wplm-dart](https://github.com/wplm/wplm-dart)** — Dart / Flutter (pub.dev)
-- **[wplm-python](https://github.com/wplm/wplm-python)** — Python (PyPI)
-- **[wplm-php](https://github.com/wplm/wplm-php)** — PHP + WordPress helper (Packagist)
-- **[wplm-js](https://github.com/wplm/wplm-js)** — JavaScript / TypeScript (npm)
+- **[wplm-dart](https://github.com/thisisfaizi/wplm-dart)** — Dart / Flutter (pub.dev)
+- **[wplm-python](https://github.com/thisisfaizi/wplm-python)** — Python (PyPI)
+- **[wplm-php](https://github.com/thisisfaizi/wplm-php)** — PHP + WordPress helper (Packagist)
+- **[wplm-js](https://github.com/thisisfaizi/wplm-js)** — JavaScript / TypeScript (npm)
 - All SDKs verify signatures offline and fall back to cache on network loss
 
 </td>
@@ -163,7 +163,7 @@ Customer → My Account → Subscriptions → [Renew] →
 composer require wplm/wp-license-manager
 
 # Or clone into wp-content/plugins/
-git clone https://github.com/wplm/wp-license-manager.git
+git clone https://github.com/thisisfaizi/wp-license-manager.git
 cd wp-license-manager && composer install
 ```
 
@@ -252,10 +252,10 @@ GPL v2 or later. See [LICENSE](LICENSE).
 
 **Built for WordPress plugin vendors who need real licensing infrastructure — not SaaS fees.**
 
-[![Dart SDK](https://img.shields.io/badge/SDK-Dart%2FFlutter-0175C2?style=for-the-badge&logo=dart&logoColor=white)](https://github.com/wplm/wplm-dart)
-[![Python SDK](https://img.shields.io/badge/SDK-Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://github.com/wplm/wplm-python)
-[![PHP SDK](https://img.shields.io/badge/SDK-PHP-777BB4?style=for-the-badge&logo=php&logoColor=white)](https://github.com/wplm/wplm-php)
-[![JS SDK](https://img.shields.io/badge/SDK-JavaScript%2FTypeScript-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)](https://github.com/wplm/wplm-js)
+[![Dart SDK](https://img.shields.io/badge/SDK-Dart%2FFlutter-0175C2?style=for-the-badge&logo=dart&logoColor=white)](https://github.com/thisisfaizi/wplm-dart)
+[![Python SDK](https://img.shields.io/badge/SDK-Python-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://github.com/thisisfaizi/wplm-python)
+[![PHP SDK](https://img.shields.io/badge/SDK-PHP-777BB4?style=for-the-badge&logo=php&logoColor=white)](https://github.com/thisisfaizi/wplm-php)
+[![JS SDK](https://img.shields.io/badge/SDK-JavaScript%2FTypeScript-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)](https://github.com/thisisfaizi/wplm-js)
 
 <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=100&section=footer" />
 
