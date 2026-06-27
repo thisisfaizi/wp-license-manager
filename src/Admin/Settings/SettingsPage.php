@@ -624,6 +624,11 @@ class SettingsPage {
 				$count
 			),
 			'keypair' => __( 'Signing keypair regenerated. Previously issued signed payloads are now invalid until clients fetch the new public key.', 'wp-license-manager' ),
+			'resign'  => sprintf(
+				/* translators: %d: number of licenses re-signed */
+				_n( 'Re-signed %d license with product binding.', 'Re-signed %d licenses with product binding.', $count, 'wp-license-manager' ),
+				$count
+			),
 		);
 
 		if ( ! isset( $messages[ $tool ] ) ) {
@@ -709,6 +714,24 @@ class SettingsPage {
 									(int) get_option( 'wplm_telemetry_retention_days', 90 )
 								);
 								?>
+							</p>
+						</form>
+					</td>
+				</tr>
+
+				<tr>
+					<th scope="row"><?php esc_html_e( 'Re-sign licenses (product binding)', 'wp-license-manager' ); ?></th>
+					<td>
+						<form method="post" action="<?php echo esc_url( $post_url ); ?>">
+							<input type="hidden" name="action" value="wplm_tool_resign_licenses">
+							<?php wp_nonce_field( 'wplm_tool_resign_licenses' ); ?>
+							<label>
+								<?php esc_html_e( 'Backfill product ID for keys that have none:', 'wp-license-manager' ); ?>
+								<input type="number" name="backfill_product_id" min="0" step="1" placeholder="<?php esc_attr_e( 'optional', 'wp-license-manager' ); ?>" style="width:90px;">
+							</label>
+							<?php submit_button( __( 'Re-sign all licenses', 'wp-license-manager' ), 'secondary', 'submit', false ); ?>
+							<p class="description">
+								<?php esc_html_e( 'Re-signs every license token to embed its product ID (the offline-verifiable "pid" field), so a product-locked SDK rejects keys issued for another product. Generator, API, and CSV-imported keys often have no product ID — enter one above to assign it to those keys before re-signing. Run this once after upgrading, and again whenever you bulk-import keys.', 'wp-license-manager' ); ?>
 							</p>
 						</form>
 					</td>

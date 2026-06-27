@@ -6,6 +6,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.0.8] — 2026-06-28
+
+### Fixed
+- Device deactivation failed with `Unknown column 'deactivated_at'` — the `wplm_machines` schema was missing the `deactivated_at` column referenced by `MachineRepository::deactivate()`. The column is now defined in the installer and added to existing tables via the `1.0.6` DB migration (DB version bumped). Devices now deactivate cleanly.
+
+### Security / Hardening
+- `RestServer` now suppresses error display **and** `$wpdb` error output for `wplm/v1` routes, so a database error can never corrupt a JSON response (failures are still logged).
+
+## [1.0.7] — 2026-06-28
+
+### Added
+- **Product binding.** The Ed25519 signed license payload now carries a `pid` (product id) field. `LicenseService::build_signing_payload()` is the single source of truth used by `create()`, the `update()` re-sign path (now also triggered by a `product_id` change), and a new `resign_all()` migration. A **Settings → Tools → Re-sign licenses** tool re-signs every key and can backfill a product id onto keys that have none. All four client SDKs reject a key whose signed `pid` does not match the configured product id, online and offline (`product_mismatch` / `WplmProductMismatch`).
+
+### Fixed
+- `validate()` did not hash the device fingerprint before the machine lookup (activate/deactivate/heartbeat did), so an activated device was always reported `needs_activation: true`. `LicenseService` now receives `Crypto\Fingerprint` and hashes before lookup.
+- Re-activating a previously-deactivated device (idempotent path) left the license inactive; the license is now reconciled to active whenever an active device is bound.
+
+### Changed
+- Seat counts are now recomputed from the actual active machines (`LicenseRepository::sync_activation_count()`) on activate, re-activate, and deactivate, replacing increment/decrement — the count can no longer drift after an error, retry, or race.
+
 ## [1.0.0] — 2026-06-15
 
 ### Added

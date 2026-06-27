@@ -190,6 +190,7 @@ class Installer {
   last_heartbeat_at DATETIME DEFAULT NULL,
   status TINYINT NOT NULL DEFAULT 1,
   activated_at DATETIME NOT NULL,
+  deactivated_at DATETIME DEFAULT NULL,
   created_at DATETIME NOT NULL,
   PRIMARY KEY  (id),
   UNIQUE KEY license_fingerprint (license_id, fingerprint),

@@ -43,6 +43,9 @@ class LicenseService {
 	/** @var MachineRepository */
 	private MachineRepository $machine_repo;
 
+	/** @var Fingerprint */
+	private Fingerprint $fingerprint;
+
 	/**
 	 * @param LicenseRepository       $license_repo   License data-access layer.
 	 * @param Signer                  $signer         Ed25519 signing service.
@@ -50,6 +53,7 @@ class LicenseService {
 	 * @param ActivationLogRepository $log_repo       Activation event log.
 	 * @param BlacklistRepository     $blacklist_repo Fingerprint/IP blacklist.
 	 * @param MachineRepository       $machine_repo   Device/machine data-access layer.
+	 * @param Fingerprint             $fingerprint    Fingerprint hashing service.
 	 */
 	public function __construct(
 		LicenseRepository $license_repo,
@@ -57,7 +61,8 @@ class LicenseService {
 		KeyVault $vault,
 		ActivationLogRepository $log_repo,
 		BlacklistRepository $blacklist_repo,
-		MachineRepository $machine_repo
+		MachineRepository $machine_repo,
+		Fingerprint $fingerprint
 	) {
 		$this->license_repo   = $license_repo;
 		$this->signer         = $signer;
@@ -65,6 +70,7 @@ class LicenseService {
 		$this->log_repo       = $log_repo;
 		$this->blacklist_repo = $blacklist_repo;
 		$this->machine_repo   = $machine_repo;
+		$this->fingerprint    = $fingerprint;
 	}
 
 	// -------------------------------------------------------------------------
@@ -108,14 +114,14 @@ class LicenseService {
 		$encrypted = $this->vault->encrypt( $key_string );
 
 		// Build the signed payload for Ed25519 signing.
-		$payload = array(
-			'key'     => $key_string,
-			'expires' => $args['expires_at'] ?? null,
-			'max'     => isset( $args['max_activations'] ) ? (int) $args['max_activations'] : null,
-			'iat'     => time(),
+		$signature = $this->signer->sign(
+			$this->build_signing_payload(
+				$key_string,
+				$args['expires_at'] ?? null,
+				isset( $args['max_activations'] ) ? (int) $args['max_activations'] : null,
+				isset( $args['product_id'] ) ? (int) $args['product_id'] : null
+			)
 		);
-
-		$signature = $this->signer->sign( $payload );
 
 		// Assemble the insert row; status 2 = inactive (active on first activation).
 		$insert_data = array(
@@ -288,12 +294,17 @@ class LicenseService {
 			);
 		}
 
-		// Step 5: Per-fingerprint machine check.
+		// Step 5: Per-fingerprint machine check. The client sends a RAW
+		// fingerprint; machines are stored under its HMAC-SHA256 hash, so hash
+		// before lookup (mirroring ActivationService/HeartbeatService). Without
+		// this, an activated device is never matched and needs_activation stays
+		// true forever.
 		$needs_activation = false;
 		$machine          = null;
 
 		if ( null !== $fingerprint && '' !== $fingerprint ) {
-			$machine = $this->machine_repo->find_by_license_and_fingerprint( $license->id, $fingerprint );
+			$fp_hash = $this->fingerprint->hash( $fingerprint );
+			$machine = $this->machine_repo->find_by_license_and_fingerprint( $license->id, $fp_hash );
 
 			if ( null === $machine || 1 !== $machine->status ) {
 				// Machine not registered or not currently active → client must activate.
@@ -402,26 +413,30 @@ class LicenseService {
 			$update['license_key'] = $this->vault->encrypt( $key_string );
 		}
 
-		// Re-sign the offline payload whenever a signed field (key/expires/max)
-		// changes, so offline clients honour the updated limits on next sync.
+		// Re-sign the offline payload whenever a signed field (key/expires/max/
+		// product_id) changes, so offline clients honour the updated limits and
+		// product binding on next sync.
 		$expires_changed = array_key_exists( 'expires_at', $update )
 			&& (string) $update['expires_at'] !== (string) $current->expires_at;
 		$max_changed     = array_key_exists( 'max_activations', $update )
 			&& (int) $update['max_activations'] !== (int) $current->max_activations;
+		$pid_changed     = array_key_exists( 'product_id', $update )
+			&& (int) $update['product_id'] !== (int) $current->product_id;
 
-		if ( $key_changed || $expires_changed || $max_changed ) {
+		if ( $key_changed || $expires_changed || $max_changed || $pid_changed ) {
 			// find_by_id() hydrates with the key already decrypted, so the
 			// current model's license_key is plaintext.
 			$plain = $key_changed ? $key_string : (string) $current->license_key;
 			if ( '' !== $plain ) {
 				$new_expires         = array_key_exists( 'expires_at', $update ) ? $update['expires_at'] : $current->expires_at;
 				$new_max             = array_key_exists( 'max_activations', $update ) ? $update['max_activations'] : $current->max_activations;
+				$new_pid             = array_key_exists( 'product_id', $update ) ? $update['product_id'] : $current->product_id;
 				$update['signature'] = $this->signer->sign(
-					array(
-						'key'     => $plain,
-						'expires' => $new_expires,
-						'max'     => null !== $new_max ? (int) $new_max : null,
-						'iat'     => time(),
+					$this->build_signing_payload(
+						$plain,
+						null !== $new_expires ? (string) $new_expires : null,
+						null !== $new_max ? (int) $new_max : null,
+						null !== $new_pid ? (int) $new_pid : null
 					)
 				);
 			}
@@ -478,6 +493,109 @@ class LicenseService {
 		do_action( 'wplm_license_status_changed', $license, $old_status, 1 );
 
 		return $this->license_repo->find_by_id( $license->id );
+	}
+
+	/**
+	 * Build the canonical Ed25519 signing payload for a license.
+	 *
+	 * Single source of truth shared by create(), the update() re-sign path, and
+	 * the admin re-sign tool, so every issued token has an identical field shape.
+	 * The `pid` field binds a license to a WooCommerce product id: SDKs that are
+	 * configured with a product id reject any token whose `pid` does not match,
+	 * preventing one product's key from validating inside another product. A null
+	 * `pid` means the license is not product-locked.
+	 *
+	 * @param string      $key_string      Plaintext license key.
+	 * @param string|null $expires_at      MySQL datetime, or null for perpetual.
+	 * @param int|null    $max_activations Seat cap, or null for unlimited.
+	 * @param int|null    $product_id      Bound product id, or null (unlocked).
+	 * @return array<string, mixed>
+	 */
+	private function build_signing_payload( string $key_string, ?string $expires_at, ?int $max_activations, ?int $product_id ): array {
+		return array(
+			'key'     => $key_string,
+			'expires' => $expires_at,
+			'max'     => null !== $max_activations ? (int) $max_activations : null,
+			'pid'     => null !== $product_id ? (int) $product_id : null,
+			'iat'     => time(),
+		);
+	}
+
+	/**
+	 * Re-sign every license so each token carries the product-binding `pid`
+	 * field. Optionally backfills a product id onto licenses that currently have
+	 * none (e.g. generator/API/CSV keys), which is required before a
+	 * product-locked SDK will accept them.
+	 *
+	 * @param int|null $backfill_product_id When set (> 0), assigns this product
+	 *                                      id to any license whose product_id is
+	 *                                      currently null before re-signing.
+	 * @return array{total:int, resigned:int, backfilled:int, still_unbound:int}
+	 */
+	public function resign_all( ?int $backfill_product_id = null ): array {
+		$per_page      = 100;
+		$page          = 1;
+		$total         = 0;
+		$resigned      = 0;
+		$backfilled    = 0;
+		$still_unbound = 0;
+
+		do {
+			$batch = $this->license_repo->get_list(
+				array(
+					'per_page' => $per_page,
+					'page'     => $page,
+					'orderby'  => 'id',
+					'order'    => 'ASC',
+				)
+			);
+			$rows    = is_array( $batch['items'] ?? null ) ? $batch['items'] : array();
+			$total   = (int) ( $batch['total'] ?? 0 );
+			$fetched = count( $rows );
+
+			foreach ( $rows as $license ) {
+				$plain = (string) $license->license_key; // hydrated = plaintext.
+				if ( '' === $plain ) {
+					continue;
+				}
+
+				$product_id = $license->product_id;
+				if ( null === $product_id && null !== $backfill_product_id && $backfill_product_id > 0 ) {
+					$product_id = $backfill_product_id;
+					++$backfilled;
+				}
+
+				if ( null === $product_id ) {
+					++$still_unbound;
+				}
+
+				$signature = $this->signer->sign(
+					$this->build_signing_payload(
+						$plain,
+						null !== $license->expires_at ? (string) $license->expires_at : null,
+						null !== $license->max_activations ? (int) $license->max_activations : null,
+						null !== $product_id ? (int) $product_id : null
+					)
+				);
+
+				$data = array( 'signature' => $signature );
+				if ( null !== $product_id && (int) $product_id !== (int) $license->product_id ) {
+					$data['product_id'] = (int) $product_id;
+				}
+
+				$this->license_repo->update( $license->id, $data );
+				++$resigned;
+			}
+
+			++$page;
+		} while ( $fetched === $per_page && $resigned < $total );
+
+		return array(
+			'total'         => $total,
+			'resigned'      => $resigned,
+			'backfilled'    => $backfilled,
+			'still_unbound' => $still_unbound,
+		);
 	}
 
 	/**

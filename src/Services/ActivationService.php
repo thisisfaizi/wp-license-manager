@@ -132,8 +132,16 @@ class ActivationService {
 		// 7. Existing machine for this license+fingerprint — idempotent reactivate.
 		$existing = $this->machine_repo->find_by_license_and_fingerprint( $license->id, $fp );
 		if ( $existing ) {
-			// 7a. Already active — idempotent, consumes no new seat.
+			// 7a. Already active — idempotent, consumes no new seat. Reconcile the
+			// license: an active device must mean an active license with a seat
+			// count that matches reality. This self-heals any earlier drift (e.g.
+			// a license left inactive / count 0 after an interrupted deactivate),
+			// so the app's "activate" always lands the license in the right state.
 			if ( $existing->is_active() ) {
+				$count = $this->license_repo->sync_activation_count( $license->id );
+				if ( $count > 0 && 1 !== $license->status && 6 !== $license->status ) {
+					$this->license_repo->update( $license->id, array( 'status' => 1 ) );
+				}
 				$this->log_repo->create(
 					array(
 						'license_id' => $license->id,
@@ -199,7 +207,14 @@ class ActivationService {
 					'app_version' => $meta['app_version'] ?? $existing->app_version,
 				)
 			);
-			$this->license_repo->increment_activation_count( $license->id );
+			$this->license_repo->sync_activation_count( $license->id );
+
+			// If the license was set inactive (status 2) when its last device was
+			// deactivated, bring it back to active now that a device is bound
+			// again — mirroring the fresh-activation path (step 13 below).
+			if ( 2 === $license->status ) {
+				$this->license_repo->update( $license->id, array( 'status' => 1 ) );
+			}
 
 			$reactivated = $this->machine_repo->find_by_id( $existing->id );
 			$this->log_repo->create(
@@ -265,8 +280,8 @@ class ActivationService {
 		$machine_id = $this->machine_repo->create( $machine_data );
 		$machine    = $this->machine_repo->find_by_id( $machine_id );
 
-		// 11. Increment seat count.
-		$this->license_repo->increment_activation_count( $license->id );
+		// 11. Recompute seat count from active machines (drift-proof).
+		$this->license_repo->sync_activation_count( $license->id );
 
 		// 12. First activation — set activated_at and potentially expires_at.
 		if ( null === $license->activated_at ) {
@@ -375,11 +390,11 @@ class ActivationService {
 		// 5. Deactivate the machine row.
 		$this->machine_repo->deactivate( $machine->id );
 
-		// 6. Decrement seat count.
-		$this->license_repo->decrement_activation_count( $license->id );
+		// 6. Recompute seat count from the remaining active machines (drift-proof).
+		$remaining = $this->license_repo->sync_activation_count( $license->id );
 
-		// 7. If seat count drops to zero and license is active, mark inactive.
-		if ( $license->activation_count - 1 <= 0 && 1 === $license->status ) {
+		// 7. If no active devices remain and the license is active, mark inactive.
+		if ( $remaining <= 0 && 1 === $license->status ) {
 			$this->license_repo->update( $license->id, array( 'status' => 2 ) );
 		}
 

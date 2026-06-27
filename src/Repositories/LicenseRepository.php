@@ -292,6 +292,39 @@ class LicenseRepository {
 		return $result !== false && $result > 0;
 	}
 
+	/**
+	 * Recompute activation_count from the actual number of ACTIVE machines and
+	 * store it. This is drift-proof: unlike increment/decrement it cannot leave
+	 * the seat count out of sync after an error, retry, or race.
+	 *
+	 * @param int $id License id.
+	 * @return int The reconciled active-device count.
+	 */
+	public function sync_activation_count( int $id ): int {
+		global $wpdb;
+
+		$machines = $wpdb->prefix . 'wplm_machines';
+		$licenses = $wpdb->prefix . 'wplm_licenses';
+
+		$count = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM `{$machines}` WHERE license_id = %d AND status = 1",
+				$id
+			)
+		);
+
+		$wpdb->query(
+			$wpdb->prepare(
+				"UPDATE `{$licenses}` SET activation_count = %d, updated_at = %s WHERE id = %d",
+				$count,
+				current_time( 'mysql' ),
+				$id
+			)
+		);
+
+		return $count;
+	}
+
 	// -------------------------------------------------------------------------
 	// Reporting
 	// -------------------------------------------------------------------------

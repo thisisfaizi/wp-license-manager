@@ -38,6 +38,7 @@ Sell licenses through WooCommerce, verify them offline in milliseconds, and mana
 - **AES-256-GCM** key encryption at rest
 - **Signed CRL** — revoke offline clients instantly
 - **Replay protection** — signed `iat` timestamp + monotonic time floor
+- **Product binding** — signed `pid` stops a key from working in another product
 - **HMAC-SHA256** device fingerprints
 
 </td>

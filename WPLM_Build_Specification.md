@@ -67,6 +67,20 @@ lifecycle hooks (created/renewed/payment-failed/cancelled) and applies the
 Added `wplm_plans`, `wplm_packages`; `wplm_webhooks` gained a `format` column.
 `wplm_subscription_notes` is present (the spec listed 14; shipped = 17).
 
+### A7 — Product binding in signed payload (extends §4 crypto, client SDKs)
+The Ed25519 signed license payload gained a `pid` (product id) field alongside
+`key`/`expires`/`max`/`iat`. `LicenseService::build_signing_payload()` is the
+single source of truth, used by `create()`, the `update()` re-sign path
+(`product_id` now also triggers a re-sign), and `resign_all()`. A new admin tool
+**Settings → Tools → Re-sign licenses (product binding)** re-signs every token and
+optionally backfills a product id onto keys that have none (generator/API/CSV
+keys sign `pid: null`). All four client SDKs (dart/python/php/js) enforce product
+binding: when configured with a product id, they reject any token whose signed
+`pid` differs (or is absent) with a `product_mismatch` / `WplmProductMismatch`
+error, **online and offline**, derived from the signed payload (not the unsigned
+`license` JSON). Configuring no product id opts out (backward compatible). The
+`/validate` endpoint is unchanged — no server-side product param was added.
+
 ---
 
 ## Project Identity

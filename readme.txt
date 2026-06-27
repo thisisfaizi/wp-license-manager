@@ -4,7 +4,7 @@ Tags: licensing, license key, woocommerce, software licensing, subscriptions
 Requires at least: 5.8
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 1.0.6
+Stable tag: 1.0.8
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -97,6 +97,16 @@ The signing private key, encryption key, and HMAC secrets are stored as non-auto
 
 == Changelog ==
 
+= 1.0.8 =
+* Fixed: device deactivation failed with a database error ("Unknown column 'deactivated_at'") because the `wplm_machines` table was missing that column — devices could not be deactivated and clients received a corrupted response. The column is now part of the schema and is added automatically to existing installs on upgrade.
+* Improved: REST responses are hardened so a database error can never leak into the JSON body (errors are suppressed on `wplm/v1` routes and still logged).
+
+= 1.0.7 =
+* New: product binding — each signed license now carries its product id (`pid`). Client SDKs configured with a product id reject any key issued for a different product, enforced online and offline. Includes a "Re-sign licenses" tool under Settings → Tools (with optional product-id backfill) to embed `pid` into existing keys.
+* Fixed: `validate` did not hash the device fingerprint before lookup, so an already-activated device was reported as needing activation. Validation now matches activated devices correctly.
+* Fixed: re-activating a device left the license inactive; the license is now reconciled to active whenever a device is bound.
+* Improved: seat counts are now recomputed from the actual active devices on every activate/deactivate, so the count can no longer drift after an error or retry.
+
 = 1.0.6 =
 * New: `[wplm_license_manager]` shortcode — a standalone, themeable front-end license portal where customers check status, see devices, and deactivate seats on any page (no WooCommerce account needed).
 * Changed: plan tiers are now labelled "License Types" throughout the admin and storefront (clearer wording; same underlying model).
@@ -124,6 +134,12 @@ The signing private key, encryption key, and HMAC secrets are stored as non-auto
 * Initial release: cryptographic licensing, device management, monitoring, revocation, native subscriptions, WooCommerce integration, and the full REST API.
 
 == Upgrade Notice ==
+
+= 1.0.8 =
+Fixes device deactivation (adds a missing database column, migrated automatically). Recommended for all installs. Visit any admin page once after upgrading to apply the migration.
+
+= 1.0.7 =
+Adds product binding so a key for one product cannot be used in another, plus important activation/validation fixes. Run Settings → Tools → Re-sign licenses after upgrading to embed product ids into existing keys.
 
 = 1.0.6 =
 Adds a front-end license self-service shortcode and full documentation.

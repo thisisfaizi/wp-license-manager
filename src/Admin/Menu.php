@@ -56,6 +56,7 @@ class Menu {
 		add_action( 'admin_post_wplm_tool_rebuild_crl', array( $this, 'handle_tool_rebuild_crl' ) );
 		add_action( 'admin_post_wplm_tool_purge_logs', array( $this, 'handle_tool_purge_logs' ) );
 		add_action( 'admin_post_wplm_tool_reroll_keypair', array( $this, 'handle_tool_reroll_keypair' ) );
+		add_action( 'admin_post_wplm_tool_resign_licenses', array( $this, 'handle_tool_resign_licenses' ) );
 	}
 
 	// -------------------------------------------------------------------------
@@ -264,6 +265,24 @@ class Menu {
 		}
 
 		$this->tool_redirect( 'keypair', 0, ! $ok );
+	}
+
+	/** Tools → Re-sign all licenses so each token carries its product-binding pid. */
+	public function handle_tool_resign_licenses(): void {
+		$this->verify_tool_request( 'wplm_tool_resign_licenses' );
+
+		// Nonce + capability verified in verify_tool_request() above.
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing
+		$backfill = isset( $_POST['backfill_product_id'] ) ? absint( wp_unslash( $_POST['backfill_product_id'] ) ) : 0;
+
+		try {
+			$result = $this->container->make( \WPLM\Services\LicenseService::class )
+				->resign_all( $backfill > 0 ? $backfill : null );
+			$this->tool_redirect( 'resign', (int) ( $result['resigned'] ?? 0 ) );
+		} catch ( \Throwable $e ) {
+			unset( $e );
+			$this->tool_redirect( 'resign', 0, true );
+		}
 	}
 
 	/** Register plugin settings via the Settings API. */

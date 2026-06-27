@@ -174,7 +174,8 @@ final class Plugin {
 				$c->make( Crypto\KeyVault::class ),
 				$c->make( Repositories\ActivationLogRepository::class ),
 				$c->make( Repositories\BlacklistRepository::class ),
-				$c->make( Repositories\MachineRepository::class )
+				$c->make( Repositories\MachineRepository::class ),
+				$c->make( Crypto\Fingerprint::class )
 			)
 		);
 		$this->container->bind(
