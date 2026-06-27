@@ -219,7 +219,7 @@ class MachineRepository {
 	}
 
 	/**
-	 * Deactivate a machine (status → 2).
+	 * Deactivate a machine (status → 2) and record the deactivation timestamp.
 	 *
 	 * @param int $id Machine row id.
 	 * @return bool
@@ -229,7 +229,34 @@ class MachineRepository {
 
 		$table  = $wpdb->prefix . 'wplm_machines';
 		$result = $wpdb->query(
-			$wpdb->prepare( "UPDATE `{$table}` SET status = 2 WHERE id = %d", $id )
+			$wpdb->prepare(
+				"UPDATE `{$table}` SET status = 2, deactivated_at = %s WHERE id = %d",
+				current_time( 'mysql' ),
+				$id
+			)
+		);
+
+		return $result !== false && $result > 0;
+	}
+
+	/**
+	 * Reactivate a previously deactivated machine (status → 1).
+	 *
+	 * Only transitions machines in status 2 (deactivated); revoked machines (3)
+	 * cannot be reactivated via this path.
+	 *
+	 * @param int $id Machine row id.
+	 * @return bool True when a row was updated.
+	 */
+	public function reactivate( int $id ): bool {
+		global $wpdb;
+
+		$table  = $wpdb->prefix . 'wplm_machines';
+		$result = $wpdb->query(
+			$wpdb->prepare(
+				"UPDATE `{$table}` SET status = 1, deactivated_at = NULL WHERE id = %d AND status = 2",
+				$id
+			)
 		);
 
 		return $result !== false && $result > 0;

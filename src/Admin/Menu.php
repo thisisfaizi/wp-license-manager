@@ -39,6 +39,9 @@ class Menu {
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_assets' ) );
 		add_action( 'admin_init', array( $this, 'init_settings' ) );
 		add_action( 'admin_post_wplm_save_license', array( $this, 'handle_save_license' ) );
+		add_action( 'wp_ajax_wplm_search_product', array( $this, 'handle_ajax_search_product' ) );
+		add_action( 'wp_ajax_wplm_search_order', array( $this, 'handle_ajax_search_order' ) );
+		add_action( 'wp_ajax_wplm_search_user', array( $this, 'handle_ajax_search_user' ) );
 		add_action( 'admin_post_wplm_save_generator', array( $this, 'handle_save_generator' ) );
 		add_action( 'admin_post_wplm_save_release', array( $this, 'handle_save_release' ) );
 		add_action( 'admin_post_wplm_save_webhook', array( $this, 'handle_save_webhook' ) );
@@ -270,7 +273,7 @@ class Menu {
 
 	/** Handle the save-license admin-post action. */
 	public function handle_save_license(): void {
-		check_admin_referer( 'wplm_save_license' );
+		check_admin_referer( 'wplm_save_license', 'wplm_license_nonce' );
 		if ( ! current_user_can( 'manage_options' ) ) {
 			wp_die( esc_html__( 'You do not have permission to do this.', 'wp-license-manager' ) );
 		}
@@ -297,6 +300,135 @@ class Menu {
 
 		wp_safe_redirect( admin_url( 'admin.php?page=wplm-licenses&saved=1' ) );
 		exit;
+	}
+
+	// -------------------------------------------------------------------------
+	// AJAX: searchable ID fields (product / order / user)
+	// -------------------------------------------------------------------------
+
+	/** AJAX handler: search WooCommerce products (or any post) by title. */
+	public function handle_ajax_search_product(): void {
+		check_ajax_referer( 'wplm_search_nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array(), 403 );
+		}
+
+		$q      = sanitize_text_field( wp_unslash( $_GET['q'] ?? '' ) );
+		$types  = array( 'product', 'product_variation' );
+		// Include non-WC post types as fallback.
+		if ( ! function_exists( 'wc_get_product' ) ) {
+			$types = array( 'post', 'page' );
+		}
+
+		$posts = get_posts(
+			array(
+				'post_type'      => $types,
+				'post_status'    => 'any',
+				's'              => $q,
+				'numberposts'    => 10,
+				'orderby'        => 'relevance',
+				'fields'         => 'ids',
+				'no_found_rows'  => true,
+			)
+		);
+
+		if ( ! is_array( $posts ) ) {
+			$posts = array();
+		}
+
+		$results = array_map(
+			static function ( $pid ) {
+				$title = get_the_title( (int) $pid );
+				return array(
+					'value' => (int) $pid,
+					'label' => sprintf( '#%d — %s', (int) $pid, $title ),
+				);
+			},
+			$posts
+		);
+
+		wp_send_json_success( $results );
+	}
+
+	/** AJAX handler: search WooCommerce orders by number, name, or email. */
+	public function handle_ajax_search_order(): void {
+		check_ajax_referer( 'wplm_search_nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array(), 403 );
+		}
+
+		$q = sanitize_text_field( wp_unslash( $_GET['q'] ?? '' ) );
+
+		$results = array();
+
+		if ( function_exists( 'wc_get_orders' ) ) {
+			$orders = wc_get_orders(
+				array(
+					'limit'  => 10,
+					'search' => $q,
+					'return' => 'objects',
+				)
+			);
+
+			if ( is_array( $orders ) ) {
+				foreach ( $orders as $order ) {
+					if ( ! $order instanceof \WC_Order ) {
+						continue;
+					}
+					$results[] = array(
+						'value' => $order->get_id(),
+						'label' => sprintf(
+							'#%d — %s (%s)',
+							$order->get_id(),
+							$order->get_formatted_billing_full_name(),
+							$order->get_billing_email()
+						),
+					);
+				}
+			}
+		} elseif ( is_numeric( $q ) ) {
+			// WooCommerce not active — allow searching by raw post ID.
+			$post = get_post( (int) $q );
+			if ( $post ) {
+				$results[] = array(
+					'value' => $post->ID,
+					'label' => sprintf( '#%d — %s', $post->ID, $post->post_title ?: $post->post_name ),
+				);
+			}
+		}
+
+		wp_send_json_success( $results );
+	}
+
+	/** AJAX handler: search WordPress users by name, username, or email. */
+	public function handle_ajax_search_user(): void {
+		check_ajax_referer( 'wplm_search_nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array(), 403 );
+		}
+
+		$q = sanitize_text_field( wp_unslash( $_GET['q'] ?? '' ) );
+
+		$users = get_users(
+			array(
+				'search'         => '*' . $q . '*',
+				'search_columns' => array( 'user_login', 'user_email', 'display_name', 'user_nicename' ),
+				'number'         => 10,
+				'orderby'        => 'display_name',
+			)
+		);
+
+		$results = array_map(
+			static function ( \WP_User $u ) {
+				return array(
+					'value' => $u->ID,
+					'label' => sprintf( '#%d — %s (%s)', $u->ID, $u->display_name, $u->user_email ),
+				);
+			},
+			$users
+		);
+
+		wp_send_json_success( $results );
 	}
 
 	/**
@@ -415,12 +547,33 @@ class Menu {
 			WPLM_VERSION
 		);
 
+		// jQuery UI Autocomplete (bundled with WordPress) + theme for the ID-search fields.
+		wp_enqueue_script( 'jquery-ui-autocomplete' );
+		wp_enqueue_style(
+			'wplm-jquery-ui',
+			'https://ajax.googleapis.com/ajax/libs/jqueryui/1.13.2/themes/smoothness/jquery-ui.css',
+			array(),
+			'1.13.2'
+		);
+
 		wp_enqueue_script(
 			'wplm-admin',
 			$base_url . 'assets/js/admin.js',
-			array( 'jquery' ),
+			array( 'jquery', 'jquery-ui-autocomplete' ),
 			WPLM_VERSION,
 			true
+		);
+
+		wp_localize_script(
+			'wplm-admin',
+			'wplmAdmin',
+			array(
+				'ajaxUrl'     => admin_url( 'admin-ajax.php' ),
+				'searchNonce' => wp_create_nonce( 'wplm_search_nonce' ),
+				'confirmText' => __( 'Are you sure?', 'wp-license-manager' ),
+				'copiedText'  => __( 'Copied!', 'wp-license-manager' ),
+				'rerollWarning' => __( 'Re-rolling the keypair will invalidate all previously signed license tokens. Are you sure?', 'wp-license-manager' ),
+			)
 		);
 	}
 

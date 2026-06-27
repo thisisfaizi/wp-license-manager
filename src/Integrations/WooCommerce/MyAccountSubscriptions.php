@@ -107,6 +107,13 @@ class MyAccountSubscriptions {
 				$at_end = ! empty( $_POST['at_period_end'] );
 				wplm_cancel_subscription( $sub_id, $at_end );
 				break;
+			case 'renew':
+				$pay_url = function_exists( 'wplm_start_renewal' ) ? wplm_start_renewal( $sub_id ) : false;
+				if ( false !== $pay_url ) {
+					wp_safe_redirect( $pay_url );
+					exit;
+				}
+				break;
 		}
 
 		wp_safe_redirect( wc_get_account_endpoint_url( 'wplm-subscriptions' ) );

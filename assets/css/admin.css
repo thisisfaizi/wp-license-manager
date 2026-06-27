@@ -93,6 +93,44 @@
 /* ── Product panel conditional fields ───────────────────────────────── */
 .wplm-license-conditional { display: none; }
 
+/* ── Device status badges ────────────────────────────────────────────── */
+.wplm-device-1 { background: #d1e7dd; color: #0f5132; }
+.wplm-device-2 { background: #e2e3e5; color: #41464b; }
+.wplm-device-3 { background: #f8d7da; color: #842029; }
+
+/* ── Searchable ID fields (license edit form) ────────────────────────── */
+.wplm-id-search {
+	position: relative;
+}
+
+/* Tighten the jQuery UI autocomplete list to match WP admin aesthetics */
+.ui-autocomplete {
+	max-height: 240px;
+	overflow-y: auto;
+	overflow-x: hidden;
+	font-size: 13px;
+	background: #fff;
+	border: 1px solid #c3c4c7;
+	border-radius: 0 0 4px 4px;
+	box-shadow: 0 3px 6px rgba(0,0,0,.12);
+	z-index: 99999;
+}
+
+.ui-autocomplete .ui-menu-item-wrapper {
+	padding: 6px 10px;
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.ui-autocomplete .ui-state-active,
+.ui-autocomplete .ui-menu-item-wrapper:hover {
+	background: #2271b1;
+	color: #fff;
+	border: none;
+}
+
 /* ── Settings page ───────────────────────────────────────────────────── */
 .wplm-settings-notice {
 	background: #f6f7f7;

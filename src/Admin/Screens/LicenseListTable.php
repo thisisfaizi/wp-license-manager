@@ -589,6 +589,40 @@ class LicenseListTable extends \WP_List_Table {
 		$current_max_act = $is_edit && $license && null !== $license->max_activations
 			? $license->max_activations
 			: get_option( 'wplm_default_max_activations', 1 );
+
+		// Resolve human-readable labels for searchable ID fields.
+		$current_product_id    = $is_edit && $license ? (int) ( $license->product_id ?? 0 ) : 0;
+		$current_product_label = '';
+		if ( $current_product_id > 0 ) {
+			$pt = get_the_title( $current_product_id );
+			if ( $pt ) {
+				$current_product_label = sprintf( '#%d — %s', $current_product_id, $pt );
+			} else {
+				$current_product_label = '#' . $current_product_id;
+			}
+		}
+
+		$current_order_id    = $is_edit && $license ? (int) ( $license->order_id ?? 0 ) : 0;
+		$current_order_label = '';
+		if ( $current_order_id > 0 ) {
+			if ( function_exists( 'wc_get_order' ) ) {
+				$o = wc_get_order( $current_order_id );
+				$current_order_label = $o
+					? sprintf( '#%d — %s', $current_order_id, $o->get_formatted_billing_full_name() )
+					: '#' . $current_order_id;
+			} else {
+				$current_order_label = '#' . $current_order_id;
+			}
+		}
+
+		$current_user_id    = $is_edit && $license ? (int) ( $license->user_id ?? 0 ) : 0;
+		$current_user_label = '';
+		if ( $current_user_id > 0 ) {
+			$u = get_userdata( $current_user_id );
+			$current_user_label = $u
+				? sprintf( '#%d — %s (%s)', $current_user_id, $u->display_name, $u->user_email )
+				: '#' . $current_user_id;
+		}
 		?>
 		<div class="wrap">
 			<h1><?php echo esc_html( $page_title ); ?></h1>
@@ -627,49 +661,61 @@ class LicenseListTable extends \WP_List_Table {
 
 						<tr>
 							<th scope="row">
-								<label for="wplm_product_id"><?php esc_html_e( 'Product ID', 'wp-license-manager' ); ?></label>
+								<label for="wplm_product_search"><?php esc_html_e( 'Product', 'wp-license-manager' ); ?></label>
 							</th>
 							<td>
 								<input
-									type="number"
-									id="wplm_product_id"
-									name="product_id"
-									value="<?php echo esc_attr( (string) ( $is_edit && $license ? ( $license->product_id ?? '' ) : '' ) ); ?>"
-									class="regular-text"
-									min="0"
+									type="text"
+									id="wplm_product_search"
+									class="wplm-id-search regular-text"
+									data-type="product"
+									data-hidden="wplm_product_id_val"
+									autocomplete="off"
+									value="<?php echo esc_attr( $current_product_label ); ?>"
+									placeholder="<?php esc_attr_e( 'Type to search products…', 'wp-license-manager' ); ?>"
 								>
+								<input type="hidden" id="wplm_product_id_val" name="product_id" value="<?php echo esc_attr( (string) $current_product_id ); ?>">
+								<p class="description"><?php esc_html_e( 'Search by name, or type the numeric ID directly and press Tab.', 'wp-license-manager' ); ?></p>
 							</td>
 						</tr>
 
 						<tr>
 							<th scope="row">
-								<label for="wplm_order_id"><?php esc_html_e( 'Order ID', 'wp-license-manager' ); ?></label>
+								<label for="wplm_order_search"><?php esc_html_e( 'Order', 'wp-license-manager' ); ?></label>
 							</th>
 							<td>
 								<input
-									type="number"
-									id="wplm_order_id"
-									name="order_id"
-									value="<?php echo esc_attr( (string) ( $is_edit && $license ? ( $license->order_id ?? '' ) : '' ) ); ?>"
-									class="regular-text"
-									min="0"
+									type="text"
+									id="wplm_order_search"
+									class="wplm-id-search regular-text"
+									data-type="order"
+									data-hidden="wplm_order_id_val"
+									autocomplete="off"
+									value="<?php echo esc_attr( $current_order_label ); ?>"
+									placeholder="<?php esc_attr_e( 'Type to search orders…', 'wp-license-manager' ); ?>"
 								>
+								<input type="hidden" id="wplm_order_id_val" name="order_id" value="<?php echo esc_attr( (string) $current_order_id ); ?>">
+								<p class="description"><?php esc_html_e( 'Search by order #, billing name, or email.', 'wp-license-manager' ); ?></p>
 							</td>
 						</tr>
 
 						<tr>
 							<th scope="row">
-								<label for="wplm_user_id"><?php esc_html_e( 'User ID', 'wp-license-manager' ); ?></label>
+								<label for="wplm_user_search"><?php esc_html_e( 'User', 'wp-license-manager' ); ?></label>
 							</th>
 							<td>
 								<input
-									type="number"
-									id="wplm_user_id"
-									name="user_id"
-									value="<?php echo esc_attr( (string) ( $is_edit && $license ? ( $license->user_id ?? '' ) : '' ) ); ?>"
-									class="regular-text"
-									min="0"
+									type="text"
+									id="wplm_user_search"
+									class="wplm-id-search regular-text"
+									data-type="user"
+									data-hidden="wplm_user_id_val"
+									autocomplete="off"
+									value="<?php echo esc_attr( $current_user_label ); ?>"
+									placeholder="<?php esc_attr_e( 'Type to search users…', 'wp-license-manager' ); ?>"
 								>
+								<input type="hidden" id="wplm_user_id_val" name="user_id" value="<?php echo esc_attr( (string) $current_user_id ); ?>">
+								<p class="description"><?php esc_html_e( 'Search by display name, username, or email.', 'wp-license-manager' ); ?></p>
 							</td>
 						</tr>
 

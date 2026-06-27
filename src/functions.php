@@ -678,6 +678,28 @@ if ( ! function_exists( 'wplm_blacklist_add' ) ) {
 	}
 }
 
+if ( ! function_exists( 'wplm_start_renewal' ) ) {
+	/**
+	 * Create a pending WooCommerce renewal order for the given subscription and
+	 * return the customer-facing pay-for-order URL.
+	 *
+	 * The same license key stays; expires_at is extended only after the order
+	 * reaches status `completed` (gateway payment_complete, or an admin manually
+	 * marking it completed for offline methods such as BACS/COD).
+	 *
+	 * @param int $sub_id Subscription row ID.
+	 * @return string|false Pay URL on success; false when WC is not active or the
+	 *                      subscription cannot be found.
+	 */
+	function wplm_start_renewal( int $sub_id ): string|false {
+		if ( ! class_exists( 'WooCommerce' ) ) {
+			return false;
+		}
+		$c = \WPLM\Plugin::get_instance()->container();
+		return $c->make( \WPLM\Integrations\WooCommerce\SelfServiceRenewal::class )->create_renewal_order( $sub_id );
+	}
+}
+
 if ( ! function_exists( 'wplm_generate_keys' ) ) {
 	/**
 	 * Generate a batch of unique license key strings from a generator configuration.

@@ -71,6 +71,36 @@ defined( 'ABSPATH' ) || exit;
 						<button type="submit" class="button"><?php esc_html_e( 'Resume', 'wp-license-manager' ); ?></button>
 					</form>
 				<?php endif; ?>
+
+				<?php
+				// Show Renew for any non-cancelled, non-on-hold subscription.
+				// The customer can renew early (extends from current expiry), or
+				// renew after expiry (extends from today).
+				if ( ! in_array( $sub->status, array( 'cancelled', 'on-hold' ), true ) ) :
+					$renew_price  = function_exists( 'wc_price' )
+						? wc_price( $sub->recurring_total, array( 'currency' => $sub->currency ) )
+						: number_format_i18n( (float) $sub->recurring_total, 2 );
+					$renew_period = ( (int) $sub->billing_interval > 1 )
+						? $sub->billing_interval . ' ' . $sub->billing_period
+						: $sub->billing_period;
+					?>
+					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline">
+						<input type="hidden" name="action" value="wplm_sub_action">
+						<input type="hidden" name="wplm_action" value="renew">
+						<input type="hidden" name="subscription_id" value="<?php echo esc_attr( $sub->id ); ?>">
+						<?php wp_nonce_field( 'wplm_sub_action_' . $sub->id ); ?>
+						<button type="submit" class="button">
+							<?php
+							printf(
+								/* translators: 1: price with currency, 2: billing period label */
+								esc_html__( 'Renew — %1$s / %2$s', 'wp-license-manager' ),
+								wp_kses_post( $renew_price ),
+								esc_html( $renew_period )
+							);
+							?>
+						</button>
+					</form>
+				<?php endif; ?>
 			</td>
 		</tr>
 		<?php endforeach; ?>

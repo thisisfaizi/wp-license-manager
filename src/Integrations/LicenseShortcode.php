@@ -17,10 +17,11 @@ defined( 'ABSPATH' ) || exit;
  */
 class LicenseShortcode {
 
-	/** Register the shortcode and its form handler. */
+	/** Register the shortcode and its form handlers. */
 	public function register(): void {
 		add_shortcode( 'wplm_license_manager', array( $this, 'render' ) );
 		add_action( 'admin_post_wplm_frontend_deactivate', array( $this, 'handle_deactivate' ) );
+		add_action( 'admin_post_wplm_frontend_reactivate', array( $this, 'handle_reactivate' ) );
 	}
 
 	/**
@@ -50,12 +51,24 @@ class LicenseShortcode {
 
 		// phpcs:disable WordPress.Security.NonceVerification.Recommended -- read-only flash notice only.
 		if ( isset( $_GET['wplm_done'] ) ) {
-			$code   = sanitize_key( wp_unslash( $_GET['wplm_done'] ) );
-			$notice = 'ok' === $code
-				? __( 'Device deactivated — the seat is now free.', 'wp-license-manager' )
-				: __( 'Could not deactivate that device. Please try again.', 'wp-license-manager' );
-			$colour = 'ok' === $code ? '#00a32a' : '#d63638';
-			$bg     = 'ok' === $code ? '#e6f4ea' : '#fcebea';
+			$code = sanitize_key( wp_unslash( $_GET['wplm_done'] ) );
+			switch ( $code ) {
+				case 'ok':
+					$notice = __( 'Device deactivated — the seat is now free.', 'wp-license-manager' );
+					$colour = '#00a32a';
+					$bg     = '#e6f4ea';
+					break;
+				case 'reactivated':
+					$notice = __( 'Device reactivated successfully.', 'wp-license-manager' );
+					$colour = '#00a32a';
+					$bg     = '#e6f4ea';
+					break;
+				default:
+					$notice = __( 'Action could not be completed. Please try again.', 'wp-license-manager' );
+					$colour = '#d63638';
+					$bg     = '#fcebea';
+					break;
+			}
 			echo '<p class="wplm-notice" style="padding:8px 12px;background:' . esc_attr( $bg )
 				. ';border:1px solid ' . esc_attr( $colour ) . ';border-radius:4px;">'
 				. esc_html( $notice ) . '</p>';
@@ -191,6 +204,8 @@ class LicenseShortcode {
 			echo '<td style="padding:8px 4px;text-align:right;">';
 			if ( 1 === (int) $device->status ) {
 				$this->render_deactivate_button( (int) $device->id );
+			} elseif ( 2 === (int) $device->status ) {
+				$this->render_reactivate_button( (int) $device->id );
 			} else {
 				echo '<small style="color:#999;">' . esc_html( $state ) . '</small>';
 			}
@@ -213,6 +228,25 @@ class LicenseShortcode {
 			<?php wp_nonce_field( 'wplm_frontend_deactivate_' . $machine_id ); ?>
 			<button type="submit" class="button" onclick="return confirm('<?php echo esc_js( __( 'Deactivate this device?', 'wp-license-manager' ) ); ?>');">
 				<?php esc_html_e( 'Deactivate', 'wp-license-manager' ); ?>
+			</button>
+		</form>
+		<?php
+	}
+
+	/**
+	 * Render the per-device Reactivate form (submits the machine id).
+	 *
+	 * @param int $machine_id Machine row id.
+	 * @return void
+	 */
+	private function render_reactivate_button( int $machine_id ): void {
+		?>
+		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline;">
+			<input type="hidden" name="action" value="wplm_frontend_reactivate">
+			<input type="hidden" name="machine_id" value="<?php echo esc_attr( (string) $machine_id ); ?>">
+			<?php wp_nonce_field( 'wplm_frontend_reactivate_' . $machine_id ); ?>
+			<button type="submit" class="button">
+				<?php esc_html_e( 'Reactivate', 'wp-license-manager' ); ?>
 			</button>
 		</form>
 		<?php
@@ -254,6 +288,52 @@ class LicenseShortcode {
 		$redirect = wp_get_referer() ?: home_url();
 		$redirect = remove_query_arg( array( 'wplm_done' ), $redirect );
 		$redirect = add_query_arg( array( 'wplm_done' => $ok ? 'ok' : 'fail' ), $redirect );
+
+		wp_safe_redirect( $redirect );
+		exit;
+	}
+
+	/**
+	 * Handle a front-end "reactivate device" submission.
+	 *
+	 * Re-enables a previously deactivated device and increments the seat count,
+	 * subject to the license's seat ceiling. Requires login and ownership.
+	 *
+	 * @return void
+	 */
+	public function handle_reactivate(): void {
+		$machine_id = isset( $_POST['machine_id'] ) ? absint( wp_unslash( $_POST['machine_id'] ) ) : 0;
+
+		check_admin_referer( 'wplm_frontend_reactivate_' . $machine_id );
+
+		$ok = $machine_id > 0 && is_user_logged_in() && $this->user_owns_machine( $machine_id, get_current_user_id() );
+		if ( $ok ) {
+			$c            = \WPLM\Plugin::get_instance()->container();
+			$machine_repo = $c->make( \WPLM\Repositories\MachineRepository::class );
+			$machine      = $machine_repo->find_by_id( $machine_id );
+
+			if ( $machine ) {
+				$license_repo = $c->make( \WPLM\Repositories\LicenseRepository::class );
+				$license      = $license_repo->find_by_id( $machine->license_id );
+
+				// Enforce seat ceiling before reactivating.
+				if ( $license && null !== $license->max_activations
+					&& $license->activation_count >= (int) $license->max_activations ) {
+					$ok = false;
+				} else {
+					$ok = $machine_repo->reactivate( $machine_id );
+					if ( $ok && $license ) {
+						$license_repo->increment_activation_count( $license->id );
+					}
+				}
+			} else {
+				$ok = false;
+			}
+		}
+
+		$redirect = wp_get_referer() ?: home_url();
+		$redirect = remove_query_arg( array( 'wplm_done' ), $redirect );
+		$redirect = add_query_arg( array( 'wplm_done' => $ok ? 'reactivated' : 'fail' ), $redirect );
 
 		wp_safe_redirect( $redirect );
 		exit;

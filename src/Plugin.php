@@ -281,6 +281,17 @@ final class Plugin {
 			)
 		);
 
+		// Self-service renewal (WooCommerce order → license extension).
+		$this->container->bind(
+			Integrations\WooCommerce\SelfServiceRenewal::class,
+			fn( $c ) => new Integrations\WooCommerce\SelfServiceRenewal(
+				$c->make( Services\LicenseService::class ),
+				$c->make( Repositories\SubscriptionRepository::class ),
+				$c->make( Repositories\RenewalRepository::class ),
+				$c->make( Services\Subscriptions\BillingScheduler::class )
+			)
+		);
+
 		// Admin.
 		$this->container->bind(
 			Admin\Menu::class,
@@ -376,6 +387,9 @@ final class Plugin {
 			$this->container->make( Services\LicenseService::class ),
 			$this->container->make( Services\Subscriptions\SubscriptionService::class )
 		) )->register();
+
+		// Customer self-service renewal: create order → pay → license extended on completed.
+		$this->container->make( Integrations\WooCommerce\SelfServiceRenewal::class )->register();
 	}
 
 	/**

@@ -1,5 +1,5 @@
 /* WP License Manager — Admin JavaScript */
-/* global jQuery */
+/* global jQuery, wplmAdmin */
 
 ( function ( $ ) {
 	'use strict';
@@ -43,6 +43,51 @@
 		if ( ! window.confirm( msg ) ) {
 			e.preventDefault();
 		}
+	} );
+
+	// ── License edit form: searchable ID fields (product / order / user) ─
+	$( '.wplm-id-search' ).each( function () {
+		var $txt    = $( this );
+		var type    = $txt.data( 'type' );
+		var $hidden = $( '#' + $txt.data( 'hidden' ) );
+
+		$txt.autocomplete( {
+			minLength: 2,
+			delay: 300,
+			source: function ( req, respond ) {
+				$.ajax( {
+					url:    wplmAdmin.ajaxUrl,
+					method: 'GET',
+					data: {
+						action: 'wplm_search_' + type,
+						nonce:  wplmAdmin.searchNonce,
+						q:      req.term
+					},
+					success: function ( res ) {
+						respond( res.success ? res.data : [] );
+					},
+					error: function () {
+						respond( [] );
+					}
+				} );
+			},
+			select: function ( _e, ui ) {
+				$txt.val( ui.item.label );
+				$hidden.val( ui.item.value );
+				return false;
+			},
+			change: function ( _e, ui ) {
+				if ( ! ui.item ) {
+					// If user typed a plain number, accept it as the ID directly.
+					var raw = $.trim( $txt.val() );
+					if ( /^\d+$/.test( raw ) ) {
+						$hidden.val( raw );
+					} else if ( raw === '' ) {
+						$hidden.val( '' );
+					}
+				}
+			}
+		} );
 	} );
 
 } )( jQuery );

@@ -154,6 +154,18 @@ class DeviceListTable extends \WP_List_Table {
 			);
 		}
 
+		if ( 2 === $status ) {
+			$react_url              = wp_nonce_url(
+				admin_url( 'admin.php?page=wplm-devices&action=reactivate&id=' . $id ),
+				'wplm_reactivate_device_' . $id
+			);
+			$actions['reactivate'] = sprintf(
+				'<a href="%s">%s</a>',
+				esc_url( $react_url ),
+				esc_html__( 'Reactivate', 'wp-license-manager' )
+			);
+		}
+
 		if ( 3 !== $status ) {
 			$revoke_url        = wp_nonce_url(
 				admin_url( 'admin.php?page=wplm-devices&action=revoke&id=' . $id ),
@@ -265,6 +277,20 @@ class DeviceListTable extends \WP_List_Table {
 			exit;
 		}
 
+		if ( 'reactivate' === $action && $id > 0 ) {
+			check_admin_referer( 'wplm_reactivate_device_' . $id );
+			if ( $this->repo->reactivate( $id ) ) {
+				// Mirror the seat increment on the parent license.
+				$machine = $this->repo->find_by_id( $id );
+				if ( $machine ) {
+					$c = \WPLM\Plugin::get_instance()->container();
+					$c->make( \WPLM\Repositories\LicenseRepository::class )->increment_activation_count( $machine->license_id );
+				}
+			}
+			wp_safe_redirect( admin_url( 'admin.php?page=wplm-devices&reactivated=1' ) );
+			exit;
+		}
+
 		if ( 'revoke' === $action && $id > 0 ) {
 			check_admin_referer( 'wplm_revoke_device_' . $id );
 			$this->repo->revoke( $id );
@@ -300,6 +326,11 @@ class DeviceListTable extends \WP_List_Table {
 			if ( ! empty( $_GET['deactivated'] ) ) :
 				?>
 				<div class="notice notice-success is-dismissible"><p><?php esc_html_e( 'Device(s) deactivated.', 'wp-license-manager' ); ?></p></div>
+				<?php
+			endif;
+			if ( ! empty( $_GET['reactivated'] ) ) :
+				?>
+				<div class="notice notice-success is-dismissible"><p><?php esc_html_e( 'Device reactivated.', 'wp-license-manager' ); ?></p></div>
 				<?php
 			endif;
 			if ( ! empty( $_GET['revoked'] ) ) :
