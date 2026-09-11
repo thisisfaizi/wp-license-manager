@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.2.1] — 2026-09-12
+
+### Fixed
+- **The zombie cull deactivated machines that were never floating.** `MachineRepository::create()` bound a null
+  `lease_expires_at` as `''`, which MySQL outside strict mode stores as `0000-00-00 00:00:00`. Every machine
+  therefore looked leased, and every licence with a heartbeat — floating or not — lost its machine 20 minutes
+  after the last one. Found on the live Super Ledger licence server: an office that checks in every 6 hours was
+  refused its next check-in with `machine_inactive`.
+  - `create()` now writes SQL `NULL` for every null value.
+  - The database upgrade to 1.2.1 clears the zero-date leases already stored.
+  - `Machine` reads a zero date as null, and the cull ignores one.
+- **An entitlement licence is never floating, and never culled.** It checks in with its own deadline
+  (`checkInBy`). Creating or updating a profile licence forces `is_floating` off, activation gives its machine
+  no lease even if an older row says floating, the cull skips profile licences, and the admin form hides the
+  Floating checkbox for them.
+
 ## [1.2.0] — Unreleased
 
 Entitlement licences: per-module and per-limit lines with their own paid-through dates, and a signed, machine-bound v2 token. Classic licences, their v1 tokens and every other product are unchanged.

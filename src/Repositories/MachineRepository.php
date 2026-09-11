@@ -139,19 +139,26 @@ class MachineRepository {
 
 		$table   = $wpdb->prefix . 'wplm_machines';
 		$columns = array_keys( $data );
-		$formats = array_fill( 0, count( $columns ), '%s' );
+		// A PHP null is a SQL NULL, never '%s': prepare() turns null into '', which MySQL outside strict mode
+		// stores in a DATETIME as 0000-00-00 00:00:00. That zero date made every machine look like it held a
+		// floating lease, so the zombie cull deactivated machines that were never floating.
+		$formats = array();
+		$values  = array();
+		foreach ( $data as $value ) {
+			if ( null === $value ) {
+				$formats[] = 'NULL';
+			} else {
+				$formats[] = '%s';
+				$values[]  = $value;
+			}
+		}
 
+		$col_list = implode( ', ', array_map( fn( $c ) => "`{$c}`", $columns ) );
+		$fmt_list = implode( ', ', $formats );
 		if ( null !== $ip ) {
-			$columns[] = 'ip_address';
-			// Build the column and placeholder lists.
-			$col_list = implode( ', ', array_map( fn( $c ) => "`{$c}`", $columns ) );
-			$fmt_list = implode( ', ', $formats ) . ', INET6_ATON(%s)';
-			$values   = array_values( $data );
-			$values[] = $ip;
-		} else {
-			$col_list = implode( ', ', array_map( fn( $c ) => "`{$c}`", $columns ) );
-			$fmt_list = implode( ', ', $formats );
-			$values   = array_values( $data );
+			$col_list .= ', `ip_address`';
+			$fmt_list .= ', INET6_ATON(%s)';
+			$values[]  = $ip;
 		}
 
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
@@ -377,6 +384,10 @@ class MachineRepository {
 	/**
 	 * Get active machines whose heartbeat has gone stale (potential zombies).
 	 *
+	 * Floating-licence leases only. A machine of an **entitlement licence** (one with a profile) is never
+	 * stale here: it checks in every few hours and its token carries its own deadline (`checkInBy`), so a
+	 * 20-minute cull would deactivate every office between two check-ins and refuse the next one.
+	 *
 	 * @param int $cutoff_timestamp Unix timestamp; machines last seen before this are stale.
 	 * @return Machine[]
 	 */
@@ -384,15 +395,19 @@ class MachineRepository {
 		global $wpdb;
 
 		$table      = $wpdb->prefix . 'wplm_machines';
+		$licenses   = $wpdb->prefix . 'wplm_licenses';
 		$cutoff_str = gmdate( 'Y-m-d H:i:s', $cutoff_timestamp );
 
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT *, INET6_NTOA(ip_address) AS ip_address FROM `{$table}`
-				 WHERE status = 1
-				   AND last_heartbeat_at IS NOT NULL
-				   AND last_heartbeat_at < %s
-				   AND lease_expires_at IS NOT NULL",
+				"SELECT m.*, INET6_NTOA(m.ip_address) AS ip_address FROM `{$table}` m
+				 JOIN `{$licenses}` l ON l.id = m.license_id
+				 WHERE m.status = 1
+				   AND m.last_heartbeat_at IS NOT NULL
+				   AND m.last_heartbeat_at < %s
+				   AND m.lease_expires_at IS NOT NULL
+				   AND m.lease_expires_at > '1000-01-01'
+				   AND ( l.profile IS NULL OR l.profile = '' )",
 				$cutoff_str
 			),
 			ARRAY_A

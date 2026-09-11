@@ -49,6 +49,21 @@ class Machine {
 		return strtotime( $this->lease_expires_at ) < time();
 	}
 
+	/**
+	 * A stored datetime, or null for NULL, empty, or MySQL's zero date. Rows written before 1.2.1 hold
+	 * 0000-00-00 00:00:00 where NULL was meant (see MachineRepository::create()); read as a real time it
+	 * made every machine look like it held a floating lease.
+	 *
+	 * @param mixed $value Column value.
+	 * @return string|null
+	 */
+	private static function datetime_or_null( $value ): ?string {
+		if ( null === $value || '' === $value || 0 === strpos( (string) $value, '0000-00-00' ) ) {
+			return null;
+		}
+		return (string) $value;
+	}
+
 	public static function from_row( array $row ): self {
 		$m                    = new self();
 		$m->id                = (int) ( $row['id'] ?? 0 );
@@ -59,8 +74,8 @@ class Machine {
 		$m->ip_address        = $row['ip_address'] ?? null;
 		$m->platform          = $row['platform'] ?? null;
 		$m->app_version       = $row['app_version'] ?? null;
-		$m->lease_expires_at  = $row['lease_expires_at'] ?? null;
-		$m->last_heartbeat_at = $row['last_heartbeat_at'] ?? null;
+		$m->lease_expires_at  = self::datetime_or_null( $row['lease_expires_at'] ?? null );
+		$m->last_heartbeat_at = self::datetime_or_null( $row['last_heartbeat_at'] ?? null );
 		$m->status            = (int) ( $row['status'] ?? 1 );
 		$m->activated_at      = $row['activated_at'] ?? '';
 		$m->created_at        = $row['created_at'] ?? '';

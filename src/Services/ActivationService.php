@@ -260,7 +260,9 @@ class ActivationService {
 
 		// 10. Build machine row data.
 		$lease_expires_at = null;
-		if ( $license->is_floating ) {
+		// Never for a profile licence, even one saved floating before that was refused: it checks in with its
+		// own deadline, and a lease would put its machine in the zombie cull.
+		if ( $license->is_floating && null === $license->profile ) {
 			$interval         = (int) apply_filters( 'wplm_heartbeat_interval', 600 );
 			$lease_expires_at = gmdate( 'Y-m-d H:i:s', time() + $interval );
 		}

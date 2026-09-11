@@ -848,6 +848,8 @@ class LicenseListTable extends \WP_List_Table {
 							</td>
 						</tr>
 
+						<?php // A profile licence checks in with its own deadline and is never floating (LicenseService). ?>
+						<?php if ( null === $profile ) : ?>
 						<tr>
 							<th scope="row"><?php esc_html_e( 'Floating License', 'wp-license-manager' ); ?></th>
 							<td>
@@ -863,6 +865,7 @@ class LicenseListTable extends \WP_List_Table {
 								</label>
 							</td>
 						</tr>
+						<?php endif; ?>
 
 						<?php if ( null === $profile ) : ?>
 						<tr>

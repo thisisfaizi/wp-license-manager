@@ -151,7 +151,8 @@ class LicenseService {
 			'grace_days'       => (int) ( $args['grace_days'] ?? 0 ),
 			'overage_strategy' => $args['overage_strategy'] ?? 'deny',
 			'source'           => isset( $args['source'] ) ? (int) $args['source'] : 2,
-			'is_floating'      => ! empty( $args['is_floating'] ) ? 1 : 0,
+			// A profile licence checks in with its own deadline; a floating lease would be culled between check-ins.
+			'is_floating'      => null === $profile && ! empty( $args['is_floating'] ) ? 1 : 0,
 			'created_by'       => isset( $args['created_by'] ) ? (int) $args['created_by'] : null,
 			'profile'          => $profile,
 		);
@@ -428,6 +429,9 @@ class LicenseService {
 			$update['profile'] = $this->checked_profile( $update['profile'] );
 		}
 		$will_be_profile = array_key_exists( 'profile', $update ) ? null !== $update['profile'] : null !== $current->profile;
+		if ( $will_be_profile && ( $current->is_floating || ! empty( $update['is_floating'] ) ) ) {
+			$update['is_floating'] = 0; // Never floating: see create().
+		}
 		if ( $will_be_profile ) {
 			if ( null !== $current->expires_at ) {
 				$update['expires_at'] = null;
