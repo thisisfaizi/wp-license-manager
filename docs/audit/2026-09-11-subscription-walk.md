@@ -56,7 +56,7 @@ Also confirmed for **F7**: on this machine MySQL `NOW()` returns Pakistan Standa
 
 ## Status
 
-**All of F1–F12 are fixed in 1.1.0.** Each has an integration test that failed first (`tests/integration/`). The behaviour changes are listed under *Changed* and *Upgrade notes* in `CHANGELOG.md`.
+**F1–F7 and F9–F12 are fixed in 1.1.0** (F8 is left as is, see below). Each has an integration test that failed first (`tests/integration/`). The behaviour changes are listed under *Changed* and *Upgrade notes* in `CHANGELOG.md`.
 
 Deliberately **not** changed:
 - **F8:** the unused engine toggle. Honouring a default-off setting would silently stop renewals on sites that never saved Settings.
