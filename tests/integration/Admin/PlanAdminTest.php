@@ -126,6 +126,24 @@ class PlanAdminTest extends TestCase {
 		$this->assertSame( array( 'Yearly' => array() ), $this->templates( $result['plan_id'] ) );
 	}
 
+	/** Prices are parsed exactly as the old save handler did: WooCommerce's decimal separator decides. */
+	public function test_a_classic_plan_price_follows_the_stores_decimal_separator(): void {
+		update_option( 'woocommerce_price_decimal_sep', ',' );
+		update_option( 'woocommerce_price_thousand_sep', '.' );
+
+		$result = $this->actions()->save_plan(
+			array(
+				'plan_name' => 'Karobar',
+				'packages'  => array( $this->package_row( 'Yearly', array(), array(), array( 'price' => '1234,50', 'signup_fee' => '10,25' ) ) ),
+			)
+		);
+
+		$package = $this->make( PlanService::class )->get( $result['plan_id'] )->packages[0];
+		$this->assertSame( (float) wc_format_decimal( '1234,50' ), (float) $package->price );
+		$this->assertSame( 1234.5, (float) $package->price );
+		$this->assertSame( 10.25, (float) $package->signup_fee );
+	}
+
 	public function test_an_unknown_profile_or_a_blank_name_is_refused(): void {
 		$this->assertFalse( $this->actions()->save_plan( array( 'plan_name' => 'X', 'plan_profile' => 'nope' ) )['ok'] );
 		$this->assertFalse( $this->actions()->save_plan( array( 'plan_name' => '  ' ) )['ok'] );
