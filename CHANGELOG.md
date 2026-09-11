@@ -6,6 +6,68 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.1.0] — Unreleased
+
+This release fixes billing and licensing correctness. The problems were found by running the real purchase → activate → renew paths on a live install ([docs/audit/2026-09-11-subscription-walk.md](docs/audit/2026-09-11-subscription-walk.md)). Every fix below has an integration test (`tests/`) that failed before it.
+
+### Changed — how access ends when a customer does not pay
+- **Billing never locks a licence by changing its status.**
+  - Access ends because the paid term runs out: a licence stays valid until `expires_at` + `grace_days`, then validates as `expired`.
+  - Suspending, revoking and terminating are owner actions only.
+- **A recurring plan licence now expires at the end of the paid period** (the trial end or the first `next_payment`), instead of never. Each renewal extends it (F1).
+- **Grace:** a new `wplm_default_grace_days` setting (default **7**) and a per-package **Grace (days)** field. New licences carry it.
+- **Dunning (F3):** the retry schedule (`wplm_dunning_schedule`, default 1, 3, 5 days = three retries) now actually runs.
+  - A declined charge keeps the subscription `active`, with the retry date as `next_payment`.
+  - After the last retry, the subscription goes `on-hold` and the customer is sent a renewal invoice.
+  - The licence is never suspended or revoked for a failed charge.
+- **Subscription → licence sync:**
+  - `active`/`trial` brings a pending, inactive or expired licence to active, but never lifts a suspension or revocation.
+  - `on-hold` changes nothing.
+  - `cancelled`/`expired` no longer revokes. The licence runs to the end of the paid period; a legacy perpetual licence is given that end date.
+- **Renewal payments use one rule** (`LicenseService::extend_term()`, `RenewalProcessor::apply_payment()`) for cron card charges and paid renewal orders alike:
+  - Paid before the end or inside grace → the new period continues from the old end.
+  - Paid after grace → a full period starts from the payment.
+  - `next_payment` follows the licence.
+
+### Added
+- **Manual renewal invoices (F2).**
+  - When a subscription without a stored card falls due, one pending renewal order per cycle is created and emailed to the customer as a WooCommerce customer invoice. Previously `wplm_subscription_manual_renewal_due` had no listener, and nothing happened.
+  - Invoices are tracked in `wplm_subscription_renewals` (`type = invoice`), so this works with and without HPOS.
+  - New action: `wplm_subscription_renewal_invoiced`.
+- New action: `wplm_license_term_extended`.
+- An admin notice when a signing, encryption or fingerprint secret is missing.
+- **An integration test suite** on real WordPress + WooCommerce (`wp-phpunit`); see `tests/README.md`.
+
+### Fixed
+- An expired licence stayed `expired` after a successful payment, so a paying customer was refused (F4).
+- Late cron renewals were counted from the old expiry, so the customer lost the late days (F5).
+- Self-service renewal did not re-sign the offline token, so offline clients kept the old expiry (F6).
+- **Dates (F7).**
+  - Due checks for subscriptions, heartbeats, API-key access and "expiring soon" used MySQL `NOW()` (the database server's time zone) against UTC values.
+  - Purchase and scheduler dates used site-local time as if it were UTC.
+  - On a server whose MySQL is not on UTC (for example Pakistan Standard Time), renewals came due hours early and floating-licence heartbeats were judged against the wrong clock.
+- A missing secret fataled every request, including wp-admin, so the Tools page that fixes it was unreachable (F9). Secrets now load on first use.
+- A fresh install had no key generator. A plan purchase issued no licence, only logged the failure, and still marked the order fulfilled (F10). Now:
+  - activation seeds a default generator;
+  - a failed fulfilment adds an order note and stays retryable (set the order to Processing or Completed again);
+  - a retry never issues a second licence for an item already issued.
+- The package editor had no "Valid for (days)" field, so saving a plan erased a one-time package's validity (F12).
+- Admin deactivation by machine id and zombie culling decremented the seat count instead of recomputing it. Deactivating an already inactive device is now a no-op.
+- The schema upgrade ran only on `admin_init`. It now also runs on REST and cron requests, so a licence server updated without anyone opening wp-admin still migrates.
+
+### Security
+- **Public `POST /wplm/v1/deactivate` accepted a bare `machine_id`**, letting anyone deactivate any customer's device by counting upward (F11). The route now requires `license_key`, and a `machine_id` must belong to that licence.
+
+### Requirements
+- **PHP 8.0+.** It was stated as 7.4, but the code already required 8.0.
+- DB version 1.1.0 (adds `packages.grace_days`).
+
+### Upgrade notes
+- **Subscriptions left `on-hold` by the old dunning, with a suspended licence, are not changed automatically.** Such a suspension can't be told apart from a manual one. After upgrading, review on-hold subscriptions: resume the subscription and reinstate the licence where appropriate.
+- **Existing recurring licences with no expiry stay perpetual** until either their next renewal payment (which starts timing them) or cancellation (which gives them the paid-through end date). An admin tool to backfill `expires_at` from `next_payment` can follow. It was left out deliberately: it would lock overdue customers the moment it runs.
+- **To lock a customer now, suspend the licence.** Pausing a subscription no longer does it.
+
+
 ## [1.0.8] — 2026-06-28
 
 ### Fixed

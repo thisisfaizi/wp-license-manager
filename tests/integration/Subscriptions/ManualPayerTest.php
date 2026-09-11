@@ -81,7 +81,7 @@ class ManualPayerTest extends TestCase {
 		$bought = $this->buy_monthly();
 		$this->set_row( 'subscriptions', $bought['subscription_id'], array( 'next_payment' => $this->utc( -HOUR_IN_SECONDS ) ) );
 
-		$mailer = reset_phpmailer_instance();
+		reset_phpmailer_instance();
 		$rp     = $this->make( RenewalProcessor::class );
 		$rp->process_due_renewals();
 		$rp->process_due_renewals();
@@ -90,7 +90,8 @@ class ManualPayerTest extends TestCase {
 		$this->assertCount( 1, $invoices, 'One renewal invoice per cycle, however often cron runs.' );
 		$this->assertSame( 'pending', $invoices[0]->get_status() );
 
-		$to = array();
+		$mailer = tests_retrieve_phpmailer_instance();
+		$to     = array();
 		foreach ( $mailer->mock_sent as $mail ) {
 			$to[] = $mail['to'][0][0] ?? '';
 		}

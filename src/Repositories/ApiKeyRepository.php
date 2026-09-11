@@ -128,7 +128,7 @@ class ApiKeyRepository {
 		$table  = $wpdb->prefix . 'wplm_api_keys';
 		$result = $wpdb->query(
 			$wpdb->prepare(
-				"UPDATE `{$table}` SET last_access_at = NOW() WHERE id = %d",
+				"UPDATE `{$table}` SET last_access_at = UTC_TIMESTAMP() WHERE id = %d",
 				$id
 			)
 		);

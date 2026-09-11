@@ -425,6 +425,7 @@ class Installer {
   max_activations INT DEFAULT NULL,
   overage_strategy VARCHAR(20) NOT NULL DEFAULT 'deny',
   valid_for_days INT DEFAULT NULL,
+  grace_days INT DEFAULT NULL,
   benefits TEXT DEFAULT NULL,
   sort_order INT NOT NULL DEFAULT 0,
   status TINYINT NOT NULL DEFAULT 1,

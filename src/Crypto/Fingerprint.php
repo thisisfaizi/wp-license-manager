@@ -21,11 +21,8 @@ defined( 'ABSPATH' ) || exit;
  */
 class Fingerprint {
 
-	private string $hmac_secret;
-
-	public function __construct() {
-		$this->hmac_secret = $this->load_secret();
-	}
+	/** Loaded on first use, so constructing the service never fails (audit F9). */
+	private ?string $hmac_secret = null;
 
 	/**
 	 * Hash a device fingerprint for storage.
@@ -34,6 +31,9 @@ class Fingerprint {
 	 * @return string 64-character lowercase hex HMAC-SHA256.
 	 */
 	public function hash( string $raw_fingerprint ): string {
+		if ( null === $this->hmac_secret ) {
+			$this->hmac_secret = $this->load_secret();
+		}
 		return hash_hmac( 'sha256', $raw_fingerprint, $this->hmac_secret );
 	}
 

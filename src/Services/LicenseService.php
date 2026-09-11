@@ -442,11 +442,88 @@ class LicenseService {
 			}
 		}
 
+		// A licence that validation marked expired comes back when its expiry moves into the
+		// future — a customer who has paid must not keep getting "expired" (audit F4). Only the
+		// automatic "expired" status is lifted; suspended/revoked/terminated are the owner's.
+		$revived = false;
+		if ( 3 === $current->status && ! array_key_exists( 'status', $update ) && $expires_changed ) {
+			$probe             = clone $current;
+			$probe->expires_at = null !== $update['expires_at'] ? (string) $update['expires_at'] : null;
+			if ( array_key_exists( 'grace_days', $update ) ) {
+				$probe->grace_days = (int) $update['grace_days'];
+			}
+			if ( $probe->is_within_expiry() ) {
+				$update['status'] = 1;
+				$revived          = true;
+			}
+		}
+
 		if ( empty( $update ) ) {
 			return false;
 		}
 
-		return $this->license_repo->update( $id, $update );
+		$ok = $this->license_repo->update( $id, $update );
+
+		if ( $ok && $revived ) {
+			/** This action is documented in LicenseService::change_status(). */
+			do_action( 'wplm_license_status_changed', $current, 3, 1 );
+		}
+
+		return $ok;
+	}
+
+	/**
+	 * Extend a licence by one billing period for a payment received now.
+	 *
+	 * The single rule every renewal path uses (cron card charges, paid renewal invoices,
+	 * self-service renewals):
+	 *
+	 * - Paid before the end, or inside grace → the new period starts at the old end, so the
+	 *   customer neither loses days nor gains free grace days every month.
+	 * - Paid after grace (the licence had lapsed) → a full period starts now; the lapsed days
+	 *   are not billed.
+	 * - A licence with no expiry (legacy perpetual rows bound to a subscription) starts timing now.
+	 *
+	 * The offline token is re-signed and an automatic "expired" status is lifted; a manual
+	 * suspension, revocation or termination is never changed here.
+	 *
+	 * @param int      $id            Licence id.
+	 * @param string   $interval_spec ISO-8601 interval, e.g. "P1M".
+	 * @param int|null $now           Unix time of the payment (defaults to now).
+	 * @return string|null The new expiry (UTC MySQL datetime), or null when the licence is missing.
+	 */
+	public function extend_term( int $id, string $interval_spec, ?int $now = null ): ?string {
+		$license = $this->license_repo->find_by_id( $id );
+		if ( null === $license ) {
+			return null;
+		}
+
+		$now  = $now ?? time();
+		$base = $now;
+		if ( null !== $license->expires_at ) {
+			$end       = strtotime( $license->expires_at . ' UTC' );
+			$grace_end = $end + ( $license->grace_days * DAY_IN_SECONDS );
+			if ( $now <= $grace_end ) {
+				$base = $end;
+			}
+		}
+
+		$dt = ( new \DateTimeImmutable( '@' . $base ) )->setTimezone( new \DateTimeZone( 'UTC' ) );
+		$dt = $dt->add( new \DateInterval( $interval_spec ) );
+
+		$new_expiry = $dt->format( 'Y-m-d H:i:s' );
+		$this->update( $id, array( 'expires_at' => $new_expiry ) );
+
+		/**
+		 * Fires after a licence term has been extended by a payment.
+		 *
+		 * @param int    $id         Licence id.
+		 * @param string $new_expiry New expiry (UTC).
+		 * @param string|null $old_expiry Previous expiry (UTC), null when perpetual.
+		 */
+		do_action( 'wplm_license_term_extended', $id, $new_expiry, $license->expires_at );
+
+		return $new_expiry;
 	}
 
 	/**
@@ -473,26 +550,19 @@ class LicenseService {
 			return false;
 		}
 
-		$old_status = $license->status;
+		// Through update() so the offline token is re-signed with the new expiry (audit F6)
+		// and an automatic "expired" status is lifted. An explicit admin/API renewal also
+		// reactivates an inactive or pending licence, as before — but never a suspended,
+		// revoked or terminated one: those are lifted only by reinstate.
+		$this->update( $license->id, array( 'expires_at' => $new_expires_at ) );
 
-		$this->license_repo->update(
-			$license->id,
-			array(
-				'expires_at' => $new_expires_at,
-				'status'     => 1,
-			)
-		);
+		$reloaded = $this->license_repo->find_by_id( $license->id );
+		if ( null !== $reloaded && in_array( $reloaded->status, array( 0, 2 ), true ) ) {
+			$this->change_status( $license->id, 1 );
+			$reloaded = $this->license_repo->find_by_id( $license->id );
+		}
 
-		/**
-		 * Fires when a license status changes due to renewal.
-		 *
-		 * @param License $license    The license model (pre-update snapshot).
-		 * @param int     $old_status Previous status code.
-		 * @param int     $new_status New status code (1 = active).
-		 */
-		do_action( 'wplm_license_status_changed', $license, $old_status, 1 );
-
-		return $this->license_repo->find_by_id( $license->id );
+		return $reloaded;
 	}
 
 	/**

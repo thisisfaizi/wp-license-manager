@@ -187,6 +187,7 @@ class PlanService {
 			'max_activations'  => isset( $pkg['max_activations'] ) && '' !== $pkg['max_activations'] ? (int) $pkg['max_activations'] : null,
 			'overage_strategy' => (string) ( $pkg['overage_strategy'] ?? 'deny' ),
 			'valid_for_days'   => isset( $pkg['valid_for_days'] ) && '' !== $pkg['valid_for_days'] ? (int) $pkg['valid_for_days'] : null,
+			'grace_days'       => isset( $pkg['grace_days'] ) && '' !== $pkg['grace_days'] ? max( 0, (int) $pkg['grace_days'] ) : null,
 			'benefits'         => array_values( (array) $benefits ),
 			'sort_order'       => $order,
 			'status'           => isset( $pkg['status'] ) ? (int) $pkg['status'] : 1,

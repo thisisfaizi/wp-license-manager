@@ -31,6 +31,51 @@ class Seeder {
 
 		// Default settings.
 		$this->seed_default_options();
+
+		// A plan purchase needs a key generator; a fresh install had none (audit F10).
+		$this->maybe_create_default_generator();
+	}
+
+	/**
+	 * Guarantee `wplm_default_generator_id` names an existing generator.
+	 *
+	 * Reuses an existing generator when there is one, so re-activation never adds rows.
+	 */
+	private function maybe_create_default_generator(): void {
+		global $wpdb;
+		$table = $wpdb->prefix . 'wplm_generators';
+
+		if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
+			return; // Installer has not created the tables yet.
+		}
+
+		$current = (int) get_option( 'wplm_default_generator_id', 0 );
+		if ( $current > 0 && null !== $wpdb->get_var( $wpdb->prepare( "SELECT id FROM `{$table}` WHERE id = %d", $current ) ) ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			return;
+		}
+
+		$existing = (int) $wpdb->get_var( "SELECT MIN(id) FROM `{$table}`" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( $existing > 0 ) {
+			update_option( 'wplm_default_generator_id', $existing );
+			return;
+		}
+
+		$inserted = $wpdb->insert(
+			$table,
+			array(
+				'name'         => 'Default',
+				'charset'      => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789',
+				'chunks'       => 4,
+				'chunk_length' => 4,
+				'separator'    => '-',
+				'prefix'       => '',
+				'suffix'       => '',
+				'created_at'   => current_time( 'mysql', true ),
+			)
+		);
+		if ( $inserted ) {
+			update_option( 'wplm_default_generator_id', (int) $wpdb->insert_id );
+		}
 	}
 
 	// -------------------------------------------------------------------------
@@ -109,6 +154,7 @@ class Seeder {
 		$defaults = array(
 			'wplm_default_max_activations'  => 1,
 			'wplm_default_overage_strategy' => 'deny',
+			'wplm_default_grace_days'       => 7,
 			'wplm_heartbeat_interval'       => 600,
 			'wplm_zombie_window'            => 1200,
 			'wplm_telemetry_retention_days' => 90,

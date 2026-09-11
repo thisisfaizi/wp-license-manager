@@ -344,7 +344,7 @@ class LicenseRepository {
 			$wpdb->prepare(
 				"SELECT COUNT(*) FROM `{$table}`
 				 WHERE status = 1
-				   AND expires_at BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL %d DAY)",
+				   AND expires_at BETWEEN UTC_TIMESTAMP() AND DATE_ADD(UTC_TIMESTAMP(), INTERVAL %d DAY)",
 				$days
 			)
 		);

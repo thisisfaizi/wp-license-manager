@@ -80,13 +80,14 @@ class CardDunningTest extends TestCase {
 	public function test_exhausted_retries_invoice_the_customer_and_lock_nothing(): void {
 		$b  = $this->card_customer_with_due_renewal();
 		$rp = $this->make( RenewalProcessor::class );
-		for ( $i = 0; $i < 3; $i++ ) {
+		// The first attempt plus the three scheduled retries (1, 3, 5 days) all fail.
+		for ( $i = 0; $i < 4; $i++ ) {
 			$rp->process_due_renewals();
 			$this->make_retry_due( $b['subscription_id'] );
 		}
 
 		$sub = $this->subscription_row( $b['subscription_id'] );
-		$this->assertSame( 3, (int) $sub['failed_attempts'] );
+		$this->assertSame( 4, (int) $sub['failed_attempts'] );
 		$this->assertSame( 'on-hold', $sub['status'], 'Awaiting a manual payment.' );
 		$this->assertNotEmpty( array_filter( $this->renewal_orders( $b['subscription_id'] ), static fn( $o ) => '1' === $o->get_meta( '_wplm_is_renewal' ) && 'pending' === $o->get_status() ) );
 

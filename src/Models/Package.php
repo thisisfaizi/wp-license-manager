@@ -35,11 +35,24 @@ class Package {
 	public ?int $max_activations    = null;
 	public string $overage_strategy = 'deny';
 	public ?int $valid_for_days     = null;
+	/** Days an unpaid licence keeps working after its paid term; null = the site default. */
+	public ?int $grace_days = null;
 	/** @var string[] */
 	public array $benefits    = array();
 	public int $sort_order    = 0;
 	public int $status        = 1;
 	public string $created_at = '';
+
+	/** Default grace when neither the package nor the setting says otherwise. */
+	public const DEFAULT_GRACE_DAYS = 7;
+
+	/** The grace this package's licences get: its own, else the `wplm_default_grace_days` setting. */
+	public function effective_grace_days(): int {
+		if ( null !== $this->grace_days ) {
+			return max( 0, $this->grace_days );
+		}
+		return max( 0, (int) get_option( 'wplm_default_grace_days', self::DEFAULT_GRACE_DAYS ) );
+	}
 
 	/**
 	 * Hydrate a Package from a database row.
@@ -63,6 +76,7 @@ class Package {
 		$pkg->max_activations  = isset( $row['max_activations'] ) && '' !== $row['max_activations'] ? (int) $row['max_activations'] : null;
 		$pkg->overage_strategy = (string) ( $row['overage_strategy'] ?? 'deny' );
 		$pkg->valid_for_days   = isset( $row['valid_for_days'] ) && '' !== $row['valid_for_days'] ? (int) $row['valid_for_days'] : null;
+		$pkg->grace_days       = isset( $row['grace_days'] ) && '' !== $row['grace_days'] ? (int) $row['grace_days'] : null;
 		$pkg->benefits         = self::decode_benefits( $row['benefits'] ?? null );
 		$pkg->sort_order       = (int) ( $row['sort_order'] ?? 0 );
 		$pkg->status           = (int) ( $row['status'] ?? 1 );
@@ -119,6 +133,7 @@ class Package {
 			'max_activations'  => $this->max_activations,
 			'overage_strategy' => $this->overage_strategy,
 			'valid_for_days'   => $this->valid_for_days,
+			'grace_days'       => $this->grace_days,
 			'benefits'         => $this->benefits,
 			'sort_order'       => $this->sort_order,
 			'status'           => $this->status,

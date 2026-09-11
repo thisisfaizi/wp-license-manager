@@ -203,7 +203,8 @@ class SubscriptionService {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Pause a subscription (put it on-hold) and suspend its bound license.
+	 * Pause a subscription (put it on-hold). The bound licence is not locked: it keeps
+	 * working until its paid term + grace runs out. To lock a customer, suspend the licence.
 	 *
 	 * Only subscriptions with status 'active' or 'trial' may be paused.
 	 *
@@ -262,7 +263,8 @@ class SubscriptionService {
 	 * @param int  $id             Subscription row id.
 	 * @param bool $at_period_end  When true, sets status to 'pending-cancel' (license
 	 *                             stays active until end_date). When false, immediately
-	 *                             sets status to 'cancelled' and revokes the license.
+	 *                             sets status to 'cancelled'. The licence runs to the end of the paid
+	 *                             period (a legacy perpetual licence gets that end date).
 	 * @return bool True on success.
 	 * @throws \RuntimeException When the subscription does not exist.
 	 */
@@ -275,7 +277,7 @@ class SubscriptionService {
 			$this->update_status( $id, 'cancelled' );
 
 			/**
-			 * Fires after a subscription is immediately cancelled and the license revoked.
+			 * Fires after a subscription is immediately cancelled.
 			 *
 			 * @param Subscription $sub The cancelled subscription.
 			 */
@@ -288,11 +290,12 @@ class SubscriptionService {
 	/**
 	 * Update a subscription's status and sync the bound license accordingly.
 	 *
-	 * Licence sync map (spec Table 9.2):
-	 *   active / trial     → license status 1 (active)
-	 *   on-hold            → license status 4 (suspended)
-	 *   pending-cancel     → license stays active (no change)
-	 *   cancelled / expired → license status 5 (revoked)
+	 * Licence sync map (revised for audit F3/F4 — billing never locks by status):
+	 *   active / trial      → pending, inactive or expired licence → 1 (active), if its term is current;
+	 *                         a suspended, revoked or terminated licence is left alone
+	 *   on-hold             → no change (the licence lapses at expires_at + grace)
+	 *   pending-cancel      → no change
+	 *   cancelled / expired → no status change; a perpetual licence gets expires_at = paid-through
 	 *
 	 * @param int    $id     Subscription row id.
 	 * @param string $status New status string.
@@ -305,26 +308,39 @@ class SubscriptionService {
 
 		$this->sub_repo->update_status( $id, $status );
 
-		// Sync license status.
+		// Sync the licence. Billing never locks a licence by changing its status: access ends
+		// because the paid term (expires_at + grace) runs out, and only an owner action
+		// (suspend, revoke, terminate, refund) changes status. Audit F3/F4; Super Ledger D7.
 		if ( null !== $sub->license_id ) {
-			switch ( $status ) {
-				case 'active':
-				case 'trial':
-					$this->license_service->change_status( $sub->license_id, self::LICENSE_STATUS_ACTIVE );
-					break;
+			$license = $this->license_service->get_by_id( $sub->license_id );
 
-				case 'on-hold':
-					$this->license_service->change_status( $sub->license_id, self::LICENSE_STATUS_SUSPENDED );
-					break;
+			if ( null !== $license ) {
+				switch ( $status ) {
+					case 'active':
+					case 'trial':
+						// Bring a pending/inactive/expired licence to active; never lift a manual lock.
+						if ( in_array( $license->status, array( 0, 2, 3 ), true ) && $license->is_within_expiry() ) {
+							$this->license_service->change_status( $sub->license_id, self::LICENSE_STATUS_ACTIVE );
+						}
+						break;
 
-				case 'pending-cancel':
-					// License stays active until end_date; no change now.
-					break;
+					case 'cancelled':
+					case 'expired':
+						// A legacy perpetual licence bound to this subscription ends with the paid
+						// period instead of living forever; a timed licence simply runs out.
+						if ( null === $license->expires_at ) {
+							$paid_until = ( null !== $sub->next_payment && strtotime( $sub->next_payment . ' UTC' ) > time() )
+								? $sub->next_payment
+								: gmdate( 'Y-m-d H:i:s' );
+							$this->license_service->update( $sub->license_id, array( 'expires_at' => $paid_until ) );
+						}
+						break;
 
-				case 'cancelled':
-				case 'expired':
-					$this->license_service->change_status( $sub->license_id, self::LICENSE_STATUS_REVOKED );
-					break;
+					case 'on-hold':
+					case 'pending-cancel':
+					default:
+						break;
+				}
 			}
 		}
 

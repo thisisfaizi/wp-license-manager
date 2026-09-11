@@ -145,7 +145,7 @@ class HeartbeatService {
 
 		foreach ( $stale as $m ) {
 			$this->machine_repo->deactivate( $m->id );
-			$this->license_repo->decrement_activation_count( $m->license_id );
+			$this->license_repo->sync_activation_count( $m->license_id );
 
 			$this->log_repo->create(
 				array(

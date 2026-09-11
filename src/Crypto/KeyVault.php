@@ -28,10 +28,15 @@ class KeyVault {
 	private const ALG_AES_256_GCM = "\x01";
 	private const ALG_XCHACHA20   = "\x02";
 
-	private string $key;
+	/** Loaded on first use, so constructing the vault never fails (audit F9). */
+	private ?string $key = null;
 
-	public function __construct() {
-		$this->key = $this->load_key();
+	/** The 256-bit key; throws when it is missing. */
+	private function key(): string {
+		if ( null === $this->key ) {
+			$this->key = $this->load_key();
+		}
+		return $this->key;
 	}
 
 	/**
@@ -45,7 +50,7 @@ class KeyVault {
 	 */
 	public function encrypt( string $plaintext ): string {
 		$nonce      = random_bytes( SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES );
-		$ciphertext = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt( $plaintext, '', $nonce, $this->key );
+		$ciphertext = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt( $plaintext, '', $nonce, $this->key() );
 
 		return base64_encode( self::ALG_XCHACHA20 . $nonce . $ciphertext );
 	}
@@ -73,12 +78,12 @@ class KeyVault {
 			$nonce_len = SODIUM_CRYPTO_AEAD_AES256GCM_NPUBBYTES;
 			$nonce     = substr( $body, 0, $nonce_len );
 			$ct        = substr( $body, $nonce_len );
-			$plaintext = sodium_crypto_aead_aes256gcm_decrypt( $ct, '', $nonce, $this->key );
+			$plaintext = sodium_crypto_aead_aes256gcm_decrypt( $ct, '', $nonce, $this->key() );
 		} elseif ( self::ALG_XCHACHA20 === $alg ) {
 			$nonce_len = SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES;
 			$nonce     = substr( $body, 0, $nonce_len );
 			$ct        = substr( $body, $nonce_len );
-			$plaintext = sodium_crypto_aead_xchacha20poly1305_ietf_decrypt( $ct, '', $nonce, $this->key );
+			$plaintext = sodium_crypto_aead_xchacha20poly1305_ietf_decrypt( $ct, '', $nonce, $this->key() );
 		} else {
 			throw new \RuntimeException( 'WPLM KeyVault: unrecognised ciphertext algorithm marker.' );
 		}

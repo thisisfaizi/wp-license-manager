@@ -21,7 +21,7 @@ defined( 'ABSPATH' ) || exit;
  * Processes all subscriptions that are due for renewal.
  *
  * Called from Cron\Scheduler on the `wplm_process_renewals` hook (hourly).
- * Each subscription whose next_payment ≤ NOW() and status ∈ {active, trial}
+ * Each subscription whose next_payment ≤ now (UTC_TIMESTAMP(), whatever the MySQL time zone) and status ∈ {active, trial}
  * is processed individually in a try/catch so one failure does not block the
  * rest of the batch.
  */
@@ -45,6 +45,9 @@ class RenewalProcessor {
 	/** @var BillingScheduler */
 	private BillingScheduler $scheduler;
 
+	/** @var SubscriptionService */
+	private SubscriptionService $sub_service;
+
 	/**
 	 * @param SubscriptionRepository $sub_repo        Subscription data-access layer.
 	 * @param RenewalRepository      $renewal_repo    Renewal data-access layer.
@@ -52,6 +55,7 @@ class RenewalProcessor {
 	 * @param DunningManager         $dunning         Failed-payment retry handler.
 	 * @param LicenseService         $license_service License lifecycle service.
 	 * @param BillingScheduler       $scheduler       Next-payment date computation.
+	 * @param SubscriptionService    $sub_service     Subscription lifecycle service.
 	 */
 	public function __construct(
 		SubscriptionRepository $sub_repo,
@@ -59,7 +63,8 @@ class RenewalProcessor {
 		GatewayBridge $gateway,
 		DunningManager $dunning,
 		LicenseService $license_service,
-		BillingScheduler $scheduler
+		BillingScheduler $scheduler,
+		SubscriptionService $sub_service
 	) {
 		$this->sub_repo        = $sub_repo;
 		$this->renewal_repo    = $renewal_repo;
@@ -67,6 +72,7 @@ class RenewalProcessor {
 		$this->dunning         = $dunning;
 		$this->license_service = $license_service;
 		$this->scheduler       = $scheduler;
+		$this->sub_service     = $sub_service;
 	}
 
 	// -------------------------------------------------------------------------
@@ -109,10 +115,10 @@ class RenewalProcessor {
 	 * Process a single due subscription.
 	 *
 	 * Flow:
-	 *   1. No payment token → send manual renewal invoice and return early.
+	 *   1. No payment token → the customer pays by hand: fire the manual-renewal action
+	 *      (the WooCommerce integration issues and emails one renewal invoice per cycle).
 	 *   2. Token present → charge via GatewayBridge.
-	 *   3. Success → record renewal, advance next_payment, update last_payment,
-	 *      extend license expiry, fire wplm_subscription_renewed.
+	 *   3. Success → record the renewal and apply the payment (see apply_payment()).
 	 *   4. Failure → hand off to DunningManager.
 	 *
 	 * @param Subscription $sub Subscription to process.
@@ -122,8 +128,9 @@ class RenewalProcessor {
 		// No token stored — fall back to manual invoice flow.
 		if ( null === $sub->payment_token_id ) {
 			/**
-			 * Fires when a subscription has no stored payment token and a manual
-			 * renewal invoice should be emailed to the customer.
+			 * Fires when a subscription with no stored payment token is due, or when every card
+			 * retry has failed. Fires on every cron run while the cycle is unpaid; listeners must
+			 * be idempotent per cycle.
 			 *
 			 * @param Subscription $sub The subscription awaiting manual renewal.
 			 */
@@ -147,70 +154,16 @@ class RenewalProcessor {
 
 		// --- Success path ---
 
-		// (a) Create a stub WooCommerce renewal order (extensible via filter).
 		/**
 		 * Filter: create a WooCommerce renewal order for this subscription charge.
 		 *
-		 * Third-party code (e.g. the WooCommerce integration) should hook here
-		 * to create an actual WC_Order and return its integer id.
-		 *
-		 * @param int          $order_id        Default 0 (no WC order created).
-		 * @param Subscription $sub             The subscription being renewed.
+		 * @param int          $order_id Default 0 (no WC order created).
+		 * @param Subscription $sub      The subscription being renewed.
 		 */
 		$order_id = (int) apply_filters( 'wplm_create_renewal_order', 0, $sub );
 
-		// (b) Write the renewal record.
-		$renewal_id = $this->renewal_repo->create(
-			array(
-				'subscription_id' => $sub->id,
-				'order_id'        => $order_id > 0 ? $order_id : null,
-				'type'            => 'renewal',
-				'amount'          => $sub->recurring_total,
-				'status'          => 'success',
-				'gateway_txn'     => $result['txn'] ?? '',
-				'scheduled_for'   => $sub->next_payment ?? current_time( 'mysql' ),
-				'processed_at'    => current_time( 'mysql' ),
-				'created_at'      => current_time( 'mysql' ),
-			)
-		);
+		$renewal = $this->apply_payment( $sub, $order_id > 0 ? $order_id : null, $sub->recurring_total, (string) ( $result['txn'] ?? '' ) );
 
-		// Load the renewal model for the fired action.
-		$renewal_rows = $this->renewal_repo->get_by_subscription( $sub->id );
-		$renewal      = null;
-		foreach ( $renewal_rows as $row ) {
-			if ( $row->id === $renewal_id ) {
-				$renewal = $row;
-				break;
-			}
-		}
-		// Fallback: construct a minimal Renewal object if we can't find it.
-		if ( null === $renewal ) {
-			$renewal                  = new Renewal();
-			$renewal->id              = $renewal_id;
-			$renewal->subscription_id = $sub->id;
-			$renewal->amount          = $sub->recurring_total;
-			$renewal->status          = 'success';
-		}
-
-		// (c) Advance the next_payment date.
-		$next = $this->scheduler->next_payment( $sub, current_time( 'mysql' ) );
-
-		// (d) Update subscription record.
-		$this->sub_repo->update(
-			$sub->id,
-			array(
-				'last_payment'    => current_time( 'mysql' ),
-				'next_payment'    => $next,
-				'failed_attempts' => 0,
-			)
-		);
-
-		// (e) Extend the license expiry by one billing period.
-		if ( null !== $sub->license_id ) {
-			$this->extend_license_expiry( $sub );
-		}
-
-		// (f) Fire the renewed action.
 		/**
 		 * Fires after a subscription renewal charge is successfully processed.
 		 *
@@ -220,52 +173,66 @@ class RenewalProcessor {
 		do_action( 'wplm_subscription_renewed', $sub, $renewal );
 	}
 
-	// -------------------------------------------------------------------------
-	// Private helpers
-	// -------------------------------------------------------------------------
-
 	/**
-	 * Extend the bound license expiry by one billing period.
+	 * Apply a confirmed renewal payment: extend the licence by one period (LicenseService::
+	 * extend_term()), align next_payment with the new paid-through date, clear dunning, bring an
+	 * on-hold subscription back to active, and record the renewal.
 	 *
-	 * Computes the new expiry by advancing the current expires_at (or now if
-	 * the license is perpetual) by one billing interval/period and then calls
-	 * LicenseService to persist the change.
+	 * Shared by the cron card charge and paid renewal invoices, so both produce identical state.
 	 *
-	 * @param Subscription $sub Subscription with a non-null license_id.
-	 * @return void
+	 * @param Subscription $sub      The subscription being paid.
+	 * @param int|null     $order_id WooCommerce order that carried the payment, if any.
+	 * @param float        $amount   Amount received.
+	 * @param string       $txn      Gateway transaction reference.
+	 * @return Renewal The recorded renewal.
 	 */
-	private function extend_license_expiry( Subscription $sub ): void {
-		$license = $this->license_service->get_by_id( $sub->license_id );
+	public function apply_payment( Subscription $sub, ?int $order_id, float $amount, string $txn = '' ): Renewal {
+		$now      = time();
+		$now_utc  = gmdate( 'Y-m-d H:i:s', $now );
+		$interval = $this->scheduler->period_to_interval( $sub->billing_interval, $sub->billing_period );
 
-		if ( null === $license ) {
-			return;
+		$next = null;
+		if ( null !== $sub->license_id ) {
+			$next = $this->license_service->extend_term( $sub->license_id, $interval, $now );
+		}
+		if ( null === $next ) {
+			$next = $this->scheduler->next_payment( $sub, $now_utc );
 		}
 
-		// Base: current expiry or now (for perpetual licenses that we're now
-		// converting to a timed cycle).
-		$base = $license->expires_at ?? current_time( 'mysql' );
+		$this->sub_repo->update(
+			$sub->id,
+			array(
+				'last_payment'    => $now_utc,
+				'next_payment'    => $next,
+				'failed_attempts' => 0,
+			)
+		);
 
-		try {
-			$dt = new \DateTime( $base, new \DateTimeZone( 'UTC' ) );
-			$dt->add(
-				new \DateInterval(
-					$this->scheduler->period_to_interval( $sub->billing_interval, $sub->billing_period )
-				)
-			);
-			$new_expiry = $dt->format( 'Y-m-d H:i:s' );
-		} catch ( \Exception $e ) {
-			// Non-fatal; log and skip the expiry extension.
-			Logger::error(
-				sprintf(
-					'WPLM RenewalProcessor: could not extend license %d expiry — %s',
-					$sub->license_id,
-					$e->getMessage()
-				)
-			);
-			return;
+		if ( ! in_array( $sub->status, array( 'active', 'trial' ), true ) ) {
+			$this->sub_service->update_status( $sub->id, 'active' );
 		}
 
-		// Persist via LicenseService so any hooks on change_status etc. fire.
-		$this->license_service->update( $sub->license_id, array( 'expires_at' => $new_expiry ) );
+		$renewal_id = $this->renewal_repo->create(
+			array(
+				'subscription_id' => $sub->id,
+				'order_id'        => $order_id,
+				'type'            => 'renewal',
+				'amount'          => $amount,
+				'status'          => 'success',
+				'gateway_txn'     => $txn,
+				'scheduled_for'   => $sub->next_payment ?? $now_utc,
+				'processed_at'    => $now_utc,
+				'created_at'      => $now_utc,
+			)
+		);
+
+		$renewal                  = new Renewal();
+		$renewal->id              = (int) $renewal_id;
+		$renewal->subscription_id = $sub->id;
+		$renewal->order_id        = $order_id;
+		$renewal->amount          = $amount;
+		$renewal->status          = 'success';
+
+		return $renewal;
 	}
 }

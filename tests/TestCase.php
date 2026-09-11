@@ -114,17 +114,18 @@ abstract class TestCase extends \WP_UnitTestCase {
 		return gmdate( 'Y-m-d H:i:s', time() + $offset_seconds );
 	}
 
-	/** Orders flagged as renewals for a subscription. */
+	/** Orders linked to a subscription (filtered in PHP: meta queries need HPOS). */
 	protected function renewal_orders( int $subscription_id ): array {
-		return wc_get_orders(
+		$orders = wc_get_orders(
 			array(
-				'limit'      => -1,
-				'meta_query' => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query
-					array(
-						'key'   => '_wplm_subscription_id',
-						'value' => (string) $subscription_id,
-					),
-				),
+				'limit' => -1,
+				'type'  => 'shop_order',
+			)
+		);
+		return array_values(
+			array_filter(
+				$orders,
+				static fn( $o ) => (string) $subscription_id === (string) $o->get_meta( '_wplm_subscription_id' )
 			)
 		);
 	}

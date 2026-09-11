@@ -190,27 +190,47 @@ class ValidationController extends BaseController {
 	 */
 	public function deactivate( \WP_REST_Request $req ) {
 		try {
-			$body       = $req->get_json_params() ?: array();
-			$machine_id = isset( $body['machine_id'] ) ? absint( $body['machine_id'] ) : 0;
+			$body        = $req->get_json_params() ?: array();
+			$machine_id  = isset( $body['machine_id'] ) ? absint( $body['machine_id'] ) : 0;
+			$license_key = sanitize_text_field( wp_unslash( $body['license_key'] ?? '' ) );
+			$fingerprint = sanitize_text_field( wp_unslash( $body['fingerprint'] ?? '' ) );
 
 			/** @var ActivationService $service */
 			$service = $this->container->make( ActivationService::class );
 
-			if ( $machine_id > 0 ) {
-				$result = $service->deactivate_by_machine_id( $machine_id );
-			} else {
-				$license_key = sanitize_text_field( wp_unslash( $body['license_key'] ?? '' ) );
-				$fingerprint = sanitize_text_field( wp_unslash( $body['fingerprint'] ?? '' ) );
+			// This route is public, so every request must prove it holds the licence. A bare
+			// machine_id let anyone deactivate any customer's device (audit F11); admins use the
+			// authenticated /licenses/{key}/machines routes instead.
+			if ( '' === $license_key ) {
+				return ResponseFactory::error(
+					'wplm_missing_params',
+					__( 'license_key is required, with either fingerprint or machine_id.', 'wp-license-manager' ),
+					400
+				);
+			}
 
-				if ( '' === $license_key || '' === $fingerprint ) {
-					return ResponseFactory::error(
-						'wplm_missing_params',
-						__( 'Provide machine_id, or both license_key and fingerprint.', 'wp-license-manager' ),
-						400
-					);
+			if ( $machine_id > 0 ) {
+				/** @var LicenseService $licenses */
+				$licenses = $this->container->make( LicenseService::class );
+				$license  = $licenses->get_by_key( $license_key );
+				$machine  = null !== $license
+					? $this->container->make( \WPLM\Repositories\MachineRepository::class )->find_by_id( $machine_id )
+					: null;
+
+				if ( null === $license || null === $machine || (int) $machine->license_id !== $license->id ) {
+					// Same answer whether the key or the machine is wrong: do not help enumeration.
+					return ResponseFactory::error( 'wplm_machine_not_found', __( 'No matching device activation found for this license.', 'wp-license-manager' ), 404 );
 				}
 
+				$result = $service->deactivate_by_machine_id( $machine_id );
+			} elseif ( '' !== $fingerprint ) {
 				$result = $service->deactivate( $license_key, $fingerprint );
+			} else {
+				return ResponseFactory::error(
+					'wplm_missing_params',
+					__( 'license_key is required, with either fingerprint or machine_id.', 'wp-license-manager' ),
+					400
+				);
 			}
 
 			if ( is_wp_error( $result ) ) {

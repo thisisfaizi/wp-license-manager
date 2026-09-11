@@ -42,3 +42,22 @@ recorded. **Nothing below is inferred from reading the code; each line is an obs
   locked out with no automatic way back. For product `super-ledger`, non-payment lapses; it never
   suspends or revokes.
 - **F5, F6 and F7 are fixed in the shared code**, because they affect every product WPLM sells.
+
+## Found while building the test harness (same day)
+
+| # | Severity | What happens | Where |
+|---|---|---|---|
+| **F9** | **High** | **A missing secret crashes every request, including wp-admin.** The error message says to use Settings → Tools, but that page can't load. `Plugin::boot()` constructs the cron scheduler and its whole service graph on `plugins_loaded`, and `KeyVault`/`Signer`/`Fingerprint` read their secrets in their constructors. | `Crypto\*::__construct` |
+| **F10** | **High** | **A fresh install cannot sell.** No key generator is seeded, so `PlanCheckout` falls back to generator `1`, which does not exist. The exception is logged, no licence is issued, and the order is **still marked fulfilled**, so it never retries. The customer has paid and gets nothing. | `Install\Seeder`, `PlanCheckout::fulfill_order` |
+| **F11** | **Critical (security)** | **Anyone can deactivate any customer's device.** The public, unauthenticated `POST /wplm/v1/deactivate` accepts a bare `machine_id`, so counting upward deactivates every device on the site. Proven by a REST test: HTTP 200, device deactivated. | `ValidationController::deactivate` |
+| F12 | Low | The package editor has no "Valid for (days)" input, so saving a plan erases a one-time package's validity. | `PlanListTable`, `Menu::handle_plan_save` |
+
+Also confirmed for **F7**: on this machine MySQL `NOW()` returns Pakistan Standard Time, 5 hours ahead of the UTC values the plugin stores. `get_due_for_renewal()` therefore treats a renewal as due 5 hours early. `MachineRepository` writes `last_heartbeat_at = NOW()` and compares it against a UTC cutoff, so on this server floating-licence zombies are never culled; on a server behind UTC, live devices would be culled.
+
+## Status
+
+**All of F1–F12 are fixed in 1.1.0.** Each has an integration test that failed first (`tests/integration/`). The behaviour changes are listed under *Changed* and *Upgrade notes* in `CHANGELOG.md`.
+
+Deliberately **not** changed:
+- **F8:** the unused engine toggle. Honouring a default-off setting would silently stop renewals on sites that never saved Settings.
+- **Existing perpetual recurring licences:** they get an expiry at their next renewal or cancellation. A backfill would lock overdue customers the moment it runs.

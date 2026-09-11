@@ -3,7 +3,7 @@
  * Plugin Name:       WP License Manager
  * Plugin URI:        https://github.com/thisisfaizi/wp-license-manager
  * Description:       Industry-grade software licensing for WooCommerce. Issue, validate, activate, monitor, and revoke license keys with a full REST API and native subscription engine.
- * Version:           1.0.8
+ * Version:           1.1.0
  * Requires at least: 5.8
  * Requires PHP:      8.0
  * Author:            WPLM Contributors
@@ -19,8 +19,8 @@
 defined( 'ABSPATH' ) || exit;
 
 // Plugin constants.
-define( 'WPLM_VERSION', '1.0.8' );
-define( 'WPLM_DB_VERSION', '1.0.6' );
+define( 'WPLM_VERSION', '1.1.0' );
+define( 'WPLM_DB_VERSION', '1.1.0' );
 define( 'WPLM_PLUGIN_FILE', __FILE__ );
 define( 'WPLM_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPLM_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
