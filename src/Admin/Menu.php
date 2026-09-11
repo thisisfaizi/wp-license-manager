@@ -287,7 +287,7 @@ class Menu {
 
 	/** Register plugin settings via the Settings API. */
 	public function init_settings(): void {
-		( new Settings\SettingsPage() )->register_settings();
+		( new Settings\SettingsPage( $this->container->make( \WPLM\Licensing\ProfileRegistry::class ) ) )->register_settings();
 	}
 
 	/** Handle the save-license admin-post action. */
@@ -1095,7 +1095,7 @@ class Menu {
 	 * @return void
 	 */
 	public function page_settings(): void {
-		( new Settings\SettingsPage() )->render_settings_page();
+		( new Settings\SettingsPage( $this->container->make( \WPLM\Licensing\ProfileRegistry::class ) ) )->render_settings_page();
 	}
 
 	// -------------------------------------------------------------------------

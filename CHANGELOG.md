@@ -57,6 +57,9 @@ Entitlement licences for Super Ledger: per-module and per-limit lines with their
   - It goes to the purchase order's billing email, else the licence owner's account email (filter `wplm_lapse_notice_recipient`). A licence with neither is logged as `no_recipient`.
   - Suspended, revoked and terminated licences are not emailed. Action: `wplm_lapse_notice_sent`.
 - Profiles carry human names for their codes (`Profile::code_label()`).
+- **Settings → "<Profile> licences"**: the check-in window and grace for each licence profile (blank = default 7; 1–60 and 0–60 days). A change reaches each office at its next check-in.
+- **Settings → Subscriptions → Default grace (days)**, the 1.1.0 `wplm_default_grace_days` setting, which had no field.
+- A warning on the Settings page when licence tokens are signed with a keypair from the database on a `production` site. Define `WPLM_SIGNING_KEYPAIR` in `wp-config.php` instead.
 - `Crypto\CompactToken`: the token format in one place, usable without WordPress. `Signer` delegates to it, and its output is byte-identical to before.
 
 ### Changed
@@ -65,6 +68,10 @@ Entitlement licences for Super Ledger: per-module and per-limit lines with their
   - Enforced once, in `LicenseRepository`. Turning a licence into an entitlement licence clears its expiry.
 - `LicenseService::extend_term()` returns `null` for an entitlement licence.
 - `ActivationLogRepository::count_events_since()` compared a UTC cutoff with site-time `created_at` values; it now compares in site time.
+
+### Fixed
+- **Saving the Settings page failed with a fatal error.** `options.php` passes `null` for the group option the form never posts, and `validate_settings()` accepted only an array.
+- **The dunning retry schedule entered in Settings was ignored.** The page saves a comma list ("2,4,9") but dunning read only a JSON array, so it always used 1, 3, 5. Both forms are read now. The field also showed "3,7,14" as the default, which was never the default.
 
 ### Requirements
 - DB version 1.2.0 (adds `wplm_entitlements`, `licenses.profile`, `plans.profile`, `packages.entitlements`, `machines.token_fp`, `machines.usage_json`).

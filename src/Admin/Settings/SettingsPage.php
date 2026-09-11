@@ -9,6 +9,9 @@ namespace WPLM\Admin\Settings;
 
 defined( 'ABSPATH' ) || exit;
 
+use WPLM\Licensing\Profile;
+use WPLM\Licensing\ProfileRegistry;
+
 /**
  * Registers all WPLM settings sections and fields via the WordPress Settings API,
  * and renders the Settings admin page.
@@ -17,6 +20,19 @@ defined( 'ABSPATH' ) || exit;
  * Page slug      : wplm-settings  (used by do_settings_sections)
  */
 class SettingsPage {
+
+	/** Largest check-in window or grace a licence profile accepts, in days. */
+	public const MAX_PROFILE_DAYS = 60;
+
+	/** @var ProfileRegistry */
+	private ProfileRegistry $profiles;
+
+	/**
+	 * @param ProfileRegistry|null $profiles Licence profiles whose timing is configured here.
+	 */
+	public function __construct( ?ProfileRegistry $profiles = null ) {
+		$this->profiles = $profiles ?? new ProfileRegistry();
+	}
 
 	// -------------------------------------------------------------------------
 	// Defaults
@@ -38,7 +54,8 @@ class SettingsPage {
 		'wplm_zombie_window'            => 600,
 		'wplm_telemetry_retention_days' => 90,
 		'wplm_sub_engine_enabled'       => 0,
-		'wplm_dunning_schedule'         => '3,7,14',
+		'wplm_default_grace_days'       => 7,
+		'wplm_dunning_schedule'         => '1,3,5',
 		'wplm_webhook_retry_attempts'   => 3,
 	);
 
@@ -91,6 +108,7 @@ class SettingsPage {
 			'wplm_zombie_window',
 			'wplm_telemetry_retention_days',
 			'wplm_webhook_retry_attempts',
+			'wplm_default_grace_days',
 		);
 
 		foreach ( $number_fields as $option ) {
@@ -269,6 +287,21 @@ class SettingsPage {
 			'wplm_subscriptions_settings'
 		);
 
+		add_settings_field(
+			'wplm_default_grace_days',
+			__( 'Default grace (days)', 'wp-license-manager' ),
+			array( $this, 'render_field_default_grace_days' ),
+			'wplm-settings',
+			'wplm_subscriptions_settings'
+		);
+
+		// ------------------------------------------------------------------
+		// Sections: one per licence profile (e.g. Super Ledger).
+		// ------------------------------------------------------------------
+		foreach ( $this->profiles->all() as $profile ) {
+			$this->register_profile_settings( $profile );
+		}
+
 		// ------------------------------------------------------------------
 		// Section: Dunning
 		// ------------------------------------------------------------------
@@ -294,6 +327,95 @@ class SettingsPage {
 			'wplm-settings',
 			'wplm_dunning'
 		);
+	}
+
+	/**
+	 * Register a licence profile's check-in window and grace.
+	 *
+	 * @param Profile $profile The profile.
+	 * @return void
+	 */
+	private function register_profile_settings( Profile $profile ): void {
+		$fields = array(
+			'check_in_days' => array(
+				'label'       => __( 'Check-in window (days)', 'wp-license-manager' ),
+				'min'         => 1,
+				'default'     => Profile::DEFAULT_CHECK_IN_DAYS,
+				'description' => __( 'How long an office computer keeps working without reaching this server. Every successful check-in starts the window again. Past it, the office goes read-only until it checks in or gets an offline renewal code.', 'wp-license-manager' ),
+			),
+			'grace_days'    => array(
+				'label'       => __( 'Grace (days)', 'wp-license-manager' ),
+				'min'         => 0,
+				'default'     => Profile::DEFAULT_GRACE_DAYS,
+				'description' => __( 'How long an unpaid module keeps working after its paid-through date before it becomes read-only. A payment inside grace continues from the old paid-through date.', 'wp-license-manager' ),
+			),
+		);
+
+		$section = 'wplm_profile_' . str_replace( '-', '_', $profile->code );
+		add_settings_section(
+			$section,
+			/* translators: %s: product name */
+			sprintf( __( '%s licences', 'wp-license-manager' ), $profile->label ),
+			static function () use ( $profile ): void {
+				/* translators: %s: product name */
+				echo '<p>' . esc_html( sprintf( __( 'Timing signed into every %s token. A change reaches each office at its next check-in.', 'wp-license-manager' ), $profile->label ) ) . '</p>';
+			},
+			'wplm-settings'
+		);
+
+		foreach ( $fields as $key => $field ) {
+			$option = $profile->option_name( $key );
+			register_setting(
+				'wplm_settings',
+				$option,
+				array(
+					'sanitize_callback' => static fn( $value ) => self::sanitize_profile_days( $value, $field['min'] ),
+					'default'           => '',
+				)
+			);
+			add_settings_field(
+				$option,
+				$field['label'],
+				array( $this, 'render_field_profile_days' ),
+				'wplm-settings',
+				$section,
+				array(
+					'label_for'   => $option,
+					'option'      => $option,
+					'min'         => $field['min'],
+					'default'     => $field['default'],
+					'description' => $field['description'],
+				)
+			);
+		}
+	}
+
+	/**
+	 * Keep a profile day count within bounds; blank or non-numeric input clears it (the default applies).
+	 *
+	 * @param mixed $value Raw value.
+	 * @param int   $min   Smallest accepted value.
+	 * @return string '' or a whole number as a string.
+	 */
+	public static function sanitize_profile_days( $value, int $min ): string {
+		if ( null === $value || ! is_scalar( $value ) || ! is_numeric( trim( (string) $value ) ) ) {
+			return '';
+		}
+		return (string) min( self::MAX_PROFILE_DAYS, max( $min, (int) $value ) );
+	}
+
+	/**
+	 * The warning shown when tokens are signed with a keypair from the database on a production site.
+	 *
+	 * @param bool   $from_constant Whether `WPLM_SIGNING_KEYPAIR` is defined.
+	 * @param string $environment   `wp_get_environment_type()`.
+	 * @return string The warning, or '' when there is nothing to warn about.
+	 */
+	public static function signing_key_warning( bool $from_constant, string $environment ): string {
+		if ( $from_constant || 'production' !== $environment ) {
+			return '';
+		}
+		return __( 'Licence tokens are signed with a keypair stored in the database. On a production licence server, define WPLM_SIGNING_KEYPAIR in wp-config.php and keep an encrypted offline backup of it: anyone who reads or restores the database could otherwise sign licences, and losing it strands every office.', 'wp-license-manager' );
 	}
 
 	// -------------------------------------------------------------------------
@@ -529,6 +651,36 @@ class SettingsPage {
 		<?php
 	}
 
+	/** @return void */
+	public function render_field_default_grace_days(): void {
+		$value = absint( get_option( 'wplm_default_grace_days', $this->defaults['wplm_default_grace_days'] ) );
+		?>
+		<input type="number" id="wplm_default_grace_days" name="wplm_default_grace_days" value="<?php echo esc_attr( (string) $value ); ?>" min="0" step="1" class="small-text">
+		<p class="description"><?php esc_html_e( 'How long a recurring licence stays valid after its paid period ends, for packages that do not set their own grace.', 'wp-license-manager' ); ?></p>
+		<?php
+	}
+
+	/**
+	 * A licence profile's day-count field.
+	 *
+	 * @param array{option: string, min: int, default: int, description: string} $args Field arguments.
+	 * @return void
+	 */
+	public function render_field_profile_days( array $args ): void {
+		$value = (string) get_option( $args['option'], '' );
+		?>
+		<input type="number" id="<?php echo esc_attr( $args['option'] ); ?>" name="<?php echo esc_attr( $args['option'] ); ?>" value="<?php echo esc_attr( $value ); ?>" placeholder="<?php echo esc_attr( (string) $args['default'] ); ?>" min="<?php echo esc_attr( (string) $args['min'] ); ?>" max="<?php echo esc_attr( (string) self::MAX_PROFILE_DAYS ); ?>" step="1" class="small-text">
+		<p class="description">
+			<?php
+			echo esc_html( $args['description'] );
+			echo ' ';
+			/* translators: %d: default number of days */
+			echo esc_html( sprintf( __( 'Leave blank for the default (%d).', 'wp-license-manager' ), $args['default'] ) );
+			?>
+		</p>
+		<?php
+	}
+
 	// -------------------------------------------------------------------------
 	// Field renderers — Dunning
 	// -------------------------------------------------------------------------
@@ -543,9 +695,9 @@ class SettingsPage {
 			name="wplm_dunning_schedule"
 			value="<?php echo esc_attr( $value ); ?>"
 			class="regular-text"
-			placeholder="3,7,14"
+			placeholder="1,3,5"
 		>
-		<p class="description"><?php esc_html_e( 'Comma-separated list of days after a payment failure on which a retry should be attempted (e.g. 3,7,14).', 'wp-license-manager' ); ?></p>
+		<p class="description"><?php esc_html_e( 'Comma-separated list of days after a payment failure on which a retry should be attempted (e.g. 1,3,5). A failed charge never suspends the licence.', 'wp-license-manager' ); ?></p>
 		<?php
 	}
 
@@ -581,6 +733,10 @@ class SettingsPage {
 			wp_die( esc_html__( 'You do not have sufficient permissions to access this page.', 'wp-license-manager' ) );
 		}
 		$this->maybe_render_tool_notice();
+		$key_warning = self::signing_key_warning( defined( 'WPLM_SIGNING_KEYPAIR' ) && WPLM_SIGNING_KEYPAIR, wp_get_environment_type() );
+		if ( '' !== $key_warning ) {
+			printf( '<div class="notice notice-warning"><p>%s</p></div>', esc_html( $key_warning ) );
+		}
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'WPLM Settings', 'wp-license-manager' ); ?></h1>
@@ -764,11 +920,13 @@ class SettingsPage {
 	 * register_setting() call. It is also used internally when individual fields
 	 * are updated.
 	 *
-	 * @param array $input Raw POST input.
+	 * @param mixed $input Raw POST input. Untyped: options.php passes null when the group option is not
+	 *                     posted, which the page's own form never does (a typed array fatals the save).
 	 * @return array Sanitized values.
 	 */
-	public function validate_settings( array $input ): array {
+	public function validate_settings( $input ): array {
 		$output = array();
+		$input  = is_array( $input ) ? $input : array();
 
 		// Numbers.
 		$number_keys = array(
