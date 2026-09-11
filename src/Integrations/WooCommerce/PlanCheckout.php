@@ -9,7 +9,9 @@ namespace WPLM\Integrations\WooCommerce;
 
 defined( 'ABSPATH' ) || exit;
 
+use WPLM\Licensing\ProfileRegistry;
 use WPLM\Models\Package;
+use WPLM\Services\EntitlementService;
 use WPLM\Services\GeneratorService;
 use WPLM\Services\LicenseService;
 use WPLM\Services\PlanService;
@@ -43,6 +45,12 @@ class PlanCheckout {
 	/** @var SubscriptionService */
 	private SubscriptionService $subscriptions;
 
+	/** @var EntitlementService */
+	private EntitlementService $entitlements;
+
+	/** @var ProfileRegistry */
+	private ProfileRegistry $profiles;
+
 	/** @var array<int,\WPLM\Models\Plan|null> Per-request plan cache. */
 	private array $plan_cache = array();
 
@@ -51,17 +59,23 @@ class PlanCheckout {
 	 * @param GeneratorService    $generators
 	 * @param LicenseService      $licenses
 	 * @param SubscriptionService $subscriptions
+	 * @param EntitlementService  $entitlements
+	 * @param ProfileRegistry     $profiles
 	 */
 	public function __construct(
 		PlanService $plans,
 		GeneratorService $generators,
 		LicenseService $licenses,
-		SubscriptionService $subscriptions
+		SubscriptionService $subscriptions,
+		EntitlementService $entitlements,
+		ProfileRegistry $profiles
 	) {
 		$this->plans         = $plans;
 		$this->generators    = $generators;
 		$this->licenses      = $licenses;
 		$this->subscriptions = $subscriptions;
+		$this->entitlements  = $entitlements;
+		$this->profiles      = $profiles;
 	}
 
 	/** Register all storefront + checkout hooks. */
@@ -449,6 +463,18 @@ class PlanCheckout {
 		if ( $generator_id <= 0 ) {
 			throw new \RuntimeException( 'no key generator is configured (WPLM → Generators)' );
 		}
+		// A plan that sells a licence profile (e.g. Super Ledger) issues an entitlement licence. Check
+		// its template before anything is created, so a bad template leaves nothing half-issued.
+		$plan         = $this->plans->get( $pkg->plan_id );
+		$profile_code = null !== $plan ? $plan->profile : null;
+		if ( null !== $profile_code ) {
+			$profile = $this->profiles->get( $profile_code );
+			if ( null === $profile ) {
+				throw new \RuntimeException( sprintf( 'the plan sells an unknown licence profile "%s"', $profile_code ) );
+			}
+			$this->entitlements->normalize_template( $profile, $pkg->entitlements );
+		}
+
 		$keys = $this->generators->generate_batch( $generator_id, 1 );
 		if ( empty( $keys ) ) {
 			throw new \RuntimeException( 'No key generated for package ' . $pkg->id );
@@ -532,8 +558,20 @@ class PlanCheckout {
 				'expires_at'       => $expires,
 				'grace_days'       => $pkg->effective_grace_days(),
 				'source'           => 3,
+				'profile'          => $profile_code,
 			)
 		);
+
+		// The entitlement licence itself never expires (LicenseRepository drops the expiry); its lines
+		// are paid through the last day of the paid term, or lifetime.
+		if ( null !== $profile_code ) {
+			$this->entitlements->grant_package(
+				$license,
+				$pkg,
+				$sub_id > 0 ? $sub_id : null,
+				null !== $expires ? EntitlementService::paid_through_for( $expires ) : null
+			);
+		}
 
 		if ( $sub_id > 0 ) {
 			$this->subscriptions->bind_license( $sub_id, $license->id );

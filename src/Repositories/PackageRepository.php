@@ -84,6 +84,7 @@ class PackageRepository {
 		if ( isset( $data['benefits'] ) && is_array( $data['benefits'] ) ) {
 			$data['benefits'] = wp_json_encode( array_values( $data['benefits'] ) );
 		}
+		$data = $this->encode_entitlements( $data );
 
 		$result = $wpdb->insert( $this->table(), $data );
 		if ( false === $result ) {
@@ -104,8 +105,22 @@ class PackageRepository {
 		if ( isset( $data['benefits'] ) && is_array( $data['benefits'] ) ) {
 			$data['benefits'] = wp_json_encode( array_values( $data['benefits'] ) );
 		}
+		$data   = $this->encode_entitlements( $data );
 		$result = $wpdb->update( $this->table(), $data, array( 'id' => $id ), null, array( '%d' ) );
 		return false !== $result;
+	}
+
+	/**
+	 * Store an entitlement template array as JSON (NULL when empty).
+	 *
+	 * @param array $data Column => value pairs.
+	 * @return array
+	 */
+	private function encode_entitlements( array $data ): array {
+		if ( array_key_exists( 'entitlements', $data ) && is_array( $data['entitlements'] ) ) {
+			$data['entitlements'] = empty( $data['entitlements'] ) ? null : wp_json_encode( array_values( $data['entitlements'] ) );
+		}
+		return $data;
 	}
 
 	/**

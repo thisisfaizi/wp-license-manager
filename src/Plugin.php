@@ -151,6 +151,34 @@ final class Plugin {
 			)
 		);
 
+		$this->container->bind(
+			Repositories\EntitlementRepository::class,
+			fn( $c ) => new Repositories\EntitlementRepository()
+		);
+
+		// Licence profiles and entitlements.
+		$this->container->bind(
+			Licensing\ProfileRegistry::class,
+			fn( $c ) => new Licensing\ProfileRegistry()
+		);
+		$this->container->bind(
+			Services\EntitlementService::class,
+			fn( $c ) => new Services\EntitlementService(
+				$c->make( Repositories\EntitlementRepository::class ),
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Licensing\ProfileRegistry::class )
+			)
+		);
+		$this->container->bind(
+			Licensing\TokenV2Service::class,
+			fn( $c ) => new Licensing\TokenV2Service(
+				$c->make( Services\EntitlementService::class ),
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Crypto\Signer::class ),
+				$c->make( Crypto\Fingerprint::class )
+			)
+		);
+
 		// Services.
 		$this->container->bind(
 			Services\GeneratorService::class,
@@ -163,7 +191,9 @@ final class Plugin {
 			Services\PlanService::class,
 			fn( $c ) => new Services\PlanService(
 				$c->make( Repositories\PlanRepository::class ),
-				$c->make( Repositories\PackageRepository::class )
+				$c->make( Repositories\PackageRepository::class ),
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Services\EntitlementService::class )
 			)
 		);
 		$this->container->bind(
@@ -175,7 +205,8 @@ final class Plugin {
 				$c->make( Repositories\ActivationLogRepository::class ),
 				$c->make( Repositories\BlacklistRepository::class ),
 				$c->make( Repositories\MachineRepository::class ),
-				$c->make( Crypto\Fingerprint::class )
+				$c->make( Crypto\Fingerprint::class ),
+				$c->make( Licensing\ProfileRegistry::class )
 			)
 		);
 		$this->container->bind(
@@ -397,7 +428,9 @@ final class Plugin {
 			$this->container->make( Services\PlanService::class ),
 			$this->container->make( Services\GeneratorService::class ),
 			$this->container->make( Services\LicenseService::class ),
-			$this->container->make( Services\Subscriptions\SubscriptionService::class )
+			$this->container->make( Services\Subscriptions\SubscriptionService::class ),
+			$this->container->make( Services\EntitlementService::class ),
+			$this->container->make( Licensing\ProfileRegistry::class )
 		) )->register();
 
 		// Customer self-service renewal: create order → pay → license extended on completed.

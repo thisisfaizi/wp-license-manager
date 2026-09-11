@@ -28,10 +28,10 @@ abstract class TestCase extends \WP_UnitTestCase {
 	 * @param array[] $packages Package field arrays (see PlanService::sync_packages()).
 	 * @return array{plan_id:int, packages:\WPLM\Models\Package[]}
 	 */
-	protected function create_plan( array $packages ): array {
+	protected function create_plan( array $packages, array $plan = array() ): array {
 		/** @var PlanService $plans */
 		$plans   = $this->make( PlanService::class );
-		$plan_id = $plans->create_plan( array( 'name' => 'Test plan' ) );
+		$plan_id = $plans->create_plan( $plan + array( 'name' => 'Test plan' ) );
 		$plans->sync_packages( $plan_id, $packages );
 		return array(
 			'plan_id'  => $plan_id,
@@ -89,6 +89,43 @@ abstract class TestCase extends \WP_UnitTestCase {
 			'license_id'      => $license_id,
 			'subscription_id' => $subscription_id,
 		);
+	}
+
+	/** What a Super Ledger client sends as its fingerprint: sha256_hex('super-ledger|' + raw). */
+	protected function client_fp( string $raw ): string {
+		return hash( 'sha256', 'super-ledger|' . $raw );
+	}
+
+	/**
+	 * A Super Ledger licence (no lines yet) activated on one machine.
+	 *
+	 * @return array{license:\WPLM\Models\License, machine:\WPLM\Models\Machine, fp:string}
+	 */
+	protected function activated_profile_licence( string $raw_fingerprint = 'office-pc' ): array {
+		$license = $this->make( \WPLM\Services\LicenseService::class )->create(
+			array(
+				'key_string'      => 'SL-' . wp_generate_password( 16, false ),
+				'profile'         => 'super-ledger',
+				'max_activations' => 1,
+			)
+		);
+		$fp      = $this->client_fp( $raw_fingerprint );
+		$machine = $this->make( \WPLM\Services\ActivationService::class )->activate( $license->license_key, $fp );
+		$this->assertNotWPError( $machine );
+		return $this->reload(
+			array(
+				'license' => $license,
+				'machine' => $machine,
+				'fp'      => $fp,
+			)
+		);
+	}
+
+	/** Re-read the licence and machine of a bound pair from the database. */
+	protected function reload( array $bound ): array {
+		$bound['license'] = $this->make( \WPLM\Repositories\LicenseRepository::class )->find_by_id( $bound['license']->id );
+		$bound['machine'] = $this->make( \WPLM\Repositories\MachineRepository::class )->find_by_id( $bound['machine']->id );
+		return $bound;
 	}
 
 	/** The raw licences row. */

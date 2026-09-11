@@ -10,6 +10,7 @@ namespace WPLM\Services;
 use WPLM\Crypto\Fingerprint;
 use WPLM\Crypto\KeyVault;
 use WPLM\Crypto\Signer;
+use WPLM\Licensing\ProfileRegistry;
 use WPLM\Models\License;
 use WPLM\Repositories\ActivationLogRepository;
 use WPLM\Repositories\BlacklistRepository;
@@ -46,6 +47,9 @@ class LicenseService {
 	/** @var Fingerprint */
 	private Fingerprint $fingerprint;
 
+	/** @var ProfileRegistry */
+	private ProfileRegistry $profiles;
+
 	/**
 	 * @param LicenseRepository       $license_repo   License data-access layer.
 	 * @param Signer                  $signer         Ed25519 signing service.
@@ -54,6 +58,7 @@ class LicenseService {
 	 * @param BlacklistRepository     $blacklist_repo Fingerprint/IP blacklist.
 	 * @param MachineRepository       $machine_repo   Device/machine data-access layer.
 	 * @param Fingerprint             $fingerprint    Fingerprint hashing service.
+	 * @param ProfileRegistry|null    $profiles       Known licence profiles.
 	 */
 	public function __construct(
 		LicenseRepository $license_repo,
@@ -62,7 +67,8 @@ class LicenseService {
 		ActivationLogRepository $log_repo,
 		BlacklistRepository $blacklist_repo,
 		MachineRepository $machine_repo,
-		Fingerprint $fingerprint
+		Fingerprint $fingerprint,
+		?ProfileRegistry $profiles = null
 	) {
 		$this->license_repo   = $license_repo;
 		$this->signer         = $signer;
@@ -71,6 +77,7 @@ class LicenseService {
 		$this->blacklist_repo = $blacklist_repo;
 		$this->machine_repo   = $machine_repo;
 		$this->fingerprint    = $fingerprint;
+		$this->profiles       = $profiles ?? new ProfileRegistry();
 	}
 
 	// -------------------------------------------------------------------------
@@ -96,6 +103,7 @@ class LicenseService {
 	 *   source           int          0 import|1 generator|2 api|3 woocommerce
 	 *   is_floating      bool
 	 *   created_by       int|null
+	 *   profile          string|null  licence profile code; a profile licence stores no expiry
 	 *
 	 * @param array $args License field values.
 	 * @return License The newly created, fully hydrated license model.
@@ -107,6 +115,11 @@ class LicenseService {
 
 		if ( '' === $key_string ) {
 			throw new \InvalidArgumentException( 'WPLM LicenseService::create(): key_string is required.' );
+		}
+
+		$profile = $this->checked_profile( $args['profile'] ?? null );
+		if ( null !== $profile ) {
+			$args['expires_at'] = null; // The lines carry the dates (see LicenseRepository).
 		}
 
 		// Derive hash and encrypt the plaintext key.
@@ -140,6 +153,7 @@ class LicenseService {
 			'source'           => isset( $args['source'] ) ? (int) $args['source'] : 2,
 			'is_floating'      => ! empty( $args['is_floating'] ) ? 1 : 0,
 			'created_by'       => isset( $args['created_by'] ) ? (int) $args['created_by'] : null,
+			'profile'          => $profile,
 		);
 
 		$id      = $this->license_repo->create( $insert_data );
@@ -395,6 +409,7 @@ class LicenseService {
 			'activated_at',
 			'source',
 			'created_by',
+			'profile',
 		);
 
 		$update = array();
@@ -406,6 +421,19 @@ class LicenseService {
 
 		if ( array_key_exists( 'is_floating', $update ) ) {
 			$update['is_floating'] = ! empty( $update['is_floating'] ) ? 1 : 0;
+		}
+
+		// A profile licence stores no expiry; decide before re-signing so the v1 token agrees.
+		if ( array_key_exists( 'profile', $update ) ) {
+			$update['profile'] = $this->checked_profile( $update['profile'] );
+		}
+		$will_be_profile = array_key_exists( 'profile', $update ) ? null !== $update['profile'] : null !== $current->profile;
+		if ( $will_be_profile ) {
+			if ( null !== $current->expires_at ) {
+				$update['expires_at'] = null;
+			} else {
+				unset( $update['expires_at'] );
+			}
 		}
 
 		// Optional key rotation from the edit form: re-derive hash + ciphertext.
@@ -493,12 +521,13 @@ class LicenseService {
 	 * @param int      $id            Licence id.
 	 * @param string   $interval_spec ISO-8601 interval, e.g. "P1M".
 	 * @param int|null $now           Unix time of the payment (defaults to now).
-	 * @return string|null The new expiry (UTC MySQL datetime), or null when the licence is missing.
+	 * @return string|null The new expiry (UTC MySQL datetime), or null when the licence is missing or
+	 *                     is a profile licence (whose lines, not the licence, carry the term).
 	 */
 	public function extend_term( int $id, string $interval_spec, ?int $now = null ): ?string {
 		$license = $this->license_repo->find_by_id( $id );
-		if ( null === $license ) {
-			return null;
+		if ( null === $license || null !== $license->profile ) {
+			return null; // Missing, or a profile licence: its entitlement lines carry the term.
 		}
 
 		$now  = $now ?? time();
@@ -566,6 +595,23 @@ class LicenseService {
 		}
 
 		return $reloaded;
+	}
+
+	/**
+	 * Validate a licence profile code.
+	 *
+	 * @param mixed $code Raw code; null or '' means a classic licence.
+	 * @return string|null
+	 * @throws \InvalidArgumentException When the code is not a registered profile.
+	 */
+	private function checked_profile( $code ): ?string {
+		if ( null === $code || '' === $code ) {
+			return null;
+		}
+		if ( null === $this->profiles->get( (string) $code ) ) {
+			throw new \InvalidArgumentException( sprintf( 'Unknown licence profile "%s".', (string) $code ) );
+		}
+		return (string) $code;
 	}
 
 	/**

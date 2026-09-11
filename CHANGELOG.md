@@ -6,6 +6,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.2.0] — Unreleased
+
+Entitlement licences for Super Ledger: per-module and per-limit lines with their own paid-through dates, and a signed, machine-bound v2 token. Classic licences, their v1 tokens and every other product are unchanged.
+
+### Added
+- **Licence profiles.** A plan can sell a licence profile (built in: `super-ledger`; others via the `wplm_license_profiles` filter). A licence bought from such a plan is an *entitlement licence*.
+- **Entitlement lines** (`wplm_entitlements`).
+  - A `module` line grants a module; a `limit` line adds to `users`, `seats` or `phones`.
+  - `paid_through` is the inclusive last paid day in the site's time zone; `NULL` means lifetime.
+  - Codes are a closed list per profile, and an unknown code is refused on save.
+  - Actions: `wplm_entitlement_saved`, `wplm_entitlement_deleted`.
+- **Package entitlement templates.** Buying a package writes its template's lines: paid through the day before the next payment, or lifetime.
+- **v2 token** (`Licensing\TokenV2Service`):
+  - fields `{v, pid, lid, mid, fp, iat, srv, checkInBy, graceDays, status, modules, limits}`, signed with the existing key and format;
+  - per-profile settings for the check-in window and grace (default 7 days each);
+  - `status` is `suspended` only when the owner suspended the licence; revoked and terminated licences get no token.
+- Machine columns `token_fp` and `usage_json`, for check-in (next change).
+
+### Changed
+- **An entitlement licence never stores `expires_at`.** Its lines carry the dates, so no path can make classic validation mark it expired or refuse its activation.
+  - Covered paths: checkout, renewal payment, subscription cancellation, first activation with `valid_for_days`, admin, REST.
+  - Enforced once, in `LicenseRepository`. Turning a licence into an entitlement licence clears its expiry.
+- `LicenseService::extend_term()` returns `null` for an entitlement licence.
+
+### Requirements
+- DB version 1.2.0 (adds `wplm_entitlements`, `licenses.profile`, `plans.profile`, `packages.entitlements`, `machines.token_fp`, `machines.usage_json`).
+
+---
+
 ## [1.1.0] — Unreleased
 
 This release fixes billing and licensing correctness. The problems were found by running the real purchase → activate → renew paths on a live install ([docs/audit/2026-09-11-subscription-walk.md](docs/audit/2026-09-11-subscription-walk.md)). Every fix below has an integration test (`tests/`) that failed before it.
