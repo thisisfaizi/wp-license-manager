@@ -136,9 +136,9 @@ class SwitchManager {
 				'amount'          => (float) ( $proration['net'] ?? 0.0 ),
 				'status'          => 'success',
 				'gateway_txn'     => null,
-				'scheduled_for'   => current_time( 'mysql' ),
-				'processed_at'    => current_time( 'mysql' ),
-				'created_at'      => current_time( 'mysql' ),
+				'scheduled_for'   => current_time( 'mysql', true ),
+				'processed_at'    => current_time( 'mysql', true ),
+				'created_at'      => current_time( 'mysql', true ),
 			)
 		);
 
@@ -206,7 +206,7 @@ class SwitchManager {
 
 		// We can only prorate if we know when the current period ends.
 		if ( null !== $sub->next_payment && null !== $sub->last_payment ) {
-			$now   = new \DateTime( current_time( 'mysql' ), new \DateTimeZone( 'UTC' ) );
+			$now   = new \DateTime( current_time( 'mysql', true ), new \DateTimeZone( 'UTC' ) );
 			$end   = new \DateTime( $sub->next_payment, new \DateTimeZone( 'UTC' ) );
 			$start = new \DateTime( $sub->last_payment, new \DateTimeZone( 'UTC' ) );
 

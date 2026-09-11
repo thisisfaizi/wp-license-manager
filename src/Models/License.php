@@ -52,6 +52,12 @@ class License {
 	/** 0 import | 1 generator | 2 api | 3 woocommerce */
 	public int $source = 2;
 
+	/**
+	 * Licence profile code (see ProfileRegistry), or null for a classic licence. A profile licence
+	 * never expires as a whole: its entitlement lines carry the dates.
+	 */
+	public ?string $profile = null;
+
 	public string $created_at = '';
 	public ?int $created_by   = null;
 	public string $updated_at = '';
@@ -128,6 +134,7 @@ class License {
 		$license->expires_at       = $row['expires_at'] ?? null;
 		$license->grace_days       = (int) ( $row['grace_days'] ?? 0 );
 		$license->source           = (int) ( $row['source'] ?? 2 );
+		$license->profile          = isset( $row['profile'] ) && '' !== $row['profile'] ? (string) $row['profile'] : null;
 		$license->created_at       = $row['created_at'] ?? '';
 		$license->created_by       = isset( $row['created_by'] ) ? (int) $row['created_by'] : null;
 		$license->updated_at       = $row['updated_at'] ?? '';
@@ -152,6 +159,7 @@ class License {
 			'expires_at'       => $this->expires_at,
 			'grace_days'       => $this->grace_days,
 			'source'           => $this->source,
+			'profile'          => $this->profile,
 			'created_at'       => $this->created_at,
 			'updated_at'       => $this->updated_at,
 		);

@@ -755,6 +755,8 @@ class Menu {
 				'length_cycles'    => absint( $row['length_cycles'] ?? 0 ),
 				'generator_id'     => absint( $row['generator_id'] ?? 0 ),
 				'max_activations'  => '' !== ( $row['max_activations'] ?? '' ) ? absint( $row['max_activations'] ) : '',
+				'grace_days'       => '' !== ( $row['grace_days'] ?? '' ) ? absint( $row['grace_days'] ) : '',
+				'valid_for_days'   => '' !== ( $row['valid_for_days'] ?? '' ) ? absint( $row['valid_for_days'] ) : '',
 				'overage_strategy' => sanitize_key( $row['overage_strategy'] ?? 'deny' ),
 				'benefits'         => sanitize_textarea_field( $row['benefits'] ?? '' ),
 				'status'           => empty( $row['status'] ) ? 0 : 1,

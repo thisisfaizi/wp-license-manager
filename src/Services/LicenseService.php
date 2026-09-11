@@ -10,6 +10,7 @@ namespace WPLM\Services;
 use WPLM\Crypto\Fingerprint;
 use WPLM\Crypto\KeyVault;
 use WPLM\Crypto\Signer;
+use WPLM\Licensing\ProfileRegistry;
 use WPLM\Models\License;
 use WPLM\Repositories\ActivationLogRepository;
 use WPLM\Repositories\BlacklistRepository;
@@ -46,6 +47,9 @@ class LicenseService {
 	/** @var Fingerprint */
 	private Fingerprint $fingerprint;
 
+	/** @var ProfileRegistry */
+	private ProfileRegistry $profiles;
+
 	/**
 	 * @param LicenseRepository       $license_repo   License data-access layer.
 	 * @param Signer                  $signer         Ed25519 signing service.
@@ -54,6 +58,7 @@ class LicenseService {
 	 * @param BlacklistRepository     $blacklist_repo Fingerprint/IP blacklist.
 	 * @param MachineRepository       $machine_repo   Device/machine data-access layer.
 	 * @param Fingerprint             $fingerprint    Fingerprint hashing service.
+	 * @param ProfileRegistry|null    $profiles       Known licence profiles.
 	 */
 	public function __construct(
 		LicenseRepository $license_repo,
@@ -62,7 +67,8 @@ class LicenseService {
 		ActivationLogRepository $log_repo,
 		BlacklistRepository $blacklist_repo,
 		MachineRepository $machine_repo,
-		Fingerprint $fingerprint
+		Fingerprint $fingerprint,
+		?ProfileRegistry $profiles = null
 	) {
 		$this->license_repo   = $license_repo;
 		$this->signer         = $signer;
@@ -71,6 +77,7 @@ class LicenseService {
 		$this->blacklist_repo = $blacklist_repo;
 		$this->machine_repo   = $machine_repo;
 		$this->fingerprint    = $fingerprint;
+		$this->profiles       = $profiles ?? new ProfileRegistry();
 	}
 
 	// -------------------------------------------------------------------------
@@ -96,6 +103,7 @@ class LicenseService {
 	 *   source           int          0 import|1 generator|2 api|3 woocommerce
 	 *   is_floating      bool
 	 *   created_by       int|null
+	 *   profile          string|null  licence profile code; a profile licence stores no expiry
 	 *
 	 * @param array $args License field values.
 	 * @return License The newly created, fully hydrated license model.
@@ -107,6 +115,11 @@ class LicenseService {
 
 		if ( '' === $key_string ) {
 			throw new \InvalidArgumentException( 'WPLM LicenseService::create(): key_string is required.' );
+		}
+
+		$profile = $this->checked_profile( $args['profile'] ?? null );
+		if ( null !== $profile ) {
+			$args['expires_at'] = null; // The lines carry the dates (see LicenseRepository).
 		}
 
 		// Derive hash and encrypt the plaintext key.
@@ -140,6 +153,7 @@ class LicenseService {
 			'source'           => isset( $args['source'] ) ? (int) $args['source'] : 2,
 			'is_floating'      => ! empty( $args['is_floating'] ) ? 1 : 0,
 			'created_by'       => isset( $args['created_by'] ) ? (int) $args['created_by'] : null,
+			'profile'          => $profile,
 		);
 
 		$id      = $this->license_repo->create( $insert_data );
@@ -285,7 +299,10 @@ class LicenseService {
 
 		// Step 4: Expiry check (including grace days).
 		if ( ! $license->is_within_expiry() ) {
-			$this->license_repo->update( $license->id, array( 'status' => 3 ) );
+			// Through change_status() so listeners hear it: access ends by expiry, not by a
+			// suspension, so this is the only event a lapsed customer ever produces. Step 3
+			// refuses an expired licence before this point, so it fires once.
+			$this->change_status( $license->id, 3 );
 			$this->log_event( $license->id, null, 'validate', 'fail', array_merge( $context, array( 'meta' => array( 'code' => 'expired' ) ) ) );
 
 			return array(
@@ -392,6 +409,7 @@ class LicenseService {
 			'activated_at',
 			'source',
 			'created_by',
+			'profile',
 		);
 
 		$update = array();
@@ -403,6 +421,19 @@ class LicenseService {
 
 		if ( array_key_exists( 'is_floating', $update ) ) {
 			$update['is_floating'] = ! empty( $update['is_floating'] ) ? 1 : 0;
+		}
+
+		// A profile licence stores no expiry; decide before re-signing so the v1 token agrees.
+		if ( array_key_exists( 'profile', $update ) ) {
+			$update['profile'] = $this->checked_profile( $update['profile'] );
+		}
+		$will_be_profile = array_key_exists( 'profile', $update ) ? null !== $update['profile'] : null !== $current->profile;
+		if ( $will_be_profile ) {
+			if ( null !== $current->expires_at ) {
+				$update['expires_at'] = null;
+			} else {
+				unset( $update['expires_at'] );
+			}
 		}
 
 		// Optional key rotation from the edit form: re-derive hash + ciphertext.
@@ -442,11 +473,89 @@ class LicenseService {
 			}
 		}
 
+		// A licence that validation marked expired comes back when its expiry moves into the
+		// future — a customer who has paid must not keep getting "expired" (audit F4). Only the
+		// automatic "expired" status is lifted; suspended/revoked/terminated are the owner's.
+		$revived = false;
+		if ( 3 === $current->status && ! array_key_exists( 'status', $update ) && $expires_changed ) {
+			$probe             = clone $current;
+			$probe->expires_at = null !== $update['expires_at'] ? (string) $update['expires_at'] : null;
+			if ( array_key_exists( 'grace_days', $update ) ) {
+				$probe->grace_days = (int) $update['grace_days'];
+			}
+			if ( $probe->is_within_expiry() ) {
+				$update['status'] = 1;
+				$revived          = true;
+			}
+		}
+
 		if ( empty( $update ) ) {
 			return false;
 		}
 
-		return $this->license_repo->update( $id, $update );
+		$ok = $this->license_repo->update( $id, $update );
+
+		if ( $ok && $revived ) {
+			/** This action is documented in LicenseService::change_status(). */
+			do_action( 'wplm_license_status_changed', $current, 3, 1 );
+		}
+
+		return $ok;
+	}
+
+	/**
+	 * Extend a licence by one billing period for a payment received now.
+	 *
+	 * The single rule every renewal path uses (cron card charges, paid renewal invoices,
+	 * self-service renewals):
+	 *
+	 * - Paid before the end, or inside grace → the new period starts at the old end, so the
+	 *   customer neither loses days nor gains free grace days every month.
+	 * - Paid after grace (the licence had lapsed) → a full period starts now; the lapsed days
+	 *   are not billed.
+	 * - A licence with no expiry (legacy perpetual rows bound to a subscription) starts timing now.
+	 *
+	 * The offline token is re-signed and an automatic "expired" status is lifted; a manual
+	 * suspension, revocation or termination is never changed here.
+	 *
+	 * @param int      $id            Licence id.
+	 * @param string   $interval_spec ISO-8601 interval, e.g. "P1M".
+	 * @param int|null $now           Unix time of the payment (defaults to now).
+	 * @return string|null The new expiry (UTC MySQL datetime), or null when the licence is missing or
+	 *                     is a profile licence (whose lines, not the licence, carry the term).
+	 */
+	public function extend_term( int $id, string $interval_spec, ?int $now = null ): ?string {
+		$license = $this->license_repo->find_by_id( $id );
+		if ( null === $license || null !== $license->profile ) {
+			return null; // Missing, or a profile licence: its entitlement lines carry the term.
+		}
+
+		$now  = $now ?? time();
+		$base = $now;
+		if ( null !== $license->expires_at ) {
+			$end       = strtotime( $license->expires_at . ' UTC' );
+			$grace_end = $end + ( $license->grace_days * DAY_IN_SECONDS );
+			if ( $now <= $grace_end ) {
+				$base = $end;
+			}
+		}
+
+		$dt = ( new \DateTimeImmutable( '@' . $base ) )->setTimezone( new \DateTimeZone( 'UTC' ) );
+		$dt = $dt->add( new \DateInterval( $interval_spec ) );
+
+		$new_expiry = $dt->format( 'Y-m-d H:i:s' );
+		$this->update( $id, array( 'expires_at' => $new_expiry ) );
+
+		/**
+		 * Fires after a licence term has been extended by a payment.
+		 *
+		 * @param int    $id         Licence id.
+		 * @param string $new_expiry New expiry (UTC).
+		 * @param string|null $old_expiry Previous expiry (UTC), null when perpetual.
+		 */
+		do_action( 'wplm_license_term_extended', $id, $new_expiry, $license->expires_at );
+
+		return $new_expiry;
 	}
 
 	/**
@@ -473,26 +582,36 @@ class LicenseService {
 			return false;
 		}
 
-		$old_status = $license->status;
+		// Through update() so the offline token is re-signed with the new expiry (audit F6)
+		// and an automatic "expired" status is lifted. An explicit admin/API renewal also
+		// reactivates an inactive or pending licence, as before — but never a suspended,
+		// revoked or terminated one: those are lifted only by reinstate.
+		$this->update( $license->id, array( 'expires_at' => $new_expires_at ) );
 
-		$this->license_repo->update(
-			$license->id,
-			array(
-				'expires_at' => $new_expires_at,
-				'status'     => 1,
-			)
-		);
+		$reloaded = $this->license_repo->find_by_id( $license->id );
+		if ( null !== $reloaded && in_array( $reloaded->status, array( 0, 2 ), true ) ) {
+			$this->change_status( $license->id, 1 );
+			$reloaded = $this->license_repo->find_by_id( $license->id );
+		}
 
-		/**
-		 * Fires when a license status changes due to renewal.
-		 *
-		 * @param License $license    The license model (pre-update snapshot).
-		 * @param int     $old_status Previous status code.
-		 * @param int     $new_status New status code (1 = active).
-		 */
-		do_action( 'wplm_license_status_changed', $license, $old_status, 1 );
+		return $reloaded;
+	}
 
-		return $this->license_repo->find_by_id( $license->id );
+	/**
+	 * Validate a licence profile code.
+	 *
+	 * @param mixed $code Raw code; null or '' means a classic licence.
+	 * @return string|null
+	 * @throws \InvalidArgumentException When the code is not a registered profile.
+	 */
+	private function checked_profile( $code ): ?string {
+		if ( null === $code || '' === $code ) {
+			return null;
+		}
+		if ( null === $this->profiles->get( (string) $code ) ) {
+			throw new \InvalidArgumentException( sprintf( 'Unknown licence profile "%s".', (string) $code ) );
+		}
+		return (string) $code;
 	}
 
 	/**

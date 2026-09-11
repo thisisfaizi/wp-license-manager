@@ -330,6 +330,14 @@ class PlanListTable extends \WP_List_Table {
 					<label><?php esc_html_e( 'Max seats', 'wp-license-manager' ); ?><br>
 					<input type="number" min="1" class="widefat" name="<?php echo esc_attr( $f ); ?>[max_activations]" value="<?php echo esc_attr( null !== $p->max_activations ? (string) $p->max_activations : '' ); ?>"></label>
 				</p>
+				<p style="flex:1 1 120px;">
+					<label title="<?php esc_attr_e( 'How long an unpaid licence keeps working after its paid term ends. Leave blank for the default in Settings.', 'wp-license-manager' ); ?>"><?php esc_html_e( 'Grace (days)', 'wp-license-manager' ); ?><br>
+					<input type="number" min="0" class="widefat" name="<?php echo esc_attr( $f ); ?>[grace_days]" placeholder="<?php echo esc_attr( (string) get_option( 'wplm_default_grace_days', \WPLM\Models\Package::DEFAULT_GRACE_DAYS ) ); ?>" value="<?php echo esc_attr( null !== $p->grace_days ? (string) $p->grace_days : '' ); ?>"></label>
+				</p>
+				<p style="flex:1 1 120px;">
+					<label title="<?php esc_attr_e( 'One-time packages only: how many days the licence is valid.', 'wp-license-manager' ); ?>"><?php esc_html_e( 'Valid for (days)', 'wp-license-manager' ); ?><br>
+					<input type="number" min="1" class="widefat" name="<?php echo esc_attr( $f ); ?>[valid_for_days]" value="<?php echo esc_attr( null !== $p->valid_for_days ? (string) $p->valid_for_days : '' ); ?>"></label>
+				</p>
 			</div>
 			<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start;margin-top:8px;">
 				<p style="flex:2 1 240px;">

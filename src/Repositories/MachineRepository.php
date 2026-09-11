@@ -294,7 +294,7 @@ class MachineRepository {
 		if ( null !== $lease_expires_at ) {
 			$result = $wpdb->query(
 				$wpdb->prepare(
-					"UPDATE `{$table}` SET last_heartbeat_at = NOW(), lease_expires_at = %s WHERE id = %d",
+					"UPDATE `{$table}` SET last_heartbeat_at = UTC_TIMESTAMP(), lease_expires_at = %s WHERE id = %d",
 					$lease_expires_at,
 					$id
 				)
@@ -302,7 +302,7 @@ class MachineRepository {
 		} else {
 			$result = $wpdb->query(
 				$wpdb->prepare(
-					"UPDATE `{$table}` SET last_heartbeat_at = NOW() WHERE id = %d",
+					"UPDATE `{$table}` SET last_heartbeat_at = UTC_TIMESTAMP() WHERE id = %d",
 					$id
 				)
 			);

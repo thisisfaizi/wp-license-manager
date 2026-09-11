@@ -151,6 +151,34 @@ final class Plugin {
 			)
 		);
 
+		$this->container->bind(
+			Repositories\EntitlementRepository::class,
+			fn( $c ) => new Repositories\EntitlementRepository()
+		);
+
+		// Licence profiles and entitlements.
+		$this->container->bind(
+			Licensing\ProfileRegistry::class,
+			fn( $c ) => new Licensing\ProfileRegistry()
+		);
+		$this->container->bind(
+			Services\EntitlementService::class,
+			fn( $c ) => new Services\EntitlementService(
+				$c->make( Repositories\EntitlementRepository::class ),
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Licensing\ProfileRegistry::class )
+			)
+		);
+		$this->container->bind(
+			Licensing\TokenV2Service::class,
+			fn( $c ) => new Licensing\TokenV2Service(
+				$c->make( Services\EntitlementService::class ),
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Crypto\Signer::class ),
+				$c->make( Crypto\Fingerprint::class )
+			)
+		);
+
 		// Services.
 		$this->container->bind(
 			Services\GeneratorService::class,
@@ -163,7 +191,9 @@ final class Plugin {
 			Services\PlanService::class,
 			fn( $c ) => new Services\PlanService(
 				$c->make( Repositories\PlanRepository::class ),
-				$c->make( Repositories\PackageRepository::class )
+				$c->make( Repositories\PackageRepository::class ),
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Services\EntitlementService::class )
 			)
 		);
 		$this->container->bind(
@@ -175,7 +205,8 @@ final class Plugin {
 				$c->make( Repositories\ActivationLogRepository::class ),
 				$c->make( Repositories\BlacklistRepository::class ),
 				$c->make( Repositories\MachineRepository::class ),
-				$c->make( Crypto\Fingerprint::class )
+				$c->make( Crypto\Fingerprint::class ),
+				$c->make( Licensing\ProfileRegistry::class )
 			)
 		);
 		$this->container->bind(
@@ -187,6 +218,27 @@ final class Plugin {
 				$c->make( Repositories\BlacklistRepository::class ),
 				$c->make( Crypto\Fingerprint::class ),
 				$c->make( Crypto\Signer::class )
+			)
+		);
+		$this->container->bind(
+			Licensing\CheckInService::class,
+			fn( $c ) => new Licensing\CheckInService(
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Repositories\MachineRepository::class ),
+				$c->make( Repositories\ActivationLogRepository::class ),
+				$c->make( Services\ActivationService::class ),
+				$c->make( Licensing\TokenV2Service::class ),
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Crypto\Fingerprint::class )
+			)
+		);
+		$this->container->bind(
+			Licensing\OfflineCodeService::class,
+			fn( $c ) => new Licensing\OfflineCodeService(
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Repositories\MachineRepository::class ),
+				$c->make( Repositories\ActivationLogRepository::class ),
+				$c->make( Licensing\TokenV2Service::class )
 			)
 		);
 		$this->container->bind(
@@ -253,7 +305,9 @@ final class Plugin {
 				$c->make( Services\Subscriptions\GatewayBridge::class ),
 				$c->make( Services\Subscriptions\DunningManager::class ),
 				$c->make( Services\LicenseService::class ),
-				$c->make( Services\Subscriptions\BillingScheduler::class )
+				$c->make( Services\Subscriptions\BillingScheduler::class ),
+				$c->make( Services\Subscriptions\SubscriptionService::class ),
+				$c->make( Services\EntitlementService::class )
 			)
 		);
 		$this->container->bind(
@@ -288,8 +342,8 @@ final class Plugin {
 			fn( $c ) => new Integrations\WooCommerce\SelfServiceRenewal(
 				$c->make( Services\LicenseService::class ),
 				$c->make( Repositories\SubscriptionRepository::class ),
-				$c->make( Repositories\RenewalRepository::class ),
-				$c->make( Services\Subscriptions\BillingScheduler::class )
+				$c->make( Services\Subscriptions\RenewalProcessor::class ),
+				$c->make( Repositories\RenewalRepository::class )
 			)
 		);
 
@@ -305,14 +359,28 @@ final class Plugin {
 		// Global PHP API functions (Section 11) — load before REST routes.
 		require_once WPLM_PLUGIN_DIR . 'src/functions.php';
 
+		if ( defined( 'WP_CLI' ) && WP_CLI ) {
+			\WP_CLI::add_command( 'wplm', Cli\LicensingCommand::class );
+		}
+
 		// Safety net: run the installer whenever the stored DB version is behind.
 		// Deferred to admin_init so headers are already sent — prevents the
 		// "unexpected output during activation" warning (plugins_loaded fires
 		// inside the activation request before the activation hook runs).
 		add_action( 'admin_init', array( $this, 'maybe_upgrade_db' ) );
+		// A licence server is mostly REST and cron traffic; an update must not wait for someone
+		// to open wp-admin before its schema exists.
+		add_action( 'rest_api_init', array( $this, 'maybe_upgrade_db' ), 1 );
+		if ( wp_doing_cron() ) {
+			add_action( 'init', array( $this, 'maybe_upgrade_db' ), 1 );
+		}
 
 		// i18n.
 		add_action( 'init', array( $this, 'load_textdomain' ) );
+
+		// A missing secret used to fatal every request, admin included (audit F9). Crypto now
+		// loads secrets lazily, so the site stays up and the owner is told what to fix.
+		add_action( 'admin_notices', array( $this, 'notice_missing_secrets' ) );
 
 		// REST API.
 		add_action(
@@ -386,7 +454,9 @@ final class Plugin {
 			$this->container->make( Services\PlanService::class ),
 			$this->container->make( Services\GeneratorService::class ),
 			$this->container->make( Services\LicenseService::class ),
-			$this->container->make( Services\Subscriptions\SubscriptionService::class )
+			$this->container->make( Services\Subscriptions\SubscriptionService::class ),
+			$this->container->make( Services\EntitlementService::class ),
+			$this->container->make( Licensing\ProfileRegistry::class )
 		) )->register();
 
 		// Customer self-service renewal: create order → pay → license extended on completed.
@@ -405,6 +475,55 @@ final class Plugin {
 		require_once WPLM_PLUGIN_DIR . 'src/Install/Seeder.php';
 		( new Install\Installer() )->run();
 		( new Install\Seeder() )->run();
+	}
+
+	/**
+	 * The secrets that are missing or malformed, by option name.
+	 *
+	 * @return string[]
+	 */
+	public static function missing_secrets(): array {
+		$missing = array();
+
+		$enc = defined( 'WPLM_ENCRYPTION_KEY' ) && WPLM_ENCRYPTION_KEY ? WPLM_ENCRYPTION_KEY : get_option( 'wplm_encryption_key', '' );
+		$raw = $enc ? base64_decode( (string) $enc, true ) : false;
+		if ( ! $raw || 32 !== strlen( $raw ) ) {
+			$missing[] = 'wplm_encryption_key';
+		}
+
+		$kp      = defined( 'WPLM_SIGNING_KEYPAIR' ) && WPLM_SIGNING_KEYPAIR ? WPLM_SIGNING_KEYPAIR : get_option( 'wplm_signing_keypair', '' );
+		$decoded = $kp ? json_decode( (string) $kp, true ) : null;
+		if ( ! is_array( $decoded ) || empty( $decoded['sec'] ) || empty( $decoded['pub'] ) ) {
+			$missing[] = 'wplm_signing_keypair';
+		}
+
+		$hmac = defined( 'WPLM_FINGERPRINT_HMAC' ) && WPLM_FINGERPRINT_HMAC ? WPLM_FINGERPRINT_HMAC : get_option( 'wplm_fingerprint_hmac', '' );
+		if ( ! $hmac || ! base64_decode( (string) $hmac, true ) ) {
+			$missing[] = 'wplm_fingerprint_hmac';
+		}
+
+		return $missing;
+	}
+
+	/** Admin notice naming any missing secret. */
+	public function notice_missing_secrets(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+		$missing = self::missing_secrets();
+		if ( empty( $missing ) ) {
+			return;
+		}
+		printf(
+			'<div class="notice notice-error"><p>%s</p></div>',
+			esc_html(
+				sprintf(
+					/* translators: %s: comma-separated option names */
+					__( 'WP License Manager cannot sign, encrypt or validate licences: missing or invalid secret(s) %s. Restore them from your backup (or define them in wp-config.php). Regenerating the signing keypair invalidates every issued token.', 'wp-license-manager' ),
+					implode( ', ', $missing )
+				)
+			)
+		);
 	}
 
 	/** Load plugin text domain. */

@@ -1,0 +1,171 @@
+
+{
+    "A.setup": {
+        "plan_id": 2,
+        "product_id": 334,
+        "user_id": 2,
+        "monthly_pkg": 3,
+        "lifetime_pkg": 4
+    },
+    "B.buy_monthly_bacs": {
+        "order": 335,
+        "fulfilled_while_on_hold": "",
+        "license": {
+            "id": "5",
+            "status": "1",
+            "expires_at": null,
+            "grace_days": "0",
+            "max_activations": "1",
+            "activation_count": "0",
+            "product_id": "334"
+        },
+        "subscription": {
+            "id": "3",
+            "status": "active",
+            "license_id": "5",
+            "next_payment": "2026-10-11 01:45:40",
+            "last_payment": null,
+            "payment_token_id": null,
+            "failed_attempts": "0"
+        }
+    },
+    "C.activate_pc1": {
+        "pc1": "machine 1",
+        "pc2_over_limit": "machine_limit_exceeded",
+        "license": {
+            "id": "5",
+            "status": "1",
+            "expires_at": null,
+            "grace_days": "0",
+            "max_activations": "1",
+            "activation_count": "1",
+            "product_id": "334"
+        },
+        "signed_token_payload": {
+            "key": "<audit test key, deleted>",
+            "expires": null,
+            "max": 1,
+            "pid": 334,
+            "iat": 1789091141
+        }
+    },
+    "D.renewal_due_no_token": {
+        "manual_renewal_due_fired_per_2_runs": 4,
+        "listeners_other_than_ours": true,
+        "subscription": {
+            "id": "3",
+            "status": "active",
+            "license_id": "5",
+            "next_payment": "2026-09-08 01:45:41",
+            "last_payment": null,
+            "payment_token_id": null,
+            "failed_attempts": "0"
+        },
+        "license": {
+            "id": "5",
+            "status": "1",
+            "expires_at": null,
+            "grace_days": "0",
+            "max_activations": "1",
+            "activation_count": "1",
+            "product_id": "334"
+        },
+        "validate_3_days_after_unpaid_due": {
+            "valid": true,
+            "code": null
+        }
+    },
+    "E.expired_then_self_service_renewal": {
+        "validate_when_expired": {
+            "valid": false,
+            "code": "expired"
+        },
+        "status_after_expired_validate": "3",
+        "renewal_order": 336,
+        "pay_url_created": true,
+        "license_after_paid": {
+            "id": "5",
+            "status": "1",
+            "expires_at": "2026-10-11 01:45:42",
+            "grace_days": "0",
+            "max_activations": "1",
+            "activation_count": "1",
+            "product_id": "334"
+        },
+        "signature_refreshed": false,
+        "subscription_after_paid": {
+            "id": "3",
+            "status": "active",
+            "license_id": "5",
+            "next_payment": "2026-10-11 01:45:42",
+            "last_payment": "2026-09-11 01:45:42",
+            "payment_token_id": null,
+            "failed_attempts": "0"
+        },
+        "validate_after_paid": {
+            "valid": true,
+            "code": null
+        }
+    },
+    "F.card_charge_fails": {
+        "after_first_failure": {
+            "subscription": {
+                "id": "3",
+                "status": "on-hold",
+                "license_id": "5",
+                "next_payment": "2026-09-12 01:45:43",
+                "last_payment": "2026-09-11 01:45:42",
+                "payment_token_id": "1",
+                "failed_attempts": "1"
+            },
+            "license": {
+                "id": "5",
+                "status": "4",
+                "expires_at": "2026-10-11 01:45:42",
+                "grace_days": "0",
+                "max_activations": "1",
+                "activation_count": "1",
+                "product_id": "334"
+            }
+        },
+        "retry_picked_up_by_due_query": 0,
+        "after_retry_day_cron": {
+            "subscription": {
+                "id": "3",
+                "status": "on-hold",
+                "license_id": "5",
+                "next_payment": "2026-09-11 01:44:43",
+                "last_payment": "2026-09-11 01:45:42",
+                "payment_token_id": "1",
+                "failed_attempts": "1"
+            },
+            "license": {
+                "id": "5",
+                "status": "4",
+                "expires_at": "2026-10-11 01:45:42",
+                "grace_days": "0",
+                "max_activations": "1",
+                "activation_count": "1",
+                "product_id": "334"
+            }
+        }
+    },
+    "G.admin_deactivate_twice": {
+        "mid": 1,
+        "before": "1",
+        "once": "0",
+        "twice": "0",
+        "active_machines": 0
+    }
+}
+ids: {"plans":[2],"products":[334],"orders":[335,336],"users":[2],"licenses":[5],"subscriptions":[3],"tokens":[1]}
+
+{
+    "validate_before": "expired",
+    "license_after_successful_charge": {
+        "status": "3",
+        "expires_at": "2026-10-06 01:46:17"
+    },
+    "token_expires": "2026-10-06 01:46:17",
+    "validate_after": "expired"
+}

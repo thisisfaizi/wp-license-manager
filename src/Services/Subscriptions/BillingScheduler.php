@@ -30,7 +30,7 @@ class BillingScheduler {
 	 *   1. $from_date (explicit override)
 	 *   2. $sub->last_payment
 	 *   3. $sub->trial_end
-	 *   4. current_time( 'mysql' )
+	 *   4. current_time( 'mysql', true )
 	 *
 	 * All arithmetic is performed in UTC so the stored DATETIME is always UTC.
 	 *
@@ -42,7 +42,7 @@ class BillingScheduler {
 		$base = $from_date
 			?? $sub->last_payment
 			?? $sub->trial_end
-			?? current_time( 'mysql' );
+			?? current_time( 'mysql', true );
 
 		$dt = new \DateTime( $base, new \DateTimeZone( 'UTC' ) );
 		$dt->add( new \DateInterval( $this->period_to_interval( $sub->billing_interval, $sub->billing_period ) ) );
@@ -108,7 +108,7 @@ class BillingScheduler {
 		string $billing_period,
 		string $sync_day_of_month = ''
 	): array {
-		$now = current_time( 'mysql' );
+		$now = current_time( 'mysql', true );
 
 		// No sync — full cycle from now.
 		if ( '' === $sync_day_of_month || '0' === $sync_day_of_month ) {
@@ -183,7 +183,7 @@ class BillingScheduler {
 	 * @return string Next payment datetime (Y-m-d H:i:s, UTC).
 	 */
 	private function next_payment_from_now( int $n, string $period ): string {
-		$dt = new \DateTime( current_time( 'mysql' ), new \DateTimeZone( 'UTC' ) );
+		$dt = new \DateTime( current_time( 'mysql', true ), new \DateTimeZone( 'UTC' ) );
 		$dt->add( new \DateInterval( $this->period_to_interval( $n, $period ) ) );
 		return $dt->format( 'Y-m-d H:i:s' );
 	}

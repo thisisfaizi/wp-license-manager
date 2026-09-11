@@ -103,7 +103,7 @@ class SubscriptionRepository {
 				"SELECT * FROM `{$table}`
 				 WHERE status IN (%s, %s)
 				   AND next_payment IS NOT NULL
-				   AND next_payment <= NOW()
+				   AND next_payment <= UTC_TIMESTAMP()
 				 ORDER BY next_payment ASC",
 				'active',
 				'trial'

@@ -16,12 +16,19 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Manages the dunning cycle after a renewal charge fails.
  *
- * Default retry schedule: attempt again 1 day, 3 days, then 5 days after the
- * original failure. After all retries are exhausted the subscription is
- * cancelled immediately and the bound license is revoked.
+ * The schedule lists the retry delays in days after each failure (default 1, 3, 5: three
+ * retries). While retrying, the subscription stays `active` so the due-renewal query picks
+ * the retry up. When every retry has failed, the subscription goes `on-hold` (awaiting a
+ * manual payment) and the customer is invoiced to pay by hand.
  *
- * The schedule is filterable via `wplm_dunning_retry_schedule` so merchants
- * can configure their own retry windows.
+ * **Nothing here changes the licence.** Access ends only because the paid term
+ * (expires_at + grace) runs out; locking a customer is an owner action. The previous
+ * behaviour — suspend the licence on the first failure, park the subscription where the
+ * retry query never saw it, revoke on the last — locked out customers who then could not
+ * be recovered automatically (audit F3).
+ *
+ * The schedule comes from the `wplm_dunning_schedule` setting and is filterable via
+ * `wplm_dunning_retry_schedule`.
  */
 class DunningManager {
 
@@ -48,75 +55,75 @@ class DunningManager {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Handle a failed renewal charge attempt.
+	 * The retry delays, in days, one per retry.
 	 *
-	 * Steps:
-	 *   1. Read the configured retry schedule (filterable).
-	 *   2. Increment failed_attempts on the subscription.
-	 *   3. If attempts have been exhausted: cancel the subscription immediately
-	 *      (which revokes the license) and fire the final-failure action.
-	 *   4. Otherwise: put the subscription on-hold (which suspends the license),
-	 *      schedule the next retry, and fire the per-attempt failure action.
+	 * @return int[]
+	 */
+	public function retry_schedule(): array {
+		$stored   = json_decode( (string) get_option( 'wplm_dunning_schedule', '' ), true );
+		$schedule = is_array( $stored ) && ! empty( $stored ) ? $stored : array( 1, 3, 5 );
+
+		/**
+		 * Filter the dunning retry schedule.
+		 *
+		 * Each element is the number of days after a failure on which to retry.
+		 *
+		 * @param int[] $schedule Retry delays in days.
+		 */
+		$schedule = (array) apply_filters( 'wplm_dunning_retry_schedule', $schedule );
+
+		return array_values( array_filter( array_map( 'absint', $schedule ) ) );
+	}
+
+	/**
+	 * Handle a failed renewal charge attempt.
 	 *
 	 * @param Subscription $sub The subscription whose renewal just failed.
 	 * @return void
 	 */
 	public function handle_failure( Subscription $sub ): void {
-		/**
-		 * Filter the dunning retry schedule.
-		 *
-		 * Each element is the number of days after the original failure on
-		 * which to retry. Default: [1, 3, 5].
-		 *
-		 * @param int[] $schedule Array of day offsets for retry attempts.
-		 */
-		$schedule = (array) apply_filters( 'wplm_dunning_retry_schedule', array( 1, 3, 5 ) );
+		$schedule = $this->retry_schedule();
+		$attempts = $sub->failed_attempts + 1;
 
-		// Increment the attempt counter. The value already stored in DB is the
-		// count of failures so far (0 = first failure happening now).
-		$attempts_so_far = $sub->failed_attempts + 1;
+		if ( $attempts > count( $schedule ) ) {
+			$this->sub_repo->update( $sub->id, array( 'failed_attempts' => $attempts ) );
 
-		// Exhausted all retries?
-		if ( $attempts_so_far >= count( $schedule ) ) {
-			// Update the counter in DB first so it's accurate if any action
-			// hook reads the record.
-			$this->sub_repo->update( $sub->id, array( 'failed_attempts' => $attempts_so_far ) );
+			if ( 'on-hold' !== $sub->status ) {
+				$this->sub_service->update_status( $sub->id, 'on-hold' );
+			}
 
-			// Immediate cancel + license revoke.
-			$this->sub_service->cancel( $sub->id, false );
+			$updated = $this->sub_repo->find_by_id( $sub->id ) ?? $sub;
+
+			/** This action is documented in RenewalProcessor::process_single(). */
+			do_action( 'wplm_subscription_manual_renewal_due', $updated );
 
 			/**
-			 * Fires after dunning retries are exhausted and the subscription is cancelled.
+			 * Fires after every retry has failed and the subscription awaits a manual payment.
 			 *
-			 * @param Subscription $sub The (now cancelled) subscription.
+			 * @param Subscription $updated The on-hold subscription.
 			 */
-			do_action( 'wplm_subscription_payment_failed_final', $sub );
+			do_action( 'wplm_subscription_payment_failed_final', $updated );
 
 			return;
 		}
 
-		// Suspend the subscription while we wait for the retry.
-		$this->sub_service->pause( $sub->id );
-
-		// Compute the next retry date: $schedule[$attempts_so_far - 1] is the
-		// day offset for this attempt (0-indexed into the schedule array).
-		$day_offset = (int) ( $schedule[ $attempts_so_far - 1 ] ?? 1 );
-		$next_retry = gmdate( 'Y-m-d H:i:s', strtotime( "+{$day_offset} days" ) );
+		$day_offset = (int) $schedule[ $attempts - 1 ];
+		$next_retry = gmdate( 'Y-m-d H:i:s', time() + $day_offset * DAY_IN_SECONDS );
 
 		$this->sub_repo->update(
 			$sub->id,
 			array(
 				'next_payment'    => $next_retry,
-				'failed_attempts' => $attempts_so_far,
+				'failed_attempts' => $attempts,
 			)
 		);
 
 		/**
 		 * Fires after a renewal charge fails and a retry is scheduled.
 		 *
-		 * @param Subscription $sub      The subscription with the updated failed_attempts count.
+		 * @param Subscription $sub      The subscription (before the retry date was stored).
 		 * @param int          $attempts The total number of failed attempts so far (1-based).
 		 */
-		do_action( 'wplm_subscription_payment_failed', $sub, $attempts_so_far );
+		do_action( 'wplm_subscription_payment_failed', $sub, $attempts );
 	}
 }

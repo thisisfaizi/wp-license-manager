@@ -1,6 +1,6 @@
 <?php
 /**
- * Database installer — creates all 14 WPLM tables via dbDelta.
+ * Database installer — creates every WPLM table via dbDelta.
  *
  * @package WPLM\Install
  */
@@ -117,6 +117,7 @@ class Installer {
 			'subscription_notes',
 			'plans',
 			'packages',
+			'entitlements',
 		);
 
 		foreach ( $tables as $table ) {
@@ -164,6 +165,7 @@ class Installer {
   expires_at DATETIME DEFAULT NULL,
   grace_days INT NOT NULL DEFAULT 0,
   source TINYINT NOT NULL DEFAULT 2,
+  profile VARCHAR(40) DEFAULT NULL,
   created_at DATETIME NOT NULL,
   created_by BIGINT DEFAULT NULL,
   updated_at DATETIME NOT NULL,
@@ -173,7 +175,8 @@ class Installer {
   KEY order_id (order_id),
   KEY user_id (user_id),
   KEY status (status),
-  KEY expires_at (expires_at)
+  KEY expires_at (expires_at),
+  KEY profile (profile)
 ) ENGINE=InnoDB {$charset_collate};",
 
 			// 2 — machines (devices)
@@ -191,6 +194,8 @@ class Installer {
   status TINYINT NOT NULL DEFAULT 1,
   activated_at DATETIME NOT NULL,
   deactivated_at DATETIME DEFAULT NULL,
+  token_fp CHAR(64) DEFAULT NULL,
+  usage_json TEXT DEFAULT NULL,
   created_at DATETIME NOT NULL,
   PRIMARY KEY  (id),
   UNIQUE KEY license_fingerprint (license_id, fingerprint),
@@ -225,7 +230,8 @@ class Installer {
   PRIMARY KEY  (id),
   KEY license_id (license_id),
   KEY created_at (created_at),
-  KEY event (event)
+  KEY event (event),
+  KEY machine_event (machine_id,event,created_at)
 ) ENGINE=InnoDB {$charset_collate};",
 
 			// 5 — generators
@@ -402,6 +408,7 @@ class Installer {
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   name VARCHAR(191) NOT NULL,
   description TEXT DEFAULT NULL,
+  profile VARCHAR(40) DEFAULT NULL,
   status TINYINT NOT NULL DEFAULT 1,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL,
@@ -425,13 +432,33 @@ class Installer {
   max_activations INT DEFAULT NULL,
   overage_strategy VARCHAR(20) NOT NULL DEFAULT 'deny',
   valid_for_days INT DEFAULT NULL,
+  grace_days INT DEFAULT NULL,
   benefits TEXT DEFAULT NULL,
+  entitlements TEXT DEFAULT NULL,
   sort_order INT NOT NULL DEFAULT 0,
   status TINYINT NOT NULL DEFAULT 1,
   created_at DATETIME NOT NULL,
   PRIMARY KEY  (id),
   KEY plan_id (plan_id),
   KEY status (status)
+) ENGINE=InnoDB {$charset_collate};",
+
+			// 17 — entitlements (what a profile licence grants: module lines and limit lines;
+			// paid_through is the inclusive last paid day, NULL = lifetime)
+			"CREATE TABLE {$p}entitlements (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  license_id BIGINT NOT NULL,
+  kind VARCHAR(10) NOT NULL,
+  code VARCHAR(40) NOT NULL,
+  qty INT NOT NULL DEFAULT 0,
+  paid_through DATE DEFAULT NULL,
+  source VARCHAR(10) NOT NULL DEFAULT 'manual',
+  subscription_id BIGINT DEFAULT NULL,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY  (id),
+  KEY license_id (license_id),
+  KEY subscription_id (subscription_id)
 ) ENGINE=InnoDB {$charset_collate};",
 		);
 	}

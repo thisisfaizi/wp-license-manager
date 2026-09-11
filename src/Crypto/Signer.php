@@ -17,11 +17,15 @@ defined( 'ABSPATH' ) || exit;
  */
 class Signer {
 
-	private string $secret_key;
-	private string $public_key;
+	/** Loaded on first use, so constructing the signer never fails (audit F9). */
+	private ?string $secret_key = null;
+	private ?string $public_key = null;
 
-	public function __construct() {
-		$this->load_keypair();
+	/** Load the keypair if it has not been loaded yet; throws when it is missing. */
+	private function ensure_keypair(): void {
+		if ( null === $this->secret_key || null === $this->public_key ) {
+			$this->load_keypair();
+		}
 	}
 
 	/**
@@ -36,12 +40,8 @@ class Signer {
 			throw new \RuntimeException( 'WPLM Signer: libsodium is required for Ed25519 signing.' );
 		}
 
-		$body = self::base64url_encode( wp_json_encode( $payload ) );
-		$sig  = self::base64url_encode(
-			sodium_crypto_sign_detached( $body, $this->secret_key )
-		);
-
-		return $body . '.' . $sig;
+		$this->ensure_keypair();
+		return CompactToken::sign( $payload, $this->secret_key );
 	}
 
 	/**
@@ -68,6 +68,7 @@ class Signer {
 		}
 
 		try {
+			$this->ensure_keypair();
 			$valid = sodium_crypto_sign_verify_detached( $sig, $body, $this->public_key );
 		} catch ( \Exception $e ) {
 			return null;
@@ -83,6 +84,7 @@ class Signer {
 
 	/** Return the base64-encoded public key (safe to expose via REST). */
 	public function get_public_key_base64(): string {
+		$this->ensure_keypair();
 		return base64_encode( $this->public_key );
 	}
 

@@ -7,6 +7,7 @@
 
 namespace WPLM\Services;
 
+use WPLM\Licensing\ProfileRegistry;
 use WPLM\Models\Plan;
 use WPLM\Repositories\PackageRepository;
 use WPLM\Repositories\PlanRepository;
@@ -26,13 +27,23 @@ class PlanService {
 	/** @var PackageRepository */
 	private PackageRepository $package_repo;
 
+	/** @var ProfileRegistry */
+	private ProfileRegistry $profiles;
+
+	/** @var EntitlementService */
+	private EntitlementService $entitlements;
+
 	/**
-	 * @param PlanRepository    $plan_repo    Plan data-access layer.
-	 * @param PackageRepository $package_repo Package data-access layer.
+	 * @param PlanRepository     $plan_repo    Plan data-access layer.
+	 * @param PackageRepository  $package_repo Package data-access layer.
+	 * @param ProfileRegistry    $profiles     Known licence profiles.
+	 * @param EntitlementService $entitlements Validates package entitlement templates.
 	 */
-	public function __construct( PlanRepository $plan_repo, PackageRepository $package_repo ) {
+	public function __construct( PlanRepository $plan_repo, PackageRepository $package_repo, ProfileRegistry $profiles, EntitlementService $entitlements ) {
 		$this->plan_repo    = $plan_repo;
 		$this->package_repo = $package_repo;
+		$this->profiles     = $profiles;
+		$this->entitlements = $entitlements;
 	}
 
 	/**
@@ -68,9 +79,9 @@ class PlanService {
 	/**
 	 * Create a plan.
 	 *
-	 * @param array $data name, description, status.
+	 * @param array $data name, description, status, profile (licence profile code or null).
 	 * @return int New plan id.
-	 * @throws \InvalidArgumentException When name is empty.
+	 * @throws \InvalidArgumentException When name is empty or the profile is unknown.
 	 */
 	public function create_plan( array $data ): int {
 		$name = trim( (string) ( $data['name'] ?? '' ) );
@@ -81,6 +92,7 @@ class PlanService {
 			array(
 				'name'        => $name,
 				'description' => isset( $data['description'] ) ? (string) $data['description'] : null,
+				'profile'     => $this->checked_profile( $data['profile'] ?? null ),
 				'status'      => isset( $data['status'] ) ? (int) $data['status'] : 1,
 			)
 		);
@@ -104,7 +116,27 @@ class PlanService {
 		if ( isset( $data['status'] ) ) {
 			$update['status'] = (int) $data['status'];
 		}
+		if ( array_key_exists( 'profile', $data ) ) {
+			$update['profile'] = $this->checked_profile( $data['profile'] );
+		}
 		return empty( $update ) ? false : $this->plan_repo->update( $id, $update );
+	}
+
+	/**
+	 * Validate a licence profile code.
+	 *
+	 * @param mixed $code Raw code; null or '' means the plan sells classic licences.
+	 * @return string|null
+	 * @throws \InvalidArgumentException When the code is not a registered profile.
+	 */
+	private function checked_profile( $code ): ?string {
+		if ( null === $code || '' === $code ) {
+			return null;
+		}
+		if ( null === $this->profiles->get( (string) $code ) ) {
+			throw new \InvalidArgumentException( sprintf( 'Unknown licence profile "%s".', (string) $code ) );
+		}
+		return (string) $code;
 	}
 
 	/**
@@ -124,22 +156,43 @@ class PlanService {
 	 * a matching id are inserted, and existing packages absent from the input
 	 * are deleted. Package ids are preserved so historical references stay valid.
 	 *
+	 * A plan that sells a licence profile validates each package's entitlement template against it
+	 * **before anything is written**, so a template with an unknown code saves nothing.
+	 *
 	 * @param int   $plan_id  Plan id.
 	 * @param array $packages Array of normalized package field arrays.
 	 * @return void
+	 * @throws \InvalidArgumentException When a package's entitlement template is invalid.
 	 */
 	public function sync_packages( int $plan_id, array $packages ): void {
+		$plan         = $this->plan_repo->find_by_id( $plan_id, false );
+		$profile      = null !== $plan ? $this->profiles->get( $plan->profile ) : null;
 		$existing     = $this->package_repo->get_by_plan( $plan_id );
 		$existing_ids = array_map( static fn( $p ) => $p->id, $existing );
 		$kept_ids     = array();
 		$order        = 0;
 
+		$rows = array();
 		foreach ( $packages as $pkg ) {
-			$data               = $this->normalize_package( $pkg, $plan_id, $order );
-			$incoming_id        = (int) ( $pkg['id'] ?? 0 );
-			++$order;
+			$data        = $this->normalize_package( $pkg, $plan_id, $order );
+			$incoming_id = (int) ( $pkg['id'] ?? 0 );
+			$is_existing = $incoming_id > 0 && in_array( $incoming_id, $existing_ids, true );
 
-			if ( $incoming_id > 0 && in_array( $incoming_id, $existing_ids, true ) ) {
+			if ( null === $profile ) {
+				$data['entitlements'] = array();
+			} elseif ( array_key_exists( 'entitlements', $pkg ) ) {
+				$data['entitlements'] = $this->entitlements->normalize_template( $profile, (array) $pkg['entitlements'] );
+			} elseif ( ! $is_existing ) {
+				$data['entitlements'] = array();
+			}
+			// An existing package saved without a template field keeps the template it has.
+
+			$rows[] = array( $incoming_id, $is_existing, $data );
+			++$order;
+		}
+
+		foreach ( $rows as list( $incoming_id, $is_existing, $data ) ) {
+			if ( $is_existing ) {
 				$this->package_repo->update( $incoming_id, $data );
 				$kept_ids[] = $incoming_id;
 			} else {
@@ -187,6 +240,7 @@ class PlanService {
 			'max_activations'  => isset( $pkg['max_activations'] ) && '' !== $pkg['max_activations'] ? (int) $pkg['max_activations'] : null,
 			'overage_strategy' => (string) ( $pkg['overage_strategy'] ?? 'deny' ),
 			'valid_for_days'   => isset( $pkg['valid_for_days'] ) && '' !== $pkg['valid_for_days'] ? (int) $pkg['valid_for_days'] : null,
+			'grace_days'       => isset( $pkg['grace_days'] ) && '' !== $pkg['grace_days'] ? max( 0, (int) $pkg['grace_days'] ) : null,
 			'benefits'         => array_values( (array) $benefits ),
 			'sort_order'       => $order,
 			'status'           => isset( $pkg['status'] ) ? (int) $pkg['status'] : 1,

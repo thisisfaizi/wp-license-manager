@@ -156,8 +156,9 @@ class ActivationLogRepository {
 	public function count_events_since( int $license_id, string $event, int $since_timestamp ): int {
 		global $wpdb;
 
-		$table     = $wpdb->prefix . 'wplm_activation_log';
-		$since_str = gmdate( 'Y-m-d H:i:s', $since_timestamp );
+		$table = $wpdb->prefix . 'wplm_activation_log';
+		// created_at is written as current_time( 'mysql' ) (site time), so compare in site time too.
+		$since_str = wp_date( 'Y-m-d H:i:s', $since_timestamp );
 
 		return (int) $wpdb->get_var(
 			$wpdb->prepare(
@@ -169,6 +170,61 @@ class ActivationLogRepository {
 				$event,
 				$since_str
 			)
+		);
+	}
+
+	/**
+	 * Events of one type for a licence or a machine since a given time, oldest first. Used by the
+	 * check-in rate limit and the move limit, which count what happened in a rolling window.
+	 *
+	 * @param string $scope           'license_id' or 'machine_id'.
+	 * @param int    $scope_id        Licence or machine id.
+	 * @param string $event           Event name.
+	 * @param int    $since_timestamp Unix timestamp; rows on or after it are returned.
+	 * @param int    $after_id        Only rows with a larger id (e.g. after a reset event).
+	 * @return array<int, array{id: int, at: int}> Row id and creation time (unix).
+	 */
+	public function events_since( string $scope, int $scope_id, string $event, int $since_timestamp, int $after_id = 0 ): array {
+		global $wpdb;
+
+		$column = 'machine_id' === $scope ? 'machine_id' : 'license_id';
+		$table  = $wpdb->prefix . 'wplm_activation_log';
+		$rows   = $wpdb->get_results(
+			$wpdb->prepare(
+				// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- $column is whitelisted.
+				"SELECT id, created_at FROM `{$table}` WHERE {$column} = %d AND event = %s AND created_at >= %s AND id > %d ORDER BY id ASC",
+				$scope_id,
+				$event,
+				// created_at is written as current_time( 'mysql' ) (site time), so compare in site time.
+				wp_date( 'Y-m-d H:i:s', $since_timestamp ),
+				$after_id
+			),
+			ARRAY_A
+		);
+
+		$tz = wp_timezone();
+		return array_map(
+			static fn( array $r ) => array(
+				'id' => (int) $r['id'],
+				'at' => ( new \DateTimeImmutable( (string) $r['created_at'], $tz ) )->getTimestamp(),
+			),
+			is_array( $rows ) ? $rows : array()
+		);
+	}
+
+	/**
+	 * The id of a licence's most recent event of one type, or 0.
+	 *
+	 * @param int    $license_id Licence row id.
+	 * @param string $event      Event name.
+	 * @return int
+	 */
+	public function last_event_id( int $license_id, string $event ): int {
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'wplm_activation_log';
+		return (int) $wpdb->get_var(
+			$wpdb->prepare( "SELECT MAX(id) FROM `{$table}` WHERE license_id = %d AND event = %s", $license_id, $event )
 		);
 	}
 

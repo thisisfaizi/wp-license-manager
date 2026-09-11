@@ -9,7 +9,9 @@ namespace WPLM\Integrations\WooCommerce;
 
 defined( 'ABSPATH' ) || exit;
 
+use WPLM\Licensing\ProfileRegistry;
 use WPLM\Models\Package;
+use WPLM\Services\EntitlementService;
 use WPLM\Services\GeneratorService;
 use WPLM\Services\LicenseService;
 use WPLM\Services\PlanService;
@@ -43,6 +45,12 @@ class PlanCheckout {
 	/** @var SubscriptionService */
 	private SubscriptionService $subscriptions;
 
+	/** @var EntitlementService */
+	private EntitlementService $entitlements;
+
+	/** @var ProfileRegistry */
+	private ProfileRegistry $profiles;
+
 	/** @var array<int,\WPLM\Models\Plan|null> Per-request plan cache. */
 	private array $plan_cache = array();
 
@@ -51,17 +59,23 @@ class PlanCheckout {
 	 * @param GeneratorService    $generators
 	 * @param LicenseService      $licenses
 	 * @param SubscriptionService $subscriptions
+	 * @param EntitlementService  $entitlements
+	 * @param ProfileRegistry     $profiles
 	 */
 	public function __construct(
 		PlanService $plans,
 		GeneratorService $generators,
 		LicenseService $licenses,
-		SubscriptionService $subscriptions
+		SubscriptionService $subscriptions,
+		EntitlementService $entitlements,
+		ProfileRegistry $profiles
 	) {
 		$this->plans         = $plans;
 		$this->generators    = $generators;
 		$this->licenses      = $licenses;
 		$this->subscriptions = $subscriptions;
+		$this->entitlements  = $entitlements;
+		$this->profiles      = $profiles;
 	}
 
 	/** Register all storefront + checkout hooks. */
@@ -380,6 +394,7 @@ class PlanCheckout {
 		}
 
 		$issued = array();
+		$failed = 0;
 
 		/** @var \WC_Order_Item_Product $item */
 		foreach ( $order->get_items() as $item ) {
@@ -387,8 +402,17 @@ class PlanCheckout {
 			if ( ! $package_id ) {
 				continue;
 			}
+			// Already issued on an earlier attempt: never issue a second licence.
+			if ( '' !== (string) $item->get_meta( '_wplm_license_ids' ) ) {
+				continue;
+			}
 			$pkg = $this->lookup_package( $package_id );
 			if ( null === $pkg ) {
+				++$failed;
+				$order->add_order_note(
+					/* translators: %d: package id */
+					sprintf( __( 'WPLM: a licence could not be issued — package %d no longer exists.', 'wp-license-manager' ), $package_id )
+				);
 				continue;
 			}
 
@@ -400,11 +424,24 @@ class PlanCheckout {
 					$item->save_meta_data();
 				}
 			} catch ( \Throwable $e ) {
+				++$failed;
 				\WPLM\Support\Logger::error( 'PlanCheckout: fulfilment failed for package ' . $package_id . ' — ' . $e->getMessage() );
+				$order->add_order_note(
+					sprintf(
+						/* translators: 1: package name, 2: error message */
+						__( 'WPLM: a licence could not be issued for "%1$s" — %2$s. Fix the cause, then set the order to Processing or Completed again to retry.', 'wp-license-manager' ),
+						$pkg->name,
+						$e->getMessage()
+					)
+				);
 			}
 		}
 
-		$order->update_meta_data( '_wplm_plan_fulfilled', '1' );
+		// Mark done only when every package line was issued, so a failure stays retryable
+		// instead of silently leaving a paying customer without a licence (audit F10).
+		if ( 0 === $failed ) {
+			$order->update_meta_data( '_wplm_plan_fulfilled', '1' );
+		}
 		$order->save();
 
 		if ( ! empty( $issued ) ) {
@@ -423,12 +460,28 @@ class PlanCheckout {
 	 */
 	private function fulfill_item( \WC_Order $order, $item, Package $pkg ) {
 		$generator_id = $pkg->generator_id ?: (int) get_option( 'wplm_default_generator_id', 0 );
-		$keys         = $this->generators->generate_batch( $generator_id ?: 1, 1 );
+		if ( $generator_id <= 0 ) {
+			throw new \RuntimeException( 'no key generator is configured (WPLM → Generators)' );
+		}
+		// A plan that sells a licence profile issues an entitlement licence. Check
+		// its template before anything is created, so a bad template leaves nothing half-issued.
+		$plan         = $this->plans->get( $pkg->plan_id );
+		$profile_code = null !== $plan ? $plan->profile : null;
+		if ( null !== $profile_code ) {
+			$profile = $this->profiles->get( $profile_code );
+			if ( null === $profile ) {
+				throw new \RuntimeException( sprintf( 'the plan sells an unknown licence profile "%s"', $profile_code ) );
+			}
+			$this->entitlements->normalize_template( $profile, $pkg->entitlements );
+		}
+
+		$keys = $this->generators->generate_batch( $generator_id, 1 );
 		if ( empty( $keys ) ) {
 			throw new \RuntimeException( 'No key generated for package ' . $pkg->id );
 		}
 
-		$now     = current_time( 'mysql' );
+		// All subscription/licence dates are UTC; current_time( 'mysql' ) is site-local (audit F7).
+		$now     = gmdate( 'Y-m-d H:i:s' );
 		$max_act = $pkg->max_activations;
 		$sub_id  = 0;
 		$expires = null;
@@ -484,6 +537,11 @@ class PlanCheckout {
 			$status = ( null !== $trial_end ) ? 'trial' : 'active';
 			$item->update_meta_data( '_wplm_subscription_id', $sub_id );
 			$item->save_meta_data();
+
+			// The licence covers exactly what has been paid for (or the trial). Renewals extend
+			// it; an unpaid renewal lets it lapse after grace. Previously a recurring licence was
+			// perpetual and only a subscription status change could end it (audit F1/F2).
+			$expires = $next_payment;
 		} elseif ( Package::TYPE_ONETIME === $pkg->billing_type && $pkg->valid_for_days ) {
 			$expires = $this->add_period( $now, $pkg->valid_for_days, 'day' );
 		}
@@ -498,9 +556,22 @@ class PlanCheckout {
 				'max_activations'  => $max_act,
 				'overage_strategy' => $pkg->overage_strategy,
 				'expires_at'       => $expires,
+				'grace_days'       => $pkg->effective_grace_days(),
 				'source'           => 3,
+				'profile'          => $profile_code,
 			)
 		);
+
+		// The entitlement licence itself never expires (LicenseRepository drops the expiry); its lines
+		// are paid through the last day of the paid term, or lifetime.
+		if ( null !== $profile_code ) {
+			$this->entitlements->grant_package(
+				$license,
+				$pkg,
+				$sub_id > 0 ? $sub_id : null,
+				null !== $expires ? EntitlementService::paid_through_for( $expires ) : null
+			);
+		}
 
 		if ( $sub_id > 0 ) {
 			$this->subscriptions->bind_license( $sub_id, $license->id );

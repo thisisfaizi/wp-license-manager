@@ -194,6 +194,7 @@ class LicenseRepository {
 		$now                = current_time( 'mysql' );
 		$data['created_at'] = $now;
 		$data['updated_at'] = $now;
+		$data               = $this->without_profile_expiry( $data, null );
 
 		$result = $wpdb->insert(
 			$wpdb->prefix . 'wplm_licenses',
@@ -218,6 +219,7 @@ class LicenseRepository {
 		global $wpdb;
 
 		$data['updated_at'] = current_time( 'mysql' );
+		$data               = $this->without_profile_expiry( $data, $id );
 
 		$result = $wpdb->update(
 			$wpdb->prefix . 'wplm_licenses',
@@ -226,6 +228,47 @@ class LicenseRepository {
 		);
 
 		return $result !== false && $result > 0;
+	}
+
+	/**
+	 * A profile licence never stores an expiry: its entitlement lines carry the dates, and the app
+	 * computes grace and read-only from the token. If one were written, classic validation would mark
+	 * the licence expired and activation/check-in would refuse a customer who can only recover by
+	 * paying: a lock-out the server must never impose on an entitlement licence.
+	 *
+	 * Enforced here, the one place every path writes through (checkout, renewals, subscription
+	 * cancellation, first activation, admin, REST, CSV import), rather than in each caller.
+	 *
+	 * @param array    $data Column => value pairs about to be written.
+	 * @param int|null $id   Row id for an update; null for an insert.
+	 * @return array
+	 */
+	private function without_profile_expiry( array $data, ?int $id ): array {
+		global $wpdb;
+
+		if ( array_key_exists( 'profile', $data ) ) {
+			$profile = $data['profile'];
+			if ( '' === $profile ) {
+				$data['profile'] = null;
+				$profile         = null;
+			}
+			if ( null !== $profile ) {
+				$data['expires_at'] = null; // Becoming a profile licence clears any expiry.
+			}
+			return $data;
+		}
+
+		if ( ! array_key_exists( 'expires_at', $data ) || null === $data['expires_at'] || null === $id ) {
+			return $data;
+		}
+
+		$profile = $wpdb->get_var(
+			$wpdb->prepare( "SELECT profile FROM `{$wpdb->prefix}wplm_licenses` WHERE id = %d", $id )
+		);
+		if ( null !== $profile && '' !== $profile ) {
+			$data['expires_at'] = null;
+		}
+		return $data;
 	}
 
 	/**
@@ -344,7 +387,7 @@ class LicenseRepository {
 			$wpdb->prepare(
 				"SELECT COUNT(*) FROM `{$table}`
 				 WHERE status = 1
-				   AND expires_at BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL %d DAY)",
+				   AND expires_at BETWEEN UTC_TIMESTAMP() AND DATE_ADD(UTC_TIMESTAMP(), INTERVAL %d DAY)",
 				$days
 			)
 		);

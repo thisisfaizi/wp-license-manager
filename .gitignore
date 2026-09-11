@@ -15,3 +15,7 @@
 # IDE
 /.idea/
 /.vscode/
+
+# Local PHPUnit overrides
+/phpunit.xml
+/tests/.tmp/

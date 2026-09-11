@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<!--
+  WPLM test suite. Integration tests run against a real WordPress + WooCommerce + MySQL.
+  Configure the database and the WordPress core through environment variables — see
+  tests/README.md. Never point WPLM_TESTS_DB_NAME at a site database: the WordPress test
+  installer drops its tables on every run.
+-->
+<phpunit
+	bootstrap="tests/bootstrap.php"
+	backupGlobals="false"
+	colors="false"
+	beStrictAboutOutputDuringTests="true"
+	beStrictAboutTestsThatDoNotTestAnything="true"
+	convertDeprecationsToExceptions="false"
+	failOnRisky="true"
+	failOnWarning="true"
+	verbose="true"
+>
+	<testsuites>
+		<testsuite name="integration">
+			<directory suffix="Test.php">tests/integration</directory>
+		</testsuite>
+	</testsuites>
+	<coverage includeUncoveredFiles="true">
+		<include>
+			<directory suffix=".php">src</directory>
+		</include>
+	</coverage>
+</phpunit>

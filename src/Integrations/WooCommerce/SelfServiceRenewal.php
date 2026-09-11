@@ -1,7 +1,9 @@
 <?php
 /**
- * Self-service renewal — customer clicks "Renew now", pays via WooCommerce,
- * and the existing license expiry is extended when the order reaches `completed`.
+ * Renewal orders — the WooCommerce order a customer pays to renew, whether they clicked
+ * "Renew now" or were sent an invoice because a manual renewal fell due. The licence is
+ * extended when the order reaches `completed` (a gateway payment, or the owner confirming a
+ * bank transfer / JazzCash / Easypaisa payment).
  *
  * The same license key stays: only expires_at moves forward.
  *
@@ -12,30 +14,32 @@ namespace WPLM\Integrations\WooCommerce;
 
 defined( 'ABSPATH' ) || exit;
 
-use WPLM\Models\Renewal;
 use WPLM\Models\Subscription;
 use WPLM\Repositories\RenewalRepository;
 use WPLM\Repositories\SubscriptionRepository;
 use WPLM\Services\LicenseService;
-use WPLM\Services\Subscriptions\BillingScheduler;
+use WPLM\Services\Subscriptions\RenewalProcessor;
 
 class SelfServiceRenewal {
 
-	private LicenseService        $license_service;
+	/** Renewal-order statuses that still stand for their cycle (not abandoned). */
+	private const LIVE_STATUSES = array( 'pending', 'on-hold', 'processing', 'completed' );
+
+	private LicenseService $license_service;
 	private SubscriptionRepository $sub_repo;
-	private RenewalRepository     $renewal_repo;
-	private BillingScheduler      $scheduler;
+	private RenewalProcessor $renewals;
+	private RenewalRepository $renewal_repo;
 
 	public function __construct(
 		LicenseService $license_service,
 		SubscriptionRepository $sub_repo,
-		RenewalRepository $renewal_repo,
-		BillingScheduler $scheduler
+		RenewalProcessor $renewals,
+		RenewalRepository $renewal_repo
 	) {
 		$this->license_service = $license_service;
 		$this->sub_repo        = $sub_repo;
+		$this->renewals        = $renewals;
 		$this->renewal_repo    = $renewal_repo;
-		$this->scheduler       = $scheduler;
 	}
 
 	public function register(): void {
@@ -50,6 +54,9 @@ class SelfServiceRenewal {
 		// Priority 20 runs after PlanCheckout (priority 10) so it never races
 		// with the new-license fulfillment path.
 		add_action( 'woocommerce_order_status_completed', array( $this, 'handle_completed_order' ), 20, 1 );
+
+		// A due manual renewal (or exhausted card retries): one emailed invoice per cycle.
+		add_action( 'wplm_subscription_manual_renewal_due', array( $this, 'invoice_due_renewal' ), 10, 1 );
 	}
 
 	/**
@@ -69,37 +76,101 @@ class SelfServiceRenewal {
 	}
 
 	/**
-	 * Create a pending WooCommerce renewal order for the given subscription.
-	 *
-	 * Returns the WC pay-for-order URL so the caller can redirect the customer
-	 * straight to the payment page. The same license key is reused — no new
-	 * license is issued here; expiry is extended only on order completed.
+	 * Create a pending renewal order for the subscription and return its pay URL.
 	 *
 	 * @param int $sub_id Subscription row ID.
 	 * @return string|false Pay URL on success, false on failure.
 	 */
 	public function create_renewal_order( int $sub_id ): string|false {
+		// Reuse the unpaid invoice already issued for this cycle rather than opening a second
+		// payable order for the same period.
+		$sub = $this->sub_repo->find_by_id( $sub_id );
+		if ( null !== $sub ) {
+			$existing = $this->find_cycle_order( $sub->id, $this->cycle_key( $sub ) );
+			if ( null !== $existing && $existing->needs_payment() ) {
+				return $existing->get_checkout_payment_url();
+			}
+		}
+
+		$order = $this->create_renewal_order_object( $sub_id );
+		return $order ? $order->get_checkout_payment_url() : false;
+	}
+
+	/**
+	 * Issue — once per billing cycle — a renewal invoice for a subscription whose manual
+	 * renewal is due, and email it to the customer.
+	 *
+	 * The cycle is identified by the licence's paid-through date (or next_payment when there
+	 * is no licence), which does not move while card retries run. Cron fires the due action
+	 * every hour, so this must be idempotent.
+	 *
+	 * @param Subscription $sub The due subscription.
+	 * @return void
+	 */
+	public function invoice_due_renewal( $sub ): void {
+		if ( ! $sub instanceof Subscription || $sub->user_id <= 0 ) {
+			return;
+		}
+
+		$cycle = $this->cycle_key( $sub );
+		if ( null !== $this->find_cycle_order( $sub->id, $cycle ) ) {
+			return;
+		}
+
+		$order = $this->create_renewal_order_object( $sub->id );
+		if ( ! $order ) {
+			return;
+		}
+
+		$order->add_order_note(
+			sprintf(
+				/* translators: %s: paid-through date (UTC) */
+				__( 'WPLM: renewal invoice for the period after %s (UTC), sent to the customer.', 'wp-license-manager' ),
+				$cycle
+			)
+		);
+		$order->save();
+
+		if ( function_exists( 'WC' ) && WC()->mailer() ) {
+			$emails = WC()->mailer()->get_emails();
+			if ( isset( $emails['WC_Email_Customer_Invoice'] ) ) {
+				$emails['WC_Email_Customer_Invoice']->trigger( $order->get_id(), $order );
+			}
+		}
+
+		/**
+		 * Fires after a renewal invoice has been issued for a due manual renewal.
+		 *
+		 * @param \WC_Order    $order The pending renewal order.
+		 * @param Subscription $sub   The subscription.
+		 */
+		do_action( 'wplm_subscription_renewal_invoiced', $order, $sub );
+	}
+
+	/**
+	 * Build a pending WooCommerce renewal order for the subscription.
+	 *
+	 * @param int $sub_id Subscription row ID.
+	 * @return \WC_Order|null
+	 */
+	public function create_renewal_order_object( int $sub_id ): ?\WC_Order {
 		$sub = $this->sub_repo->find_by_id( $sub_id );
 		if ( ! $sub || $sub->user_id <= 0 ) {
-			return false;
+			return null;
 		}
 
 		// Let third-party code (e.g. a gateway module) build the WC order.
-		// If the filter returns a positive order id, attach our renewal meta and
-		// return its pay URL without building the order from scratch.
 		$external_id = (int) apply_filters( 'wplm_create_renewal_order', 0, $sub );
 		if ( $external_id > 0 ) {
 			$ext_order = wc_get_order( $external_id );
 			if ( $ext_order instanceof \WC_Order ) {
-				$ext_order->update_meta_data( '_wplm_is_renewal', '1' );
-				$ext_order->update_meta_data( '_wplm_subscription_id', (string) $sub_id );
-				$ext_order->update_meta_data( '_wplm_renewal_term_days', (string) $this->term_days( $sub ) );
+				$this->stamp_renewal( $ext_order, $sub );
 				$ext_order->save();
-				return $ext_order->get_checkout_payment_url();
+				$this->record_invoice( $ext_order, $sub );
+				return $ext_order;
 			}
 		}
 
-		// Build the order manually.
 		$order = wc_create_order(
 			array(
 				'customer_id' => $sub->user_id,
@@ -108,15 +179,12 @@ class SelfServiceRenewal {
 		);
 
 		if ( is_wp_error( $order ) ) {
-			error_log( sprintf(
-				'WPLM SelfServiceRenewal: wc_create_order failed for subscription %d — %s',
-				$sub_id,
-				$order->get_error_message()
-			) );
-			return false;
+			\WPLM\Support\Logger::error(
+				sprintf( 'SelfServiceRenewal: wc_create_order failed for subscription %d — %s', $sub_id, $order->get_error_message() )
+			);
+			return null;
 		}
 
-		// Add the plan product as the line item.
 		// Deliberately NOT copying _wplm_package_id onto this line item —
 		// PlanCheckout::fulfill_order() would issue a brand-new license if it saw
 		// a package id. Renewal orders must NOT re-fulfill.
@@ -138,7 +206,6 @@ class SelfServiceRenewal {
 			}
 		}
 
-		// Fallback to a fee line when no product can be resolved.
 		if ( ! $item_added ) {
 			$fee = new \WC_Order_Item_Fee();
 			$fee->set_name( __( 'License Renewal', 'wp-license-manager' ) );
@@ -146,38 +213,34 @@ class SelfServiceRenewal {
 			$order->add_item( $fee );
 		}
 
-		// Prefill billing details from the customer's stored WooCommerce profile.
-		if ( $sub->user_id > 0 ) {
-			$customer = new \WC_Customer( $sub->user_id );
-			$order->set_billing_first_name( $customer->get_billing_first_name() );
-			$order->set_billing_last_name( $customer->get_billing_last_name() );
-			$email = $customer->get_billing_email() ?: $customer->get_email();
-			$order->set_billing_email( $email );
-			$order->set_billing_address_1( $customer->get_billing_address_1() );
-			$order->set_billing_city( $customer->get_billing_city() );
-			$order->set_billing_country( $customer->get_billing_country() );
-			$order->set_billing_phone( $customer->get_billing_phone() );
-		}
+		$customer = new \WC_Customer( $sub->user_id );
+		$order->set_billing_first_name( $customer->get_billing_first_name() );
+		$order->set_billing_last_name( $customer->get_billing_last_name() );
+		$order->set_billing_email( $customer->get_billing_email() ?: $customer->get_email() );
+		$order->set_billing_address_1( $customer->get_billing_address_1() );
+		$order->set_billing_city( $customer->get_billing_city() );
+		$order->set_billing_country( $customer->get_billing_country() );
+		$order->set_billing_phone( $customer->get_billing_phone() );
 
 		$order->set_currency( $sub->currency ?: get_woocommerce_currency() );
-		$order->update_meta_data( '_wplm_is_renewal', '1' );
-		$order->update_meta_data( '_wplm_subscription_id', (string) $sub_id );
-		$order->update_meta_data( '_wplm_renewal_term_days', (string) $this->term_days( $sub ) );
+		$this->stamp_renewal( $order, $sub );
 		$order->calculate_totals();
 		$order->save();
 
-		return $order->get_checkout_payment_url();
+		$this->record_invoice( $order, $sub );
+
+		return $order;
 	}
 
 	/**
-	 * Extend the subscription's license when the renewal WC order is completed.
+	 * Apply the payment when a renewal order is completed.
 	 *
-	 * This is the ONLY gate: money confirmed (admin-confirmed or gateway
-	 * payment_complete) → expiry extends. Never fires on order creation, pending,
-	 * on-hold, or processing.
+	 * This is the ONLY gate: money confirmed (admin-confirmed or gateway payment_complete) →
+	 * the licence is extended through RenewalProcessor::apply_payment(), the same rule the cron
+	 * card charge uses. Never fires on creation, pending, on-hold or processing.
 	 *
-	 * Idempotency: if the order is somehow completed twice, the guard meta
-	 * `_wplm_renewal_applied` prevents double-extension.
+	 * Idempotency: `_wplm_renewal_applied` prevents a second extension if the order is
+	 * completed again.
 	 *
 	 * @param int $order_id WooCommerce order ID.
 	 * @return void
@@ -188,117 +251,56 @@ class SelfServiceRenewal {
 			return;
 		}
 
-		// Not a self-service renewal.
-		if ( '1' !== $order->get_meta( '_wplm_is_renewal' ) ) {
-			return;
-		}
-
-		// Idempotency guard.
-		if ( $order->get_meta( '_wplm_renewal_applied' ) ) {
+		if ( '1' !== $order->get_meta( '_wplm_is_renewal' ) || $order->get_meta( '_wplm_renewal_applied' ) ) {
 			return;
 		}
 
 		$sub_id = (int) $order->get_meta( '_wplm_subscription_id' );
-		if ( $sub_id <= 0 ) {
+		$sub    = $sub_id > 0 ? $this->sub_repo->find_by_id( $sub_id ) : null;
+		if ( null === $sub ) {
+			\WPLM\Support\Logger::error( sprintf( 'SelfServiceRenewal: subscription %d not found (order %d).', $sub_id, $order_id ) );
+			$order->add_order_note( __( 'WPLM: this renewal could not be applied — its subscription no longer exists.', 'wp-license-manager' ) );
 			return;
 		}
 
-		$sub = $this->sub_repo->find_by_id( $sub_id );
-		if ( null === $sub || null === $sub->license_id ) {
-			error_log( sprintf(
-				'WPLM SelfServiceRenewal: subscription %d not found or has no license (order %d).',
-				$sub_id,
-				$order_id
-			) );
-			return;
-		}
-
-		$license = $this->license_service->get_by_id( $sub->license_id );
-		if ( null === $license ) {
-			error_log( sprintf(
-				'WPLM SelfServiceRenewal: license %d not found for subscription %d (order %d).',
-				$sub->license_id,
-				$sub_id,
-				$order_id
-			) );
-			return;
-		}
-
-		// Compute the new expiry in UTC (matches BillingScheduler's storage convention).
-		// If the license is not yet expired, extend from its current expiry so
-		// early renewals stack. If already expired, extend from today so the
-		// customer gets a full term rather than a partial one.
-		$now_utc = gmdate( 'Y-m-d H:i:s' );
-		$base    = ( null !== $license->expires_at && $license->expires_at > $now_utc )
-			? $license->expires_at
-			: $now_utc;
-
-		try {
-			$interval   = $this->scheduler->period_to_interval( $sub->billing_interval, $sub->billing_period );
-			$dt         = new \DateTime( $base, new \DateTimeZone( 'UTC' ) );
-			$dt->add( new \DateInterval( $interval ) );
-			$new_expiry = $dt->format( 'Y-m-d H:i:s' );
-		} catch ( \Exception $e ) {
-			error_log( sprintf(
-				'WPLM SelfServiceRenewal: could not compute new expiry for license %d — %s',
-				$license->id,
-				$e->getMessage()
-			) );
-			return;
-		}
-
-		// Extend the license. renew() sets status=1 (active) and re-signs the
-		// offline payload — correct for both in-grace and already-expired licenses.
-		$this->license_service->renew( (string) $license->license_key, $new_expiry );
-
-		// Advance subscription billing dates and reactivate if needed.
-		$next = $this->scheduler->next_payment( $sub, $now_utc );
-		$this->sub_repo->update(
-			$sub->id,
-			array(
-				'last_payment'    => $now_utc,
-				'next_payment'    => $next,
-				'failed_attempts' => 0,
-				'status'          => 'active',
-			)
-		);
-
-		// Write the renewal record, mirroring RenewalProcessor so cron and
-		// self-service produce identical records.
-		$renewal_id = $this->renewal_repo->create(
-			array(
-				'subscription_id' => $sub->id,
-				'order_id'        => $order_id,
-				'type'            => 'renewal',
-				'amount'          => (float) $order->get_total(),
-				'status'          => 'success',
-				'gateway_txn'     => '',
-				'scheduled_for'   => $sub->next_payment ?? $now_utc,
-				'processed_at'    => $now_utc,
-				'created_at'      => $now_utc,
-			)
-		);
-
-		// Stamp the order so this handler is a no-op on any subsequent
-		// completed transitions (e.g. WC admin re-saves status).
+		// Stamp first: a completed status is re-entrant (admin re-saves), the extension is not.
 		$order->update_meta_data( '_wplm_renewal_applied', '1' );
 		$order->save();
 
-		// Build a minimal Renewal model for the action hook (mirrors the
-		// fallback pattern in RenewalProcessor for when the DB row lookup fails).
-		$renewal                  = new Renewal();
-		$renewal->id              = (int) $renewal_id;
-		$renewal->subscription_id = $sub->id;
-		$renewal->order_id        = $order_id;
-		$renewal->amount          = (float) $order->get_total();
-		$renewal->status          = 'success';
+		$renewal = $this->renewals->apply_payment( $sub, $order_id, (float) $order->get_total(), (string) $order->get_transaction_id() );
+
+		global $wpdb;
+		$wpdb->update(
+			$wpdb->prefix . 'wplm_subscription_renewals',
+			array(
+				'status'       => 'paid',
+				'processed_at' => gmdate( 'Y-m-d H:i:s' ),
+			),
+			array(
+				'order_id' => $order_id,
+				'type'     => 'invoice',
+			)
+		);
+
+		$license = null !== $sub->license_id ? $this->license_service->get_by_id( $sub->license_id ) : null;
+		$renewed = $this->sub_repo->find_by_id( $sub->id );
+		if ( null !== $license && null !== $license->expires_at ) {
+			/* translators: %s: new paid-through date (UTC) */
+			$note = sprintf( __( 'WPLM: renewal applied — licence paid through %s (UTC).', 'wp-license-manager' ), $license->expires_at );
+		} elseif ( null !== $license && null !== $license->profile && null !== $renewed && null !== $renewed->next_payment ) {
+			/* translators: %s: new inclusive paid-through date (site time zone) */
+			$note = sprintf( __( 'WPLM: renewal applied — modules paid through %s. The customer unlocks at the next check-in.', 'wp-license-manager' ), \WPLM\Services\EntitlementService::paid_through_for( $renewed->next_payment ) );
+		} else {
+			$note = __( 'WPLM: renewal applied.', 'wp-license-manager' );
+		}
+		$order->add_order_note( $note );
 
 		/**
-		 * Fires after self-service renewal is applied. Same signature as the cron
-		 * path so all listeners (mail, Karobar credits, LiteLLM) work without change.
+		 * Fires after a paid renewal order is applied. Same signature as the cron path so all
+		 * listeners (mail, webhooks, add-ons) work without change.
 		 *
-		 * @param Subscription $sub     The renewed subscription.
-		 * @param Renewal      $renewal The renewal record.
+		 * @param Subscription            $sub     The renewed subscription.
+		 * @param \WPLM\Models\Renewal    $renewal The renewal record.
 		 */
 		do_action( 'wplm_subscription_renewed', $sub, $renewal );
 	}
@@ -307,27 +309,78 @@ class SelfServiceRenewal {
 	// Private helpers
 	// -------------------------------------------------------------------------
 
+	private function stamp_renewal( \WC_Order $order, Subscription $sub ): void {
+		$order->update_meta_data( '_wplm_is_renewal', '1' );
+		$order->update_meta_data( '_wplm_subscription_id', (string) $sub->id );
+		$order->update_meta_data( '_wplm_renewal_term_days', (string) $this->term_days( $sub ) );
+		$order->update_meta_data( '_wplm_renewal_cycle', $this->cycle_key( $sub ) );
+	}
+
+	/** The paid-through date (UTC) that identifies the cycle being renewed. */
+	private function cycle_key( Subscription $sub ): string {
+		if ( null !== $sub->license_id ) {
+			$license = $this->license_service->get_by_id( $sub->license_id );
+			if ( null !== $license && null !== $license->expires_at ) {
+				return (string) $license->expires_at;
+			}
+		}
+		return (string) ( $sub->next_payment ?? gmdate( 'Y-m-d H:i:s' ) );
+	}
+
 	/**
-	 * Find the WooCommerce product ID for the subscription so the renewal order
-	 * carries a recognisable line item in the WC order screen.
-	 *
-	 * Tries the parent order first (the item that originally spawned this
-	 * subscription), then falls back to the product stored on the bound license.
-	 *
-	 * @param Subscription $sub Subscription model.
-	 * @return int Product ID, or 0 when not resolvable.
+	 * Record the invoice in WPLM's own renewals table (type `invoice`, status `pending`, keyed by
+	 * cycle). WooCommerce's meta queries only work on HPOS stores, so the per-cycle idempotency
+	 * cannot rely on order meta lookups.
+	 */
+	private function record_invoice( \WC_Order $order, Subscription $sub ): void {
+		$this->renewal_repo->create(
+			array(
+				'subscription_id' => $sub->id,
+				'order_id'        => $order->get_id(),
+				'type'            => 'invoice',
+				'amount'          => (float) $order->get_total(),
+				'status'          => 'pending',
+				'scheduled_for'   => $this->cycle_key( $sub ),
+				'created_at'      => gmdate( 'Y-m-d H:i:s' ),
+			)
+		);
+	}
+
+	/** A live renewal order already issued for this cycle, if any. */
+	private function find_cycle_order( int $sub_id, string $cycle ): ?\WC_Order {
+		global $wpdb;
+		$order_ids = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT order_id FROM {$wpdb->prefix}wplm_subscription_renewals
+				 WHERE subscription_id = %d AND type = 'invoice' AND scheduled_for = %s AND order_id IS NOT NULL
+				 ORDER BY id DESC",
+				$sub_id,
+				$cycle
+			)
+		);
+		foreach ( $order_ids as $order_id ) {
+			$order = wc_get_order( (int) $order_id );
+			if ( $order instanceof \WC_Order && in_array( $order->get_status(), self::LIVE_STATUSES, true ) ) {
+				return $order;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Find the WooCommerce product ID for the subscription so the renewal order carries a
+	 * recognisable line item: the item that spawned it on the parent order, else the licence's
+	 * product.
 	 */
 	private function resolve_product_id( Subscription $sub ): int {
 		if ( isset( $sub->parent_order_id ) && $sub->parent_order_id > 0 ) {
 			$parent = wc_get_order( $sub->parent_order_id );
 			if ( $parent instanceof \WC_Order ) {
 				foreach ( $parent->get_items() as $item ) {
-					// Prefer the item that spawned this specific subscription.
 					if ( (int) $item->get_meta( '_wplm_subscription_id' ) === $sub->id ) {
 						return (int) $item->get_product_id();
 					}
 				}
-				// Fallback: first product in the parent order.
 				foreach ( $parent->get_items() as $item ) {
 					$pid = (int) $item->get_product_id();
 					if ( $pid > 0 ) {
@@ -337,7 +390,6 @@ class SelfServiceRenewal {
 			}
 		}
 
-		// Try the product_id stored on the bound license.
 		if ( $sub->license_id > 0 ) {
 			$license = $this->license_service->get_by_id( $sub->license_id );
 			if ( $license && isset( $license->product_id ) && $license->product_id > 0 ) {
@@ -348,16 +400,14 @@ class SelfServiceRenewal {
 		return 0;
 	}
 
-	/**
-	 * Approximate the subscription's billing term in days.
-	 * Stored as order meta for informational display; expiry computation uses
-	 * DateInterval directly so rounding here doesn't affect correctness.
-	 *
-	 * @param Subscription $sub Subscription model.
-	 * @return int
-	 */
+	/** Approximate billing term in days, stored as order meta for display only. */
 	private function term_days( Subscription $sub ): int {
-		$map = array( 'day' => 1, 'week' => 7, 'month' => 30, 'year' => 365 );
+		$map = array(
+			'day'   => 1,
+			'week'  => 7,
+			'month' => 30,
+			'year'  => 365,
+		);
 		return (int) $sub->billing_interval * ( $map[ $sub->billing_period ] ?? 30 );
 	}
 }

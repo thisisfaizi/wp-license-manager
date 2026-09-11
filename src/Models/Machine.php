@@ -29,6 +29,12 @@ class Machine {
 	public string $activated_at = '';
 	public string $created_at   = '';
 
+	/** The client's own fingerprint value signed into v2 tokens (profile licences only). */
+	public ?string $token_fp = null;
+
+	/** @var array<string, int>|null Latest usage counts reported at check-in (profile licences only). */
+	public ?array $usage = null;
+
 	/** @var Component[] */
 	public array $components = array();
 
@@ -58,6 +64,9 @@ class Machine {
 		$m->status            = (int) ( $row['status'] ?? 1 );
 		$m->activated_at      = $row['activated_at'] ?? '';
 		$m->created_at        = $row['created_at'] ?? '';
+		$m->token_fp          = isset( $row['token_fp'] ) && '' !== $row['token_fp'] ? (string) $row['token_fp'] : null;
+		$usage                = isset( $row['usage_json'] ) ? json_decode( (string) $row['usage_json'], true ) : null;
+		$m->usage             = is_array( $usage ) ? $usage : null;
 		return $m;
 	}
 
@@ -74,6 +83,7 @@ class Machine {
 			'last_heartbeat_at' => $this->last_heartbeat_at,
 			'status'            => $this->status,
 			'activated_at'      => $this->activated_at,
+			'usage'             => $this->usage,
 		);
 	}
 }

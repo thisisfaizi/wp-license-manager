@@ -19,9 +19,11 @@ class Plan {
 	public int $id              = 0;
 	public string $name         = '';
 	public ?string $description = null;
-	public int $status          = 1; // 1 active, 0 inactive.
-	public string $created_at   = '';
-	public string $updated_at   = '';
+	/** Licence profile the plan sells (see ProfileRegistry), or null for classic licences. */
+	public ?string $profile   = null;
+	public int $status        = 1; // 1 active, 0 inactive.
+	public string $created_at = '';
+	public string $updated_at = '';
 
 	/** @var Package[] Loaded packages (optional; populated by the repository). */
 	public array $packages = array();
@@ -37,6 +39,7 @@ class Plan {
 		$plan->id          = (int) ( $row['id'] ?? 0 );
 		$plan->name        = (string) ( $row['name'] ?? '' );
 		$plan->description = isset( $row['description'] ) ? (string) $row['description'] : null;
+		$plan->profile     = isset( $row['profile'] ) && '' !== $row['profile'] ? (string) $row['profile'] : null;
 		$plan->status      = (int) ( $row['status'] ?? 1 );
 		$plan->created_at  = (string) ( $row['created_at'] ?? '' );
 		$plan->updated_at  = (string) ( $row['updated_at'] ?? '' );
@@ -53,6 +56,7 @@ class Plan {
 			'id'          => $this->id,
 			'name'        => $this->name,
 			'description' => $this->description,
+			'profile'     => $this->profile,
 			'status'      => $this->status,
 			'created_at'  => $this->created_at,
 			'updated_at'  => $this->updated_at,
