@@ -66,6 +66,28 @@ class ManualPayerTest extends TestCase {
 		$this->assertSame( 'expired', $result['code'] );
 	}
 
+	/**
+	 * Access now ends by expiry rather than by suspension, so listeners (webhook `license.expired`,
+	 * add-ons that switch off paid services) must hear about it — once, not on every validate.
+	 */
+	public function test_expiry_announces_the_status_change_once(): void {
+		$bought = $this->buy_monthly();
+		$this->set_row( 'licenses', $bought['license_id'], array( 'expires_at' => $this->utc( -8 * DAY_IN_SECONDS ) ) );
+
+		$heard = array();
+		$spy   = static function ( $license, $old, $new ) use ( &$heard ) {
+			$heard[] = array( (int) $license->id, (int) $old, (int) $new );
+		};
+		add_action( 'wplm_license_status_changed', $spy, 10, 3 );
+
+		$ls = $this->make( LicenseService::class );
+		$ls->validate( $this->key( $bought['license_id'] ) );
+		$ls->validate( $this->key( $bought['license_id'] ) );
+		remove_action( 'wplm_license_status_changed', $spy, 10 );
+
+		$this->assertSame( array( array( $bought['license_id'], 1, 3 ) ), $heard );
+	}
+
 	/** F2: within grace the customer keeps working. */
 	public function test_unpaid_licence_still_validates_inside_grace(): void {
 		$bought = $this->buy_monthly();

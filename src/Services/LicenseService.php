@@ -285,7 +285,10 @@ class LicenseService {
 
 		// Step 4: Expiry check (including grace days).
 		if ( ! $license->is_within_expiry() ) {
-			$this->license_repo->update( $license->id, array( 'status' => 3 ) );
+			// Through change_status() so listeners hear it: access ends by expiry, not by a
+			// suspension, so this is the only event a lapsed customer ever produces. Step 3
+			// refuses an expired licence before this point, so it fires once.
+			$this->change_status( $license->id, 3 );
 			$this->log_event( $license->id, null, 'validate', 'fail', array_merge( $context, array( 'meta' => array( 'code' => 'expired' ) ) ) );
 
 			return array(
