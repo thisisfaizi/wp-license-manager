@@ -59,6 +59,16 @@ Entitlement licences for Super Ledger: per-module and per-limit lines with their
 - Profiles carry human names for their codes (`Profile::code_label()`).
 - **Settings → "<Profile> licences"**: the check-in window and grace for each licence profile (blank = default 7; 1–60 and 0–60 days). A change reaches each office at its next check-in.
 - **Settings → Subscriptions → Default grace (days)**, the 1.1.0 `wplm_default_grace_days` setting, which had no field.
+- **The entitlement licence screen** (Licences → Edit, for a licence with a profile):
+  - **What the office may use today:** each module's paid-through date and state (active, due soon, grace, read-only, lifetime), each limit against the usage last reported, and a warning when no base line exists.
+  - **Entitlement lines:** add, change the date or quantity, extend by months (the renewal rule), remove. A line of another licence cannot be reached through a tampered id.
+  - **Computers:** last check-in, app version, usage, and **Offline renewal code** with a days field (default 30). The code is shown once, with a copy button, and as a QR when a QR renderer is installed. Also the moves left, and **Reset moves**.
+  - **Status:** suspend and revoke need a note; reinstate takes an optional one. Each change is logged as `status_note` with the note and the admin.
+  - **Licence log:** status notes, offline codes, read-only notices, moves and activations.
+  - Logic in `Admin\LicenceAdminActions`; every panel form posts to `admin-post.php?action=wplm_licence_action`.
+- The Add Licence form chooses the licence type (classic, or a profile such as Super Ledger). An entitlement licence opens on its lines after it is created. Its screen has no expiry, grace or valid-for fields.
+- Bulk Suspend and Revoke leave entitlement licences unchanged and say so: those are locked from their own screen, with a note. Their list rows link there instead of offering Revoke or Delete.
+- `EntitlementService::extend_line()`, `renewed_paid_through()` (the renewal rule, now shared with renewals) and `module_state()`.
 - A warning on the Settings page when licence tokens are signed with a keypair from the database on a `production` site. Define `WPLM_SIGNING_KEYPAIR` in `wp-config.php` instead.
 - `Crypto\CompactToken`: the token format in one place, usable without WordPress. `Signer` delegates to it, and its output is byte-identical to before.
 
@@ -72,6 +82,7 @@ Entitlement licences for Super Ledger: per-module and per-limit lines with their
 ### Fixed
 - **Saving the Settings page failed with a fatal error.** `options.php` passes `null` for the group option the form never posts, and `validate_settings()` accepted only an array.
 - **The dunning retry schedule entered in Settings was ignored.** The page saves a comma list ("2,4,9") but dunning read only a JSON array, so it always used 1, 3, 5. Both forms are read now. The field also showed "3,7,14" as the default, which was never the default.
+- **Add New Licence always failed.** The form had no key field and ignored the chosen generator, so creation threw "key_string is required". A blank key is now generated with the chosen generator, else the default one. Errors come back to the form as a notice instead of a fatal.
 
 ### Requirements
 - DB version 1.2.0 (adds `wplm_entitlements`, `licenses.profile`, `plans.profile`, `packages.entitlements`, `machines.token_fp`, `machines.usage_json`).

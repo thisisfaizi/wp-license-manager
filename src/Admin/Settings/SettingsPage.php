@@ -688,6 +688,10 @@ class SettingsPage {
 	/** @return void */
 	public function render_field_dunning_schedule(): void {
 		$value = sanitize_text_field( get_option( 'wplm_dunning_schedule', $this->defaults['wplm_dunning_schedule'] ) );
+		$json  = json_decode( $value, true );
+		if ( is_array( $json ) ) {
+			$value = implode( ',', array_map( 'absint', $json ) ); // The installer seeds a JSON array.
+		}
 		?>
 		<input
 			type="text"

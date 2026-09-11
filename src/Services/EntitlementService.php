@@ -26,6 +26,20 @@ defined( 'ABSPATH' ) || exit;
  */
 class EntitlementService {
 
+	/** A module is paid and more than DUE_SOON_DAYS from its end. */
+	public const STATE_ACTIVE = 'active';
+	/** Within DUE_SOON_DAYS of its paid-through date (O-6). */
+	public const STATE_DUE_SOON = 'due_soon';
+	/** Past its paid-through date, still working. */
+	public const STATE_GRACE = 'grace';
+	/** Past grace. */
+	public const STATE_READ_ONLY = 'read_only';
+	/** No end date. */
+	public const STATE_LIFETIME = 'lifetime';
+
+	/** "Due soon" starts this many days before the paid-through date (O-6, the app's constant). */
+	public const DUE_SOON_DAYS = 3;
+
 	/** @var EntitlementRepository */
 	private EntitlementRepository $repo;
 
@@ -203,9 +217,7 @@ class EntitlementService {
 				continue; // The licence is gone or no longer a profile licence.
 			}
 
-			$grace_end = self::add_period( $line->paid_through, $grace[ $line->license_id ], 'day' );
-			$base      = strcmp( $today, $grace_end ) <= 0 ? self::add_period( $line->paid_through, 1, 'day' ) : $today;
-			$through   = self::add_period( self::add_period( $base, max( 1, $interval ), $period ), -1, 'day' );
+			$through = self::renewed_paid_through( $line->paid_through, $today, $grace[ $line->license_id ], $interval, $period );
 
 			$this->repo->update( $line->id, array( 'paid_through' => $through ) );
 			/** This action is documented in EntitlementService::add_line(). */
@@ -223,6 +235,72 @@ class EntitlementService {
 		return ( new \DateTimeImmutable( self::add_period( $latest, 1, 'day' ) . ' 00:00:00', wp_timezone() ) )
 			->setTimezone( new \DateTimeZone( 'UTC' ) )
 			->format( 'Y-m-d H:i:s' );
+	}
+
+	/**
+	 * Extend one dated line by whole periods (the owner's "Extend" action), with the renewal rule.
+	 *
+	 * @param int      $id       Line id.
+	 * @param int      $interval Number of periods (at least 1).
+	 * @param string   $period   day|week|month|year.
+	 * @param int|null $now      Unix time (default: now).
+	 * @return Entitlement The extended line.
+	 * @throws \InvalidArgumentException When the line is missing or lifetime.
+	 */
+	public function extend_line( int $id, int $interval, string $period, ?int $now = null ): Entitlement {
+		$line = $this->repo->find_by_id( $id );
+		if ( null === $line ) {
+			throw new \InvalidArgumentException( sprintf( 'Entitlement line %d does not exist.', $id ) );
+		}
+		if ( null === $line->paid_through ) {
+			throw new \InvalidArgumentException( 'A lifetime line has nothing to extend.' );
+		}
+
+		$profile = $this->profile_of( $line->license_id );
+		$through = self::renewed_paid_through( $line->paid_through, wp_date( 'Y-m-d', $now ?? time() ), $profile->grace_days(), $interval, $period );
+		$this->repo->update( $id, array( 'paid_through' => $through ) );
+		$extended = $this->repo->find_by_id( $id );
+
+		/** This action is documented in EntitlementService::add_line(). */
+		do_action( 'wplm_entitlement_saved', $extended, 'extended' );
+
+		return $extended;
+	}
+
+	/**
+	 * The paid-through date after paying for more periods: inside grace (boundary day included) the
+	 * new period continues from the old end; after grace it starts today.
+	 *
+	 * @param string $paid_through Current paid-through date (Y-m-d).
+	 * @param string $today        Payment day (Y-m-d, site time zone).
+	 * @param int    $grace_days   The profile's grace.
+	 * @param int    $interval     Number of periods (at least 1).
+	 * @param string $period       day|week|month|year.
+	 * @return string Y-m-d
+	 */
+	public static function renewed_paid_through( string $paid_through, string $today, int $grace_days, int $interval, string $period ): string {
+		$grace_end = self::add_period( $paid_through, $grace_days, 'day' );
+		$base      = strcmp( $today, $grace_end ) <= 0 ? self::add_period( $paid_through, 1, 'day' ) : $today;
+		return self::add_period( self::add_period( $base, max( 1, $interval ), $period ), -1, 'day' );
+	}
+
+	/**
+	 * What the app will make of a module on a given day, for admin display. The app decides for
+	 * itself from the token; this mirrors the program's state table.
+	 *
+	 * @param string|null $until      The module's paid-through date, or null for lifetime.
+	 * @param string      $today      Y-m-d in the site's time zone.
+	 * @param int         $grace_days The profile's grace.
+	 * @return string One of the STATE_* constants.
+	 */
+	public static function module_state( ?string $until, string $today, int $grace_days ): string {
+		if ( null === $until ) {
+			return self::STATE_LIFETIME;
+		}
+		if ( strcmp( $today, $until ) <= 0 ) {
+			return strcmp( $today, self::add_period( $until, -self::DUE_SOON_DAYS, 'day' ) ) > 0 ? self::STATE_DUE_SOON : self::STATE_ACTIVE;
+		}
+		return strcmp( $today, self::add_period( $until, $grace_days, 'day' ) ) <= 0 ? self::STATE_GRACE : self::STATE_READ_ONLY;
 	}
 
 	// -------------------------------------------------------------------------

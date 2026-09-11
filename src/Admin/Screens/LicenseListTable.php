@@ -231,6 +231,18 @@ class LicenseListTable extends \WP_List_Table {
 			),
 		);
 
+		// An entitlement licence is locked from its own screen, where a note is required, and is not
+		// deleted from the list (its lines and computers would be left behind).
+		if ( ! empty( $item->profile ) ) {
+			unset( $actions['delete'] );
+			$actions['revoke'] = sprintf(
+				'<a href="%s">%s</a>',
+				esc_url( $edit_url . '#wplm-status' ),
+				esc_html__( 'Suspend / revoke…', 'wp-license-manager' )
+			);
+			$title            .= ' <span class="description">(' . esc_html( (string) $item->profile ) . ')</span>';
+		}
+
 		return $title . $this->row_actions( $actions );
 	}
 
@@ -286,24 +298,12 @@ class LicenseListTable extends \WP_List_Table {
 			// export_csv() streams and exits.
 		}
 
-		$service = \WPLM\Plugin::get_instance()->container()->make( \WPLM\Services\RevocationService::class );
-		$count   = 0;
-
-		foreach ( $ids as $id ) {
-			try {
-				if ( 'bulk-revoke' === $action ) {
-					$service->revoke_license( (int) $id );
-				} else {
-					$service->suspend_license( (int) $id );
-				}
-				++$count;
-			} catch ( \Throwable $e ) {
-				unset( $e ); // Skip licenses that cannot transition (e.g. terminated).
-			}
-		}
+		// Entitlement licences are skipped: they are locked from their own screen, with a note.
+		$result = \WPLM\Plugin::get_instance()->container()->make( \WPLM\Admin\LicenceAdminActions::class )
+			->bulk_status( $ids, 'bulk-revoke' === $action ? 'revoke' : 'suspend' );
 
 		$result_key = ( 'bulk-revoke' === $action ) ? 'revoked' : 'suspended';
-		wp_safe_redirect( admin_url( 'admin.php?page=wplm-licenses&' . $result_key . '=' . $count ) );
+		wp_safe_redirect( admin_url( 'admin.php?page=wplm-licenses&' . $result_key . '=' . $result['changed'] . '&skipped=' . $result['skipped'] ) );
 		exit;
 	}
 
@@ -524,6 +524,21 @@ class LicenseListTable extends \WP_List_Table {
 				)
 				. '</p></div>';
 		}
+		if ( ! empty( $_GET['skipped'] ) ) {
+			echo '<div class="notice notice-warning is-dismissible"><p>'
+				. esc_html(
+					sprintf(
+						/* translators: %d: number of licences skipped */
+						_n( '%d entitlement licence was left unchanged: suspend or revoke it from its own screen, where a note is required.', '%d entitlement licences were left unchanged: suspend or revoke them from their own screens, where a note is required.', absint( $_GET['skipped'] ), 'wp-license-manager' ),
+						absint( $_GET['skipped'] )
+					)
+				)
+				. '</p></div>';
+		}
+		$flash = EntitlementPanel::take_flash( get_current_user_id() );
+		if ( null !== $flash ) {
+			printf( '<div class="notice %s is-dismissible"><p>%s</p></div>', $flash['ok'] ? 'notice-success' : 'notice-error', esc_html( (string) $flash['message'] ) );
+		}
 		// phpcs:enable WordPress.Security.NonceVerification.Recommended
 		?>
 		<div class="wrap">
@@ -606,7 +621,7 @@ class LicenseListTable extends \WP_List_Table {
 		$current_order_label = '';
 		if ( $current_order_id > 0 ) {
 			if ( function_exists( 'wc_get_order' ) ) {
-				$o = wc_get_order( $current_order_id );
+				$o                   = wc_get_order( $current_order_id );
 				$current_order_label = $o
 					? sprintf( '#%d — %s', $current_order_id, $o->get_formatted_billing_full_name() )
 					: '#' . $current_order_id;
@@ -618,11 +633,16 @@ class LicenseListTable extends \WP_List_Table {
 		$current_user_id    = $is_edit && $license ? (int) ( $license->user_id ?? 0 ) : 0;
 		$current_user_label = '';
 		if ( $current_user_id > 0 ) {
-			$u = get_userdata( $current_user_id );
+			$u                  = get_userdata( $current_user_id );
 			$current_user_label = $u
 				? sprintf( '#%d — %s (%s)', $current_user_id, $u->display_name, $u->user_email )
 				: '#' . $current_user_id;
 		}
+
+		$container = \WPLM\Plugin::get_instance()->container();
+		$profiles  = $container->make( \WPLM\Licensing\ProfileRegistry::class );
+		$profile   = $is_edit && $license ? $profiles->get( $license->profile ) : null;
+		$flash     = EntitlementPanel::take_flash( get_current_user_id() );
 		?>
 		<div class="wrap">
 			<h1><?php echo esc_html( $page_title ); ?></h1>
@@ -631,6 +651,9 @@ class LicenseListTable extends \WP_List_Table {
 					&larr; <?php esc_html_e( 'Back to Licenses', 'wp-license-manager' ); ?>
 				</a>
 			</p>
+			<?php if ( null !== $flash ) : ?>
+				<div class="notice <?php echo esc_attr( $flash['ok'] ? 'notice-success' : 'notice-error' ); ?> is-dismissible"><p><?php echo esc_html( (string) $flash['message'] ); ?></p></div>
+			<?php endif; ?>
 
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 				<?php wp_nonce_field( 'wplm_save_license', 'wplm_license_nonce' ); ?>
@@ -641,6 +664,46 @@ class LicenseListTable extends \WP_List_Table {
 
 				<table class="form-table" role="presentation">
 					<tbody>
+
+						<tr>
+							<th scope="row">
+								<label for="wplm_profile"><?php esc_html_e( 'Licence type', 'wp-license-manager' ); ?></label>
+							</th>
+							<td>
+								<?php if ( $is_edit ) : ?>
+									<?php echo esc_html( null !== $profile ? $profile->label : __( 'Classic', 'wp-license-manager' ) ); ?>
+									<p class="description">
+										<?php
+										echo esc_html(
+											null !== $profile
+												? __( 'An entitlement licence: what it grants and until when is set by the lines below, not by an expiry date.', 'wp-license-manager' )
+												: __( 'A classic licence with an optional expiry date.', 'wp-license-manager' )
+										);
+										?>
+									</p>
+								<?php else : ?>
+									<select id="wplm_profile" name="profile">
+										<option value=""><?php esc_html_e( 'Classic (expiry date)', 'wp-license-manager' ); ?></option>
+										<?php foreach ( $profiles->all() as $code => $p ) : ?>
+											<option value="<?php echo esc_attr( $code ); ?>"><?php echo esc_html( sprintf( /* translators: %s: product name */ __( '%s (entitlement lines)', 'wp-license-manager' ), $p->label ) ); ?></option>
+										<?php endforeach; ?>
+									</select>
+									<p class="description"><?php esc_html_e( 'An entitlement licence has no expiry date: after creating it, add its modules and limits on the next screen.', 'wp-license-manager' ); ?></p>
+								<?php endif; ?>
+							</td>
+						</tr>
+
+						<?php if ( ! $is_edit ) : ?>
+						<tr>
+							<th scope="row">
+								<label for="wplm_key_string"><?php esc_html_e( 'Licence key', 'wp-license-manager' ); ?></label>
+							</th>
+							<td>
+								<input type="text" id="wplm_key_string" name="key_string" class="regular-text" autocomplete="off">
+								<p class="description"><?php esc_html_e( 'Leave blank to generate one with the generator below (or the default generator).', 'wp-license-manager' ); ?></p>
+							</td>
+						</tr>
+						<?php endif; ?>
 
 						<tr>
 							<th scope="row">
@@ -735,6 +798,7 @@ class LicenseListTable extends \WP_List_Table {
 							</td>
 						</tr>
 
+						<?php if ( null === $profile ) : ?>
 						<tr>
 							<th scope="row">
 								<label for="wplm_expires_at"><?php esc_html_e( 'Expires At', 'wp-license-manager' ); ?></label>
@@ -767,6 +831,7 @@ class LicenseListTable extends \WP_List_Table {
 								<p class="description"><?php esc_html_e( 'Days after expiry during which the license continues to validate.', 'wp-license-manager' ); ?></p>
 							</td>
 						</tr>
+						<?php endif; ?>
 
 						<tr>
 							<th scope="row">
@@ -799,6 +864,7 @@ class LicenseListTable extends \WP_List_Table {
 							</td>
 						</tr>
 
+						<?php if ( null === $profile ) : ?>
 						<tr>
 							<th scope="row">
 								<label for="wplm_valid_for_days"><?php esc_html_e( 'Valid For (days)', 'wp-license-manager' ); ?></label>
@@ -815,6 +881,7 @@ class LicenseListTable extends \WP_List_Table {
 								<p class="description"><?php esc_html_e( 'When set, expiry is computed from first activation. Overrides the Expires At date.', 'wp-license-manager' ); ?></p>
 							</td>
 						</tr>
+						<?php endif; ?>
 
 					</tbody>
 				</table>
@@ -827,6 +894,11 @@ class LicenseListTable extends \WP_List_Table {
 				);
 				?>
 			</form>
+			<?php
+			if ( null !== $profile && $license ) {
+				$container->make( EntitlementPanel::class )->render( $license, $flash );
+			}
+			?>
 		</div>
 		<?php
 	}

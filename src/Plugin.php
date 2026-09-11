@@ -243,6 +243,31 @@ final class Plugin {
 			)
 		);
 		$this->container->bind(
+			Admin\LicenceAdminActions::class,
+			fn( $c ) => new Admin\LicenceAdminActions(
+				$c->make( Services\EntitlementService::class ),
+				$c->make( Repositories\EntitlementRepository::class ),
+				$c->make( Services\LicenseService::class ),
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Repositories\MachineRepository::class ),
+				$c->make( Services\RevocationService::class ),
+				$c->make( Repositories\ActivationLogRepository::class ),
+				$c->make( Licensing\OfflineCodeService::class ),
+				$c->make( Licensing\CheckInService::class ),
+				$c->make( Services\GeneratorService::class )
+			)
+		);
+		$this->container->bind(
+			Admin\Screens\EntitlementPanel::class,
+			fn( $c ) => new Admin\Screens\EntitlementPanel(
+				$c->make( Services\EntitlementService::class ),
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Repositories\MachineRepository::class ),
+				$c->make( Licensing\CheckInService::class ),
+				$c->make( Repositories\ActivationLogRepository::class )
+			)
+		);
+		$this->container->bind(
 			Licensing\LapseNoticeService::class,
 			fn( $c ) => new Licensing\LapseNoticeService(
 				$c->make( Repositories\EntitlementRepository::class ),

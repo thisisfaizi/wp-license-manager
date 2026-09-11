@@ -39,6 +39,7 @@ class Menu {
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_assets' ) );
 		add_action( 'admin_init', array( $this, 'init_settings' ) );
 		add_action( 'admin_post_wplm_save_license', array( $this, 'handle_save_license' ) );
+		add_action( 'admin_post_' . Screens\EntitlementPanel::ACTION, array( $this, 'handle_licence_action' ) );
 		add_action( 'wp_ajax_wplm_search_product', array( $this, 'handle_ajax_search_product' ) );
 		add_action( 'wp_ajax_wplm_search_order', array( $this, 'handle_ajax_search_order' ) );
 		add_action( 'wp_ajax_wplm_search_user', array( $this, 'handle_ajax_search_user' ) );
@@ -297,27 +298,45 @@ class Menu {
 			wp_die( esc_html__( 'You do not have permission to do this.', 'wp-license-manager' ) );
 		}
 
-		$license_id = absint( $_POST['license_id'] ?? 0 );
-		$args       = array(
-			'key_string'       => sanitize_text_field( wp_unslash( $_POST['key_string'] ?? '' ) ),
-			'product_id'       => absint( $_POST['product_id'] ?? 0 ) ?: null,
-			'order_id'         => absint( $_POST['order_id'] ?? 0 ) ?: null,
-			'user_id'          => absint( $_POST['user_id'] ?? 0 ) ?: null,
-			'max_activations'  => absint( $_POST['max_activations'] ?? 1 ),
-			'expires_at'       => sanitize_text_field( wp_unslash( $_POST['expires_at'] ?? '' ) ) ?: null,
-			'grace_days'       => absint( $_POST['grace_days'] ?? 0 ),
-			'overage_strategy' => sanitize_text_field( wp_unslash( $_POST['overage_strategy'] ?? 'deny' ) ),
-			'is_floating'      => ! empty( $_POST['is_floating'] ),
-			'valid_for_days'   => absint( $_POST['valid_for_days'] ?? 0 ) ?: null,
-		);
+		$post   = wp_unslash( $_POST ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- LicenceAdminActions sanitises each field.
+		$result = $this->container->make( LicenceAdminActions::class )->save_licence( (array) $post );
+		Screens\EntitlementPanel::flash( get_current_user_id(), $result );
 
-		if ( $license_id ) {
-			wplm_update_license( $license_id, $args );
+		$license_id = (int) $result['license_id'];
+		if ( ! $result['ok'] ) {
+			$back = $license_id > 0 ? 'admin.php?page=wplm-licenses&action=edit&id=' . $license_id : 'admin.php?page=wplm-licenses&action=add';
+		} elseif ( null !== $this->container->make( \WPLM\Repositories\LicenseRepository::class )->find_by_id( $license_id )?->profile ) {
+			// An entitlement licence is set up on its own screen: its lines come next.
+			$back = 'admin.php?page=wplm-licenses&action=edit&id=' . $license_id . '#wplm-lines';
 		} else {
-			wplm_create_license( $args );
+			$back = 'admin.php?page=wplm-licenses';
+		}
+		wp_safe_redirect( admin_url( $back ) );
+		exit;
+	}
+
+	/** Handle every form on an entitlement licence's screen (lines, computers, status). */
+	public function handle_licence_action(): void {
+		$license_id = absint( $_POST['license_id'] ?? 0 );
+		check_admin_referer( Screens\EntitlementPanel::ACTION . '_' . $license_id, '_wplm_nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You do not have permission to do this.', 'wp-license-manager' ) );
 		}
 
-		wp_safe_redirect( admin_url( 'admin.php?page=wplm-licenses&saved=1' ) );
+		$post   = wp_unslash( $_POST ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- LicenceAdminActions sanitises each field.
+		$result = $this->container->make( LicenceAdminActions::class )->dispatch( (array) $post, get_current_user_id() );
+		Screens\EntitlementPanel::flash( get_current_user_id(), $result );
+
+		$anchors = array(
+			'line_save'    => 'wplm-lines',
+			'line_extend'  => 'wplm-lines',
+			'line_delete'  => 'wplm-lines',
+			'status'       => 'wplm-status',
+			'offline_code' => 'wplm-machines',
+			'reset_moves'  => 'wplm-machines',
+		);
+		$anchor  = $anchors[ (string) ( $post['do'] ?? '' ) ] ?? 'wplm-grants';
+		wp_safe_redirect( admin_url( 'admin.php?page=wplm-licenses&action=edit&id=' . $license_id . '#' . $anchor ) );
 		exit;
 	}
 
@@ -332,8 +351,8 @@ class Menu {
 			wp_send_json_error( array(), 403 );
 		}
 
-		$q      = sanitize_text_field( wp_unslash( $_GET['q'] ?? '' ) );
-		$types  = array( 'product', 'product_variation' );
+		$q     = sanitize_text_field( wp_unslash( $_GET['q'] ?? '' ) );
+		$types = array( 'product', 'product_variation' );
 		// Include non-WC post types as fallback.
 		if ( ! function_exists( 'wc_get_product' ) ) {
 			$types = array( 'post', 'page' );

@@ -114,6 +114,13 @@ class SettingsTest extends TestCase {
 		$this->assertSame( array( 1, 3, 5 ), $this->make( DunningManager::class )->retry_schedule() );
 	}
 
+	public function test_a_seeded_json_schedule_is_shown_as_the_comma_list_the_field_takes(): void {
+		update_option( 'wplm_dunning_schedule', '[2,6]' );
+
+		$this->assertStringContainsString( 'value="2,6"', $this->render() );
+		$this->assertSame( array( 2, 6 ), $this->make( DunningManager::class )->retry_schedule() );
+	}
+
 	public function test_a_signing_key_from_the_database_on_production_is_warned_about(): void {
 		$this->assertNotSame( '', SettingsPage::signing_key_warning( false, 'production' ) );
 		$this->assertSame( '', SettingsPage::signing_key_warning( true, 'production' ), 'The wp-config constant is the production setup.' );
