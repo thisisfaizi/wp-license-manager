@@ -266,7 +266,7 @@ class CheckInService {
 
 	/**
 	 * Issue the token, then record the check-in. Nothing is written when the token is refused
-	 * (revoked, terminated, wrong machine), so a refused office leaves no trace of having checked in.
+	 * (revoked, terminated, wrong machine), so a refused machine leaves no trace of having checked in.
 	 *
 	 * @return array{machine: Machine, token: string, server_time: int}|WP_Error
 	 */

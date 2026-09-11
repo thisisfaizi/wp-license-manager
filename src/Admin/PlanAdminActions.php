@@ -15,9 +15,9 @@ use WPLM\Services\EntitlementService;
 use WPLM\Services\PlanService;
 
 /**
- * A plan may sell a licence profile (e.g. Super Ledger). Each licence type (package) of such a plan
- * carries an entitlement template: the modules it grants and how many users, seats and phones it
- * adds. Every template is checked **before** the plan or its packages change, so a bad template
+ * A plan may sell a licence profile. Each licence type (package) of such a plan carries an
+ * entitlement template: the modules it grants and how much it adds to each of the profile's limits.
+ * Every template is checked **before** the plan or its packages change, so a bad template
  * leaves the plan exactly as it was.
  */
 class PlanAdminActions {
@@ -83,14 +83,14 @@ class PlanAdminActions {
 					return $this->result( false, sprintf( __( '%1$s: %2$s', 'wp-license-manager' ), $package['name'], $e->getMessage() ), $plan_id );
 				}
 				foreach ( $lines as $line ) {
-					$grants_base = $grants_base || ( Entitlement::KIND_MODULE === $line['kind'] && 'base' === $line['code'] );
+					$grants_base = $grants_base || ( Entitlement::KIND_MODULE === $line['kind'] && $profile->base_module === $line['code'] );
 				}
 			}
-			if ( ! $grants_base ) {
+			if ( null !== $profile->base_module && ! $grants_base ) {
 				$warnings[] = sprintf(
 					/* translators: 1: base module name, 2: product name */
-					__( 'No licence type in this plan grants %1$s. That is right for an add-on plan, but an office that buys only this plan cannot use %2$s.', 'wp-license-manager' ),
-					$profile->code_label( 'base' ),
+					__( 'No licence type in this plan grants %1$s. That is right for an add-on plan, but a customer who buys only this plan cannot use %2$s.', 'wp-license-manager' ),
+					$profile->code_label( $profile->base_module ),
 					$profile->label
 				);
 			}

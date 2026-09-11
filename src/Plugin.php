@@ -436,6 +436,9 @@ final class Plugin {
 		// loads secrets lazily, so the site stays up and the owner is told what to fix.
 		add_action( 'admin_notices', array( $this, 'notice_missing_secrets' ) );
 
+		// Licence profiles come from add-ons; a deactivated one silently stops its licences' tokens.
+		( new Admin\UnregisteredProfileNotice( $this->container->make( Licensing\ProfileRegistry::class ) ) )->register();
+
 		// REST API.
 		add_action(
 			'rest_api_init',

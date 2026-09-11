@@ -2,13 +2,13 @@
 /**
  * Email template: an entitlement licence's module will become read-only.
  *
- * Sent on the module's paid-through day (M5-27a §5). The body only; LapseNoticeService wraps it in
+ * Sent on the module's paid-through day. The body only; LapseNoticeService wraps it in
  * the WooCommerce email header and footer.
  *
  * Available variables:
  *   @var \WPLM\Models\License $license
- *   @var string               $product_name      e.g. "Super Ledger".
- *   @var bool                 $whole_office      True when the base module lapses (everything goes read-only).
+ *   @var string               $product_name      The licence profile's label.
+ *   @var bool                 $whole_product     True when the profile's base module lapses (everything goes read-only).
  *   @var string[]             $module_names      Names of the modules the notice is about.
  *   @var string               $last_working_day  Formatted date: the last day of grace.
  *   @var string               $read_only_on      Formatted date: the first read-only day.
@@ -22,7 +22,7 @@ defined( 'ABSPATH' ) || exit;
 
 <p>
 	<?php
-	if ( $whole_office ) {
+	if ( $whole_product ) {
 		printf(
 			/* translators: 1: product name, 2: licence id */
 			esc_html__( 'The payment for your %1$s (licence #%2$d) is overdue.', 'wp-license-manager' ),
@@ -65,7 +65,7 @@ defined( 'ABSPATH' ) || exit;
 	<?php
 	printf(
 		/* translators: 1: product name */
-		esc_html__( 'As soon as your payment is received, %1$s unlocks the next time your office computer connects to the internet.', 'wp-license-manager' ),
+		esc_html__( 'As soon as your payment is received, %1$s unlocks the next time your computer connects to the internet.', 'wp-license-manager' ),
 		esc_html( $product_name )
 	);
 	?>

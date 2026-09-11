@@ -50,33 +50,34 @@ Entitlement licences: per-module and per-limit lines with their own paid-through
   - `bin/fleet-notice.php` does the same without WordPress: plain PHP with sodium.
   - It refuses more than 30 days. A bare date means the end of that day in Asia/Karachi (`--timezone`).
 - **"Will become read-only" email** (`Licensing\LapseNoticeService`, cron `wplm_lapse_notices`, hourly; template `templates/emails/read-only-soon.php`).
-  - Sent on a module's paid-through day, naming the last working day (`paid_through + grace`) and the first read-only day. A lapsing `base` is worded as the whole office; other modules are named.
+  - Sent on a module's paid-through day, naming the last working day (`paid_through + grace`) and the first read-only day. A lapsing base module (`Profile::$base_module`) is worded as the whole product; other modules are named.
   - Sent once per module and date: each notice is logged as `lapse_notice`. A renewal that moves the date starts a new cycle.
   - A missed run catches up while the module is still in grace, never after read-only has started. A failed send is retried on the next run.
   - It goes to the purchase order's billing email, else the licence owner's account email (filter `wplm_lapse_notice_recipient`). A licence with neither is logged as `no_recipient`.
   - Suspended, revoked and terminated licences are not emailed. Action: `wplm_lapse_notice_sent`.
-- Profiles carry human names for their codes (`Profile::code_label()`).
-- **Settings → "<Profile> licences"**: the check-in window and grace for each licence profile (blank = default 7; 1–60 and 0–60 days). A change reaches each office at its next check-in.
+- Profiles carry human names for their codes (`Profile::code_label()`) and may name a **base module** (`Profile::$base_module`): the module without which the whole product is read-only. A profile without one treats every module alone.
+- **"Licences are not being renewed" notice** (`Admin\UnregisteredProfileNotice`): every admin screen names any licence type that licences or plans use but no active plugin registers, since their computers get no new tokens and go read-only when the check-in window runs out.
+- **Settings → "<Profile> licences"**: the check-in window and grace for each licence profile (blank = default 7; 1–60 and 0–60 days). A change reaches each computer at its next check-in.
 - **Settings → Subscriptions → Default grace (days)**, the 1.1.0 `wplm_default_grace_days` setting, which had no field.
 - **The entitlement licence screen** (Licences → Edit, for a licence with a profile):
-  - **What the office may use today:** each module's paid-through date and state (active, due soon, grace, read-only, lifetime), each limit against the usage last reported, and a warning when no base line exists.
+  - **What this licence grants today:** each module's paid-through date and state (active, due soon, grace, read-only, lifetime), each limit against the usage last reported, and a warning when the profile's base module has no line.
   - **Entitlement lines:** add, change the date or quantity, extend by months (the renewal rule), remove. A line of another licence cannot be reached through a tampered id.
   - **Computers:** last check-in, app version, usage, and **Offline renewal code** with a days field (default 30). The code is shown once, with a copy button, and as a QR when a QR renderer is installed. Also the moves left, and **Reset moves**.
   - **Status:** suspend and revoke need a note; reinstate takes an optional one. Each change is logged as `status_note` with the note and the admin.
   - **Licence log:** status notes, offline codes, read-only notices, moves and activations.
   - Logic in `Admin\LicenceAdminActions`; every panel form posts to `admin-post.php?action=wplm_licence_action`.
-- **The plan editor sells modules and limits.** A plan chooses its licence type (classic, or a profile such as Super Ledger).
-  - Each licence type (package) of a profile plan gets module checkboxes and user / seat / phone quantities: the template a purchase writes onto the licence.
+- **The plan editor sells modules and limits.** A plan chooses its licence type (classic, or a registered profile).
+  - Each licence type (package) of a profile plan gets a checkbox per module and a quantity per limit of the profile: the template a purchase writes onto the licence.
   - Every template is checked before the plan or its packages change, so a bad one leaves the plan as it was.
-  - Saving warns when no licence type grants Base: right for an add-on plan, wrong for a main one.
+  - Saving warns when no licence type grants the profile's base module: right for an add-on plan, wrong for a main one.
   - Grace and Valid-for fields are hidden for a profile plan: its dates come from the lines and the profile's grace.
   - Logic in `Admin\PlanAdminActions`; save results and warnings are shown through `Admin\Flash`.
 - **My Account → My Licenses → View Devices** now opens (the link went nowhere):
   - the licence's active computers;
-  - for Super Ledger, each module's paid-through date and state, and the moves left;
+  - for an entitlement licence, each module's paid-through date and state, and the moves left;
   - a **Move to another computer** button per computer. This is a self-service move that counts against the limit like one made from the app. A third move within 30 days is refused, naming the day it frees up.
-  - A customer sees and moves only their own licences. The list shows a Super Ledger licence's modules instead of "Expires: Never". (`Integrations\WooCommerce\MyAccountLicences`.)
-- The Add Licence form chooses the licence type (classic, or a profile such as Super Ledger). An entitlement licence opens on its lines after it is created. Its screen has no expiry, grace or valid-for fields.
+  - A customer sees and moves only their own licences. The list shows an entitlement licence's modules instead of "Expires: Never". (`Integrations\WooCommerce\MyAccountLicences`.)
+- The Add Licence form chooses the licence type (classic, or a registered profile). An entitlement licence opens on its lines after it is created. Its screen has no expiry, grace or valid-for fields.
 - Bulk Suspend and Revoke leave entitlement licences unchanged and say so: those are locked from their own screen, with a note. Their list rows link there instead of offering Revoke or Delete.
 - `EntitlementService::extend_line()`, `renewed_paid_through()` (the renewal rule, now shared with renewals) and `module_state()`.
 - A warning on the Settings page when licence tokens are signed with a keypair from the database on a `production` site. Define `WPLM_SIGNING_KEYPAIR` in `wp-config.php` instead.

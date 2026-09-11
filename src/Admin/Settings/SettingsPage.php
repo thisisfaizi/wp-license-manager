@@ -296,7 +296,7 @@ class SettingsPage {
 		);
 
 		// ------------------------------------------------------------------
-		// Sections: one per licence profile (e.g. Super Ledger).
+		// Sections: one per licence profile.
 		// ------------------------------------------------------------------
 		foreach ( $this->profiles->all() as $profile ) {
 			$this->register_profile_settings( $profile );
@@ -341,7 +341,7 @@ class SettingsPage {
 				'label'       => __( 'Check-in window (days)', 'wp-license-manager' ),
 				'min'         => 1,
 				'default'     => Profile::DEFAULT_CHECK_IN_DAYS,
-				'description' => __( 'How long an office computer keeps working without reaching this server. Every successful check-in starts the window again. Past it, the office goes read-only until it checks in or gets an offline renewal code.', 'wp-license-manager' ),
+				'description' => __( 'How long a computer keeps working without reaching this server. Every successful check-in starts the window again. Past it, the computer goes read-only until it checks in or gets an offline renewal code.', 'wp-license-manager' ),
 			),
 			'grace_days'    => array(
 				'label'       => __( 'Grace (days)', 'wp-license-manager' ),
@@ -358,7 +358,7 @@ class SettingsPage {
 			sprintf( __( '%s licences', 'wp-license-manager' ), $profile->label ),
 			static function () use ( $profile ): void {
 				/* translators: %s: product name */
-				echo '<p>' . esc_html( sprintf( __( 'Timing signed into every %s token. A change reaches each office at its next check-in.', 'wp-license-manager' ), $profile->label ) ) . '</p>';
+				echo '<p>' . esc_html( sprintf( __( 'Timing signed into every %s token. A change reaches each computer at its next check-in.', 'wp-license-manager' ), $profile->label ) ) . '</p>';
 			},
 			'wplm-settings'
 		);

@@ -37,6 +37,15 @@ final class Profile {
 	/** @var string[] */
 	public array $limit_codes;
 
+	/**
+	 * The module without which the whole product is read-only (for example a base accounting module),
+	 * or null when every module stands alone. Admin warns when a plan or licence lacks it, and the
+	 * read-only email words its lapse as the whole product.
+	 *
+	 * @var string|null
+	 */
+	public ?string $base_module;
+
 	/** @var array<string, string> */
 	private array $labels;
 
@@ -46,13 +55,15 @@ final class Profile {
 	 * @param string[]              $module_codes Allowed module codes.
 	 * @param string[]              $limit_codes  Allowed limit codes.
 	 * @param array<string, string> $labels       Human names for module and limit codes.
+	 * @param string|null           $base_module  One of the module codes, or null; any other value is ignored.
 	 */
-	public function __construct( string $code, string $label, array $module_codes, array $limit_codes, array $labels = array() ) {
+	public function __construct( string $code, string $label, array $module_codes, array $limit_codes, array $labels = array(), ?string $base_module = null ) {
 		$this->code         = $code;
 		$this->label        = $label;
 		$this->module_codes = array_values( $module_codes );
 		$this->limit_codes  = array_values( $limit_codes );
 		$this->labels       = $labels;
+		$this->base_module  = in_array( $base_module, $this->module_codes, true ) ? $base_module : null;
 	}
 
 	/** The human name of a module or limit code; the code itself when none is registered. */

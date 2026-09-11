@@ -17,8 +17,8 @@ use WPLM\Services\EntitlementService;
 use WPLM\Support\Logger;
 
 /**
- * Nothing on the server locks an unpaid office (D7): its modules' `until` passes, the app counts the
- * grace days, then turns read-only. This tells the customer the date before it happens.
+ * Nothing on the server locks an unpaid entitlement licence: its modules' `until` passes, the client
+ * counts the grace days, then turns read-only. This tells the customer the date before it happens.
  *
  * On a module's paid-through day the licence's customer is emailed once, naming the day read-only
  * starts (`paid_through + grace + 1`). A run that was missed catches up while the module is still in
@@ -206,11 +206,11 @@ final class LapseNoticeService {
 	 * @param string[] $codes Module codes the notice names.
 	 */
 	private function send( string $to, License $license, Profile $profile, array $codes, string $until, string $read_only_on, int $grace ): bool {
-		$whole_office = in_array( 'base', $codes, true );
-		$module_names = array_map( array( $profile, 'code_label' ), $codes );
-		$read_only    = $this->format_date( $read_only_on );
+		$whole_product = null !== $profile->base_module && in_array( $profile->base_module, $codes, true );
+		$module_names  = array_map( array( $profile, 'code_label' ), $codes );
+		$read_only     = $this->format_date( $read_only_on );
 
-		$subject = $whole_office
+		$subject = $whole_product
 			/* translators: 1: product name, 2: date */
 			? sprintf( __( 'Your %1$s will become read-only on %2$s', 'wp-license-manager' ), $profile->label, $read_only )
 			/* translators: 1: module names, 2: product name, 3: date */
@@ -220,7 +220,7 @@ final class LapseNoticeService {
 			'email_heading'    => $subject,
 			'license'          => $license,
 			'product_name'     => $profile->label,
-			'whole_office'     => $whole_office,
+			'whole_product'    => $whole_product,
 			'module_names'     => $module_names,
 			'last_working_day' => $this->format_date( EntitlementService::add_period( $until, $grace, 'day' ) ),
 			'read_only_on'     => $read_only,

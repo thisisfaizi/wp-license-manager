@@ -22,7 +22,7 @@ use WPLM\Repositories\MachineRepository;
 use WPLM\Services\EntitlementService;
 
 /**
- * Renders, for a licence with a profile (e.g. Super Ledger): what the office's token grants today,
+ * Renders, for a licence with a profile: what its machines' tokens grant today,
  * the entitlement lines with add / edit / extend / remove, the computers with offline codes and the
  * move limit, the status with a required note, and the recent licence log.
  *
@@ -132,13 +132,13 @@ class EntitlementPanel {
 			}
 		}
 		?>
-		<h2 id="wplm-grants"><?php echo esc_html( sprintf( /* translators: %s: product name */ __( '%s: what the office may use today', 'wp-license-manager' ), $profile->label ) ); ?></h2>
+		<h2 id="wplm-grants"><?php echo esc_html( sprintf( /* translators: %s: product name */ __( '%s: what this licence grants today', 'wp-license-manager' ), $profile->label ) ); ?></h2>
 		<p class="description">
 			<?php
 			echo esc_html(
 				sprintf(
 					/* translators: 1: grace days, 2: due-soon days */
-					__( 'Each module works until its paid-through date, shows "due soon" %2$d days before it, keeps working for %1$d days of grace after it, then becomes read-only. The office learns changes at its next check-in.', 'wp-license-manager' ),
+					__( 'Each module works until its paid-through date, shows "due soon" %2$d days before it, keeps working for %1$d days of grace after it, then becomes read-only. Each computer learns of a change at its next check-in.', 'wp-license-manager' ),
 					$grace,
 					EntitlementService::DUE_SOON_DAYS
 				)
@@ -153,7 +153,7 @@ class EntitlementPanel {
 			</tr></thead>
 			<tbody>
 			<?php if ( array() === $summary['modules'] ) : ?>
-				<tr><td colspan="3"><?php esc_html_e( 'No modules yet. Add a base line below, or the office cannot work.', 'wp-license-manager' ); ?></td></tr>
+				<tr><td colspan="3"><?php esc_html_e( 'No modules yet: this licence grants nothing until a module line is added below.', 'wp-license-manager' ); ?></td></tr>
 			<?php endif; ?>
 			<?php foreach ( $summary['modules'] as $code => $module ) : ?>
 				<?php $state = EntitlementService::module_state( $module['until'], $today, $grace ); ?>
@@ -163,8 +163,8 @@ class EntitlementPanel {
 					<td><span class="wplm-badge is-<?php echo esc_attr( $state ); ?>"><?php echo esc_html( $this->state_label( $state ) ); ?></span></td>
 				</tr>
 			<?php endforeach; ?>
-			<?php if ( ! isset( $summary['modules']['base'] ) && array() !== $summary['modules'] ) : ?>
-				<tr><td colspan="3"><strong><?php esc_html_e( 'No base line: the whole office is read-only whatever the other modules say.', 'wp-license-manager' ); ?></strong></td></tr>
+			<?php if ( null !== $profile->base_module && ! isset( $summary['modules'][ $profile->base_module ] ) && array() !== $summary['modules'] ) : ?>
+				<tr><td colspan="3"><strong><?php echo esc_html( sprintf( /* translators: 1: base module name, 2: product name */ __( 'No %1$s line: all of %2$s is read-only, whatever the other modules say.', 'wp-license-manager' ), $profile->code_label( $profile->base_module ), $profile->label ) ); ?></strong></td></tr>
 			<?php endif; ?>
 			</tbody>
 		</table>
@@ -207,7 +207,7 @@ class EntitlementPanel {
 			<form id="wplm-line-extend-<?php echo esc_attr( (string) $line->id ); ?>" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 				<?php $this->hidden( $license, 'line_extend', array( 'line_id' => $line->id ) ); ?>
 			</form>
-			<form id="wplm-line-delete-<?php echo esc_attr( (string) $line->id ); ?>" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" onsubmit="return confirm('<?php echo esc_js( __( 'Remove this line? The office loses what it grants at its next check-in. Its records are never deleted.', 'wp-license-manager' ) ); ?>');">
+			<form id="wplm-line-delete-<?php echo esc_attr( (string) $line->id ); ?>" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" onsubmit="return confirm('<?php echo esc_js( __( 'Remove this line? Each computer loses what it grants at its next check-in. Its records are never deleted.', 'wp-license-manager' ) ); ?>');">
 				<?php $this->hidden( $license, 'line_delete', array( 'line_id' => $line->id ) ); ?>
 			</form>
 		<?php endforeach; ?>
@@ -301,7 +301,7 @@ class EntitlementPanel {
 		<?php if ( null !== $flash && ! empty( $flash['token'] ) ) : ?>
 			<div class="notice notice-info inline" style="padding:12px">
 				<p><strong><?php esc_html_e( 'Offline renewal code', 'wp-license-manager' ); ?></strong> — <?php echo esc_html( (string) $flash['message'] ); ?></p>
-				<p><?php esc_html_e( 'Send it to the customer (for example over WhatsApp). They paste it into Super Ledger on that computer. It works only on that computer, and never extends what is paid for. It is shown once.', 'wp-license-manager' ); ?></p>
+				<p><?php echo esc_html( sprintf( /* translators: %s: product name */ __( 'Send it to the customer (for example over WhatsApp). They paste it into %s on that computer. It works only on that computer, and never extends what is paid for. It is shown once.', 'wp-license-manager' ), $profile->label ) ); ?></p>
 				<textarea id="wplm-offline-code" class="wplm-code" rows="4" readonly><?php echo esc_textarea( (string) $flash['token'] ); ?></textarea>
 				<p>
 					<button type="button" class="button" onclick="(function(b){var t=document.getElementById('wplm-offline-code');t.select();(navigator.clipboard?navigator.clipboard.writeText(t.value):Promise.reject()).then(function(){b.textContent=b.dataset.done;},function(){document.execCommand('copy');b.textContent=b.dataset.done;});})(this)" data-done="<?php esc_attr_e( 'Copied', 'wp-license-manager' ); ?>"><?php esc_html_e( 'Copy code', 'wp-license-manager' ); ?></button>
@@ -322,7 +322,7 @@ class EntitlementPanel {
 			</tr></thead>
 			<tbody>
 			<?php if ( array() === $machines ) : ?>
-				<tr><td colspan="5"><?php esc_html_e( 'No active computer. The customer activates Super Ledger on the office computer with the licence key.', 'wp-license-manager' ); ?></td></tr>
+				<tr><td colspan="5"><?php echo esc_html( sprintf( /* translators: %s: product name */ __( 'No active computer. The customer activates %s on their computer with the licence key.', 'wp-license-manager' ), $profile->label ) ); ?></td></tr>
 			<?php endif; ?>
 			<?php foreach ( $machines as $machine ) : ?>
 				<tr>
@@ -415,7 +415,7 @@ class EntitlementPanel {
 				<p><label for="wplm-note-reinstate"><?php esc_html_e( 'Note (optional)', 'wp-license-manager' ); ?></label><br>
 				<textarea id="wplm-note-reinstate" name="note" rows="2" class="large-text"></textarea></p>
 				<button type="submit" class="button button-primary"><?php esc_html_e( 'Reinstate', 'wp-license-manager' ); ?></button>
-				<span class="description"><?php esc_html_e( 'The office unlocks at its next check-in. A revoked licence must be activated again on each computer.', 'wp-license-manager' ); ?></span>
+				<span class="description"><?php esc_html_e( 'Each computer unlocks at its next check-in. A revoked licence must be activated again on each computer.', 'wp-license-manager' ); ?></span>
 			</form>
 		<?php else : ?>
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
@@ -423,7 +423,7 @@ class EntitlementPanel {
 				<p><label for="wplm-note-suspend"><?php esc_html_e( 'Why are you suspending it? (required, kept in the log)', 'wp-license-manager' ); ?></label><br>
 				<textarea id="wplm-note-suspend" name="note" rows="2" class="large-text" required></textarea></p>
 				<button type="submit" class="button"><?php esc_html_e( 'Suspend', 'wp-license-manager' ); ?></button>
-				<span class="description"><?php esc_html_e( 'The office becomes read-only at its next check-in. Nothing is deleted.', 'wp-license-manager' ); ?></span>
+				<span class="description"><?php esc_html_e( 'Each computer becomes read-only at its next check-in. Nothing is deleted.', 'wp-license-manager' ); ?></span>
 			</form>
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin-top:16px" onsubmit="return confirm('<?php echo esc_js( __( 'Revoke this licence? Every computer is deactivated and the customer gets no further tokens.', 'wp-license-manager' ) ); ?>');">
 				<?php $this->hidden( $license, 'status', array( 'status_action' => 'revoke' ) ); ?>

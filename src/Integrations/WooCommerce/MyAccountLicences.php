@@ -1,6 +1,6 @@
 <?php
 /**
- * My Account → Licenses: the customer's licences, their computers, and the Super Ledger Move button.
+ * My Account → Licenses: the customer's licences, their computers, and the Move button of an entitlement licence.
  *
  * @package WPLM\Integrations\WooCommerce
  */
@@ -18,7 +18,7 @@ use WPLM\Repositories\MachineRepository;
 use WPLM\Services\EntitlementService;
 
 /**
- * A customer sees only their own licences. For an entitlement licence (Super Ledger) the detail view
+ * A customer sees only their own licences. For an entitlement licence the detail view
  * shows what is paid for, the active computers, the moves left, and a **Move** button per computer: a
  * self-service move frees that computer so the licence can be activated on another, and counts against
  * the move limit (2 per 30 days) exactly like a move made from the app.
@@ -76,7 +76,8 @@ class MyAccountLicences {
 		if ( null === $license || null === $machine ) {
 			return $this->result( false, __( 'That computer was not found on your licence.', 'wp-license-manager' ) );
 		}
-		if ( null === $this->profiles->get( $license->profile ) ) {
+		$profile = $this->profiles->get( $license->profile );
+		if ( null === $profile ) {
 			return $this->result( false, __( 'This licence is moved from the software itself.', 'wp-license-manager' ) );
 		}
 
@@ -92,7 +93,8 @@ class MyAccountLicences {
 			return $this->result( false, $text );
 		}
 
-		return $this->result( true, __( 'The computer was removed from your licence. Now activate Super Ledger on the new computer with your licence key.', 'wp-license-manager' ) );
+		/* translators: %s: product name */
+		return $this->result( true, sprintf( __( 'The computer was removed from your licence. Now activate %s on the new computer with your licence key.', 'wp-license-manager' ), $profile->label ) );
 	}
 
 	/** Handle the Move button (admin-post, logged-in customers only). */
@@ -145,7 +147,7 @@ class MyAccountLicences {
 	}
 
 	/**
-	 * One licence: what it grants, its computers, and (Super Ledger) the Move buttons.
+	 * One licence: what it grants, its computers, and (entitlement licences) the Move buttons.
 	 *
 	 * @param int $user_id    The customer.
 	 * @param int $license_id The licence to show; another customer's licence shows nothing of it.

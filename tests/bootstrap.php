@@ -53,7 +53,8 @@ tests_add_filter(
 				'users'        => 'Users',
 				'seats'        => 'Seats',
 				'phones'       => 'Phones',
-			)
+			),
+			'base'
 		);
 		return $profiles;
 	}

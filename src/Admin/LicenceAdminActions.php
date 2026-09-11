@@ -301,8 +301,8 @@ class LicenceAdminActions {
 	 */
 	public function change_status( int $license_id, string $action, string $note, int $user_id ): array {
 		$messages = array(
-			'suspend'   => __( 'Licence suspended. Its offices become read-only at their next check-in.', 'wp-license-manager' ),
-			'reinstate' => __( 'Licence reinstated. Its offices unlock at their next check-in.', 'wp-license-manager' ),
+			'suspend'   => __( 'Licence suspended. Its computers become read-only at their next check-in.', 'wp-license-manager' ),
+			'reinstate' => __( 'Licence reinstated. Its computers unlock at their next check-in.', 'wp-license-manager' ),
 			'revoke'    => __( 'Licence revoked. Its computers were deactivated.', 'wp-license-manager' ),
 		);
 		if ( ! isset( $messages[ $action ] ) ) {

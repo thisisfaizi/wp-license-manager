@@ -148,6 +148,20 @@ class LapseNoticeTest extends TestCase {
 		$this->assertStringNotContainsString( 'Distribution', $sent[0]['body'] );
 	}
 
+	/** Only the profile's own base module is worded as the whole product. */
+	public function test_without_a_base_module_every_lapse_names_its_modules(): void {
+		$this->licence( array( 'base' => self::TODAY ) );
+		$notices = new LapseNoticeService(
+			$this->make( \WPLM\Repositories\EntitlementRepository::class ),
+			$this->make( \WPLM\Repositories\LicenseRepository::class ),
+			$this->make( ActivationLogRepository::class ),
+			$this->registry_without_base_module()
+		);
+
+		$this->assertSame( 1, $notices->run( self::NOW ) );
+		$this->assertSame( 'Base (accounting) in your Acme Office will become read-only on 2026-09-19', $this->sent()[0]['subject'] );
+	}
+
 	public function test_suspended_revoked_and_classic_licences_are_not_emailed(): void {
 		$suspended = $this->licence( array( 'base' => self::TODAY ) );
 		$this->set_row( 'licenses', $suspended->id, array( 'status' => 4 ) );

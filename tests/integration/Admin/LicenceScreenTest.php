@@ -100,7 +100,7 @@ class LicenceScreenTest extends TestCase {
 
 		$html = $this->screen( $bound['license']->id );
 
-		$this->assertStringContainsString( 'No base line', $html );
+		$this->assertStringContainsString( 'No Base (accounting) line: all of Acme Office is read-only', $html );
 		$this->assertStringNotContainsString( '<script>alert(1)</script>', $html );
 	}
 

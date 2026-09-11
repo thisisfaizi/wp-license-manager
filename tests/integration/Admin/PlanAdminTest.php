@@ -89,6 +89,21 @@ class PlanAdminTest extends TestCase {
 		$this->assertStringContainsString( 'Base', $result['warnings'][0] );
 	}
 
+	public function test_a_profile_without_a_base_module_never_warns_about_one(): void {
+		$actions = new PlanAdminActions( $this->make( PlanService::class ), $this->registry_without_base_module(), $this->make( \WPLM\Services\EntitlementService::class ) );
+
+		$result = $actions->save_plan(
+			array(
+				'plan_name'    => 'POS only',
+				'plan_profile' => 'acme-office',
+				'packages'     => array( $this->package_row( 'POS lifetime', array( 'pos' ), array(), array( 'billing_type' => 'lifetime' ) ) ),
+			)
+		);
+
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$this->assertSame( array(), $result['warnings'] );
+	}
+
 	public function test_an_unknown_code_saves_nothing_not_even_the_profile_change(): void {
 		$plan = $this->actions()->save_plan(
 			array(

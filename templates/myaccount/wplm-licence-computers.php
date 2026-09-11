@@ -1,6 +1,6 @@
 <?php
 /**
- * My Account — one licence's computers, and for Super Ledger its modules and the Move button.
+ * My Account — one licence's computers, and for an entitlement licence its modules and the Move button.
  *
  * @var \WPLM\Models\License|null        $license     The licence, or null when it is not the customer's.
  * @var \WPLM\Licensing\Profile|null     $profile     Its licence profile (null for a classic licence).
