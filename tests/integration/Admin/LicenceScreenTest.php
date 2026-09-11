@@ -1,6 +1,6 @@
 <?php
 /**
- * The licence edit screen renders the entitlement panels for an entitlement licence (M5-27a §2, §6),
+ * The licence edit screen renders the entitlement panels for an entitlement licence,
  * and nothing new for a classic one. Behaviour behind each form is in LicenceAdminActionsTest.
  *
  * @package WPLM\Tests
@@ -73,7 +73,7 @@ class LicenceScreenTest extends TestCase {
 	public function test_the_add_form_offers_the_licence_type_and_an_optional_key(): void {
 		$html = $this->screen();
 
-		$this->assertStringContainsString( '<option value="super-ledger">', $html );
+		$this->assertStringContainsString( '<option value="acme-office">', $html );
 		$this->assertStringContainsString( 'name="key_string"', $html );
 	}
 

@@ -1,6 +1,6 @@
 <?php
 /**
- * My Account → Licenses (M5-27a §4): a customer sees their licence's computers and, for Super Ledger,
+ * My Account → Licenses: a customer sees their licence's computers and, for an entitlement licence,
  * what is paid for and a Move button that frees a computer (counted against the move limit).
  *
  * @package WPLM\Tests
@@ -21,7 +21,7 @@ class MyAccountLicencesTest extends TestCase {
 		return $this->make( MyAccountLicences::class );
 	}
 
-	/** A Super Ledger licence owned by a new customer, activated on one computer. */
+	/** An entitlement licence owned by a new customer, activated on one computer. */
 	private function owned( string $raw = 'office-pc', int $seats = 1 ): array {
 		$bound    = $this->activated_profile_licence( $raw );
 		$customer = $this->create_customer();
@@ -130,7 +130,7 @@ class MyAccountLicencesTest extends TestCase {
 		$this->assertSame( array( $bound['license']->id ), array_map( static fn( $l ) => $l->id, wplm_get_licenses( array( 'user_id' => $bound['customer'] ) )['items'] ) );
 	}
 
-	public function test_the_list_shows_modules_instead_of_never_expires_for_super_ledger(): void {
+	public function test_the_list_shows_modules_instead_of_never_expires_for_an_entitlement_licence(): void {
 		$bound = $this->owned();
 		$this->make( EntitlementService::class )->add_line( $bound['license']->id, array( 'kind' => 'module', 'code' => 'base', 'paid_through' => '2030-01-15' ) );
 		wp_set_current_user( $bound['customer'] );

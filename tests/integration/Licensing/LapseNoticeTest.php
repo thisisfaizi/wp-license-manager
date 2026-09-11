@@ -1,6 +1,6 @@
 <?php
 /**
- * The "will become read-only" email (M5-27a §5): sent on a module's paid-through day, once, with the
+ * The "will become read-only" email: sent on a module's paid-through day, once, with the
  * day read-only starts. Nothing on the server locks; the email is the customer's warning.
  *
  * @package WPLM\Tests
@@ -31,13 +31,13 @@ class LapseNoticeTest extends TestCase {
 		return $this->make( LapseNoticeService::class );
 	}
 
-	/** A Super Ledger licence owned by a customer, with the given module lines (code => paid_through). */
+	/** An entitlement licence owned by a customer, with the given module lines (code => paid_through). */
 	private function licence( array $modules, array $licence = array() ): \WPLM\Models\License {
 		$customer = $this->create_customer();
 		$license  = $this->make( LicenseService::class )->create(
 			$licence + array(
 				'key_string' => 'SL-' . wp_generate_password( 16, false ),
-				'profile'    => 'super-ledger',
+				'profile'    => 'acme-office',
 				'user_id'    => $customer,
 			)
 		);
@@ -84,7 +84,7 @@ class LapseNoticeTest extends TestCase {
 		$this->assertCount( 1, $sent );
 		$this->assertSame( $this->email_of( $license ), $sent[0]['to'] );
 		// Paid through 11 Sep, grace 7 days (12–18 Sep), read-only from 19 Sep.
-		$this->assertSame( 'Your Super Ledger will become read-only on 2026-09-19', $sent[0]['subject'] );
+		$this->assertSame( 'Your Acme Office will become read-only on 2026-09-19', $sent[0]['subject'] );
 		$this->assertStringContainsString( '2026-09-18', $sent[0]['body'], 'The last working day is named.' );
 		$this->assertStringContainsString( 'nothing is deleted', strtolower( $sent[0]['body'] ) );
 	}
@@ -175,7 +175,7 @@ class LapseNoticeTest extends TestCase {
 	}
 
 	public function test_the_grace_setting_moves_the_read_only_date(): void {
-		update_option( 'wplm_profile_super_ledger_grace_days', '3' );
+		update_option( 'wplm_profile_acme_office_grace_days', '3' );
 		$this->licence( array( 'base' => self::TODAY ) );
 
 		$this->notices()->run( self::NOW );
@@ -205,7 +205,7 @@ class LapseNoticeTest extends TestCase {
 		$license = $this->make( LicenseService::class )->create(
 			array(
 				'key_string' => 'SL-' . wp_generate_password( 16, false ),
-				'profile'    => 'super-ledger',
+				'profile'    => 'acme-office',
 			)
 		);
 		$this->make( EntitlementService::class )->add_line( $license->id, array( 'kind' => 'module', 'code' => 'base', 'paid_through' => self::TODAY ) );

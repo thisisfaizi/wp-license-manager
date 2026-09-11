@@ -1,6 +1,6 @@
 <?php
 /**
- * The plan editor (M5-27a §2): a plan sells a licence profile, and each licence type (package) carries
+ * The plan editor: a plan sells a licence profile, and each licence type (package) carries
  * the entitlement template a purchase writes onto the licence.
  *
  * @package WPLM\Tests
@@ -43,12 +43,12 @@ class PlanAdminTest extends TestCase {
 		return $out;
 	}
 
-	public function test_a_super_ledger_plan_saves_each_licence_type_template(): void {
+	public function test_a_profile_plan_saves_each_licence_type_template(): void {
 		$result = $this->actions()->save_plan(
 			array(
-				'plan_name'    => 'Super Ledger Distribution',
+				'plan_name'    => 'Acme Office Distribution',
 				'plan_status'  => '1',
-				'plan_profile' => 'super-ledger',
+				'plan_profile' => 'acme-office',
 				'packages'     => array(
 					$this->package_row( 'Distribution monthly', array( 'base', 'distribution' ), array( 'users' => '3', 'phones' => '2', 'seats' => '' ) ),
 					$this->package_row( 'Extra phone', array(), array( 'phones' => '1' ) ),
@@ -57,7 +57,7 @@ class PlanAdminTest extends TestCase {
 		);
 
 		$this->assertTrue( $result['ok'], $result['message'] );
-		$this->assertSame( 'super-ledger', $this->make( PlanService::class )->get( $result['plan_id'] )->profile );
+		$this->assertSame( 'acme-office', $this->make( PlanService::class )->get( $result['plan_id'] )->profile );
 		$this->assertSame(
 			array(
 				'Distribution monthly' => array(
@@ -79,7 +79,7 @@ class PlanAdminTest extends TestCase {
 		$result = $this->actions()->save_plan(
 			array(
 				'plan_name'    => 'POS add-on',
-				'plan_profile' => 'super-ledger',
+				'plan_profile' => 'acme-office',
 				'packages'     => array( $this->package_row( 'POS lifetime', array( 'pos' ), array(), array( 'billing_type' => 'lifetime' ) ) ),
 			)
 		);
@@ -102,7 +102,7 @@ class PlanAdminTest extends TestCase {
 			array(
 				'plan_id'      => (string) $plan['plan_id'],
 				'plan_name'    => 'Renamed',
-				'plan_profile' => 'super-ledger',
+				'plan_profile' => 'acme-office',
 				'packages'     => array( $this->package_row( 'Monthly', array( 'base', 'payroll' ) ) ),
 			)
 		);
@@ -152,8 +152,8 @@ class PlanAdminTest extends TestCase {
 	public function test_the_editor_shows_the_profile_and_each_licence_types_modules(): void {
 		$saved = $this->actions()->save_plan(
 			array(
-				'plan_name'    => 'Super Ledger POS',
-				'plan_profile' => 'super-ledger',
+				'plan_name'    => 'Acme Office POS',
+				'plan_profile' => 'acme-office',
 				'packages'     => array( $this->package_row( 'POS monthly', array( 'base', 'pos' ), array( 'users' => '2' ) ) ),
 			)
 		);
@@ -166,7 +166,7 @@ class PlanAdminTest extends TestCase {
 		$html = (string) ob_get_clean();
 		unset( $_GET['action'], $_GET['id'] );
 
-		$this->assertMatchesRegularExpression( '/<option value="super-ledger"\s+selected/', $html );
+		$this->assertMatchesRegularExpression( '/<option value="acme-office"\s+selected/', $html );
 		$this->assertMatchesRegularExpression( '/name="packages\[0\]\[entitlements\]\[modules\]\[\]" value="pos"\s+checked/', $html );
 		$this->assertDoesNotMatchRegularExpression( '/name="packages\[0\]\[entitlements\]\[modules\]\[\]" value="fbr"\s+checked/', $html );
 		$this->assertMatchesRegularExpression( '/name="packages\[0\]\[entitlements\]\[limits\]\[users\]" value="2"/', $html );

@@ -32,6 +32,33 @@ tests_add_filter(
 	}
 );
 
+// WPLM has no built-in licence profile; a product's add-on registers one. The suite registers a
+// fictional product before anything reads the registry (the container keeps its first instance).
+tests_add_filter(
+	'wplm_license_profiles',
+	static function ( array $profiles ): array {
+		$profiles['acme-office'] = new \WPLM\Licensing\Profile(
+			'acme-office',
+			'Acme Office',
+			array( 'base', 'distribution', 'pos', 'factory', 'fbr', 'assets', 'subcontract' ),
+			array( 'users', 'seats', 'phones' ),
+			array(
+				'base'         => 'Base (accounting)',
+				'distribution' => 'Distribution',
+				'pos'          => 'Point of Sale',
+				'factory'      => 'Factory',
+				'fbr'          => 'FBR',
+				'assets'       => 'Fixed Assets',
+				'subcontract'  => 'Subcontracting',
+				'users'        => 'Users',
+				'seats'        => 'Seats',
+				'phones'       => 'Phones',
+			)
+		);
+		return $profiles;
+	}
+);
+
 // Install WooCommerce's and WPLM's tables into the test database once per run.
 tests_add_filter(
 	'setup_theme',

@@ -1,6 +1,6 @@
 <?php
 /**
- * The owner's actions on an entitlement licence's screen (M5-27a §2, §5, §6): lines, status with a
+ * The owner's actions on an entitlement licence's screen: lines, status with a
  * note, offline codes, move resets, and the licence form's profile. Each is tested through the action
  * service the admin-post handlers call.
  *
@@ -234,7 +234,7 @@ class LicenceAdminActionsTest extends TestCase {
 		$result = $this->actions()->save_licence(
 			array(
 				'key_string'      => 'SL-FORM-0001',
-				'profile'         => 'super-ledger',
+				'profile'         => 'acme-office',
 				'max_activations' => '1',
 				'expires_at'      => '2027-01-01',
 			)
@@ -242,7 +242,7 @@ class LicenceAdminActionsTest extends TestCase {
 
 		$this->assertTrue( $result['ok'], $result['message'] );
 		$row = $this->license_row( $result['license_id'] );
-		$this->assertSame( 'super-ledger', $row['profile'] );
+		$this->assertSame( 'acme-office', $row['profile'] );
 		$this->assertNull( $row['expires_at'], 'An entitlement licence never stores an expiry.' );
 	}
 
@@ -250,7 +250,7 @@ class LicenceAdminActionsTest extends TestCase {
 		$result = $this->actions()->save_licence(
 			array(
 				'key_string' => '',
-				'profile'    => 'super-ledger',
+				'profile'    => 'acme-office',
 			)
 		);
 
@@ -298,7 +298,7 @@ class LicenceAdminActionsTest extends TestCase {
 
 		$this->assertTrue( $result['ok'], $result['message'] );
 		$row = $this->license_row( $bound['license']->id );
-		$this->assertSame( 'super-ledger', $row['profile'] );
+		$this->assertSame( 'acme-office', $row['profile'] );
 		$this->assertSame( 3, (int) $row['max_activations'] );
 	}
 

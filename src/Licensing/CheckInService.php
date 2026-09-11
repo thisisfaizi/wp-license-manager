@@ -19,7 +19,7 @@ use WPLM\Services\ActivationService;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * The server side of a Super Ledger office's licence loop (M5-27a §4):
+ * The server side of an entitlement licence's check-in loop:
  *
  * - **activate** and **check in** return a signed v2 token and the server time, and record the
  *   machine's usage counts, app version and the `fp` the token carries (so admin can issue an

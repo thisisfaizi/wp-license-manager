@@ -19,4 +19,3 @@
 # Local PHPUnit overrides
 /phpunit.xml
 /tests/.tmp/
-/tools/verify-fixtures/.dart_tool/

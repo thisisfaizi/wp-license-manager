@@ -463,7 +463,7 @@ class PlanCheckout {
 		if ( $generator_id <= 0 ) {
 			throw new \RuntimeException( 'no key generator is configured (WPLM → Generators)' );
 		}
-		// A plan that sells a licence profile (e.g. Super Ledger) issues an entitlement licence. Check
+		// A plan that sells a licence profile issues an entitlement licence. Check
 		// its template before anything is created, so a bad template leaves nothing half-issued.
 		$plan         = $this->plans->get( $pkg->plan_id );
 		$profile_code = null !== $plan ? $plan->profile : null;

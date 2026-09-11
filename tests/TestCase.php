@@ -91,13 +91,13 @@ abstract class TestCase extends \WP_UnitTestCase {
 		);
 	}
 
-	/** What a Super Ledger client sends as its fingerprint: sha256_hex('super-ledger|' + raw). */
+	/** What the test product's client sends as its fingerprint: sha256_hex('acme-office|' + raw). */
 	protected function client_fp( string $raw ): string {
-		return hash( 'sha256', 'super-ledger|' . $raw );
+		return hash( 'sha256', 'acme-office|' . $raw );
 	}
 
 	/**
-	 * A Super Ledger licence (no lines yet) activated on one machine.
+	 * An entitlement licence of the test profile (no lines yet) activated on one machine.
 	 *
 	 * @return array{license:\WPLM\Models\License, machine:\WPLM\Models\Machine, fp:string}
 	 */
@@ -105,7 +105,7 @@ abstract class TestCase extends \WP_UnitTestCase {
 		$license = $this->make( \WPLM\Services\LicenseService::class )->create(
 			array(
 				'key_string'      => 'SL-' . wp_generate_password( 16, false ),
-				'profile'         => 'super-ledger',
+				'profile'         => 'acme-office',
 				'max_activations' => 1,
 			)
 		);

@@ -1,6 +1,6 @@
 <?php
 /**
- * Offline renewal codes (M5-27a §6): for an office with no internet, the owner issues a normal v2
+ * Offline renewal codes: for a machine with no internet, the owner issues a normal v2
  * token for that machine with a longer check-in deadline, and sends it over WhatsApp.
  *
  * @package WPLM\Tests
@@ -23,7 +23,7 @@ class OfflineCodeTest extends TestCase {
 		return $this->make( OfflineCodeService::class );
 	}
 
-	/** A Super Ledger machine that has checked in once, so the server knows the fp it signs. */
+	/** A machine of an entitlement licence that has checked in once, so the server knows the fp it signs. */
 	private function checked_in_machine(): array {
 		$bound  = $this->activated_profile_licence();
 		$result = $this->make( CheckInService::class )->check_in( $bound['license'], $bound['fp'], array(), null );

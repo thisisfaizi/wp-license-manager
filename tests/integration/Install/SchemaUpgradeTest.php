@@ -102,7 +102,7 @@ class SchemaUpgradeTest extends TestCase {
 		}
 		$this->assertNull( $this->license_row( $classic->id )['profile'], 'An existing licence stays classic.' );
 
-		$this->set_row( 'licenses', $classic->id, array( 'profile' => 'super-ledger' ) );
+		$this->set_row( 'licenses', $classic->id, array( 'profile' => 'acme-office' ) );
 		$line_id = $this->make( EntitlementRepository::class )->create(
 			array(
 				'license_id' => $classic->id,

@@ -310,7 +310,7 @@ class SubscriptionService {
 
 		// Sync the licence. Billing never locks a licence by changing its status: access ends
 		// because the paid term (expires_at + grace) runs out, and only an owner action
-		// (suspend, revoke, terminate, refund) changes status. Audit F3/F4; Super Ledger D7.
+		// (suspend, revoke, terminate, refund) changes status. Audit F3/F4.
 		if ( null !== $sub->license_id ) {
 			$license = $this->license_service->get_by_id( $sub->license_id );
 

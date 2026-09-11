@@ -1,6 +1,6 @@
 <?php
 /**
- * The Settings page: per-profile licence timing (M5-27a §3), the grace default, the dunning schedule
+ * The Settings page: per-profile licence timing, the grace default, the dunning schedule
  * the page saves, and the production signing-key warning.
  *
  * @package WPLM\Tests
@@ -21,7 +21,7 @@ class SettingsTest extends TestCase {
 	}
 
 	private function profile(): \WPLM\Licensing\Profile {
-		return $this->make( ProfileRegistry::class )->get( ProfileRegistry::SUPER_LEDGER );
+		return $this->make( ProfileRegistry::class )->get( 'acme-office' );
 	}
 
 	/** Save options the way options.php does: every option registered in the group, from POST. */

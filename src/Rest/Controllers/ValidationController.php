@@ -167,7 +167,7 @@ class ValidationController extends BaseController {
 				'components'  => is_array( $body['components'] ?? null ) ? $body['components'] : array(),
 			);
 
-			// An entitlement licence (e.g. Super Ledger) gets its v2 token with the activation.
+			// An entitlement licence gets its v2 token with the activation.
 			$license = $this->container->make( LicenseService::class )->get_by_key( $license_key );
 			$checkin = $this->container->make( CheckInService::class );
 			if ( $checkin->handles( $license ) ) {

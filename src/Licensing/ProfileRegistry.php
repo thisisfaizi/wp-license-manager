@@ -10,13 +10,16 @@ namespace WPLM\Licensing;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * The known licence profiles, keyed by code. Super Ledger is built in; another product registers
- * its own through the `wplm_license_profiles` filter.
+ * The known licence profiles, keyed by code. None is built in: each product's add-on plugin registers
+ * its own through the `wplm_license_profiles` filter, before WPLM first reads the list.
+ *
+ * A licence or plan whose profile nobody registers gets no v2 token, so the add-on that registers a
+ * profile in use must stay active.
  */
 class ProfileRegistry {
 
-	/** Super Ledger's profile code, signed into its tokens as `pid`. */
-	public const SUPER_LEDGER = 'super-ledger';
+	/** A profile code: lower-case letters, digits and hyphens. It is signed as `pid` and used in option names. */
+	private const CODE_PATTERN = '/^[a-z0-9][a-z0-9-]{0,31}$/';
 
 	/** @var array<string, Profile>|null */
 	private ?array $profiles = null;
@@ -24,36 +27,15 @@ class ProfileRegistry {
 	/** @return array<string, Profile> */
 	public function all(): array {
 		if ( null === $this->profiles ) {
-			$built = array(
-				self::SUPER_LEDGER => new Profile(
-					self::SUPER_LEDGER,
-					'Super Ledger',
-					array( 'base', 'distribution', 'pos', 'factory', 'fbr', 'assets', 'subcontract' ),
-					array( 'users', 'seats', 'phones' ),
-					array(
-						'base'         => __( 'Base (accounting)', 'wp-license-manager' ),
-						'distribution' => __( 'Distribution', 'wp-license-manager' ),
-						'pos'          => __( 'Point of Sale', 'wp-license-manager' ),
-						'factory'      => __( 'Factory', 'wp-license-manager' ),
-						'fbr'          => __( 'FBR', 'wp-license-manager' ),
-						'assets'       => __( 'Fixed Assets', 'wp-license-manager' ),
-						'subcontract'  => __( 'Subcontracting', 'wp-license-manager' ),
-						'users'        => __( 'Users', 'wp-license-manager' ),
-						'seats'        => __( 'Seats', 'wp-license-manager' ),
-						'phones'       => __( 'Phones', 'wp-license-manager' ),
-					)
-				),
-			);
-
 			/**
 			 * Filter the licence profiles.
 			 *
-			 * @param array<string, Profile> $built Profiles keyed by code.
+			 * @param array<string, Profile> $profiles Profiles keyed by code.
 			 */
-			$filtered       = (array) apply_filters( 'wplm_license_profiles', $built );
+			$filtered       = (array) apply_filters( 'wplm_license_profiles', array() );
 			$this->profiles = array();
 			foreach ( $filtered as $code => $profile ) {
-				if ( $profile instanceof Profile && $code === $profile->code ) {
+				if ( $profile instanceof Profile && $code === $profile->code && 1 === preg_match( self::CODE_PATTERN, $code ) ) {
 					$this->profiles[ $code ] = $profile;
 				}
 			}

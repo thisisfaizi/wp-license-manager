@@ -53,7 +53,7 @@ class License {
 	public int $source = 2;
 
 	/**
-	 * Licence profile code (e.g. 'super-ledger'), or null for a classic licence. A profile licence
+	 * Licence profile code (see ProfileRegistry), or null for a classic licence. A profile licence
 	 * never expires as a whole: its entitlement lines carry the dates.
 	 */
 	public ?string $profile = null;

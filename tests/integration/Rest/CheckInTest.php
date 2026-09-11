@@ -1,6 +1,6 @@
 <?php
 /**
- * Check-in over the real REST routes: a Super Ledger office activates and checks in, receives a fresh
+ * Check-in over the real REST routes: an entitlement licence's machine activates and checks in, receives a fresh
  * v2 token each time, reports its usage, is rate-limited, and may move its licence only twice a month.
  * Classic licences keep their old responses.
  *
@@ -34,7 +34,7 @@ class CheckInTest extends TestCase {
 		$license = $this->make( LicenseService::class )->create(
 			array(
 				'key_string'      => 'SL-' . wp_generate_password( 16, false ),
-				'profile'         => 'super-ledger',
+				'profile'         => 'acme-office',
 				'max_activations' => $seats,
 			)
 		);

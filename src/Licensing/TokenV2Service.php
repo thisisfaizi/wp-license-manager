@@ -21,10 +21,10 @@ defined( 'ABSPATH' ) || exit;
  *
  *     {v, pid, lid, mid, fp, iat, srv, checkInBy, graceDays, status, modules, limits}
  *
- * The field shape is a contract with the client (Super Ledger verifies it offline), fixed by the
- * contract fixtures. Signed with the same Ed25519 key and format as v1 tokens.
+ * The field shape is a contract with the client, which verifies it offline; a product's add-on pins it
+ * with contract fixtures. Signed with the same Ed25519 key and format as v1 tokens.
  *
- * `fp` is the value the client sent — for Super Ledger `sha256_hex('super-ledger|' + raw)` — so the
+ * `fp` is the value the client sent (typically a hash of its product code and a raw machine id), so the
  * client can compare it; the server matches it against the machine's stored HMAC. The server never
  * locks for non-payment here: `status` is `suspended` only when the owner suspended the licence, and
  * a lapsed module is simply listed with a past `until`.
