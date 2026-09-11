@@ -57,6 +57,24 @@ class UnregisteredProfileNoticeTest extends TestCase {
 		$this->assertSame( '', $this->html(), 'Only administrators, who can reactivate plugins, see it.' );
 	}
 
+	/** Before an install or update has created the columns, admin screens show no database error. */
+	public function test_a_missing_table_or_column_prints_nothing(): void {
+		global $wpdb;
+		$this->licence_with_profile( 'gone-product' );
+		$plans = $wpdb->prefix . 'wplm_plans';
+		add_filter( 'query', static fn( $sql ) => str_replace( "`{$plans}`", "`{$plans}_not_created_yet`", $sql ) );
+		$shown = $wpdb->show_errors();
+
+		ob_start();
+		$missing = $this->notice()->missing();
+		$output  = (string) ob_get_clean();
+		$wpdb->show_errors( $shown );
+
+		$this->assertSame( '', $output );
+		$this->assertSame( array( 'gone-product' ), $missing, 'What can be read is still reported.' );
+		$this->assertFalse( $wpdb->suppress_errors(), 'Error display is restored.' );
+	}
+
 	public function test_the_notice_clears_once_the_add_on_registers_the_profile_again(): void {
 		$this->licence_with_profile( 'gone-product' );
 		add_filter(

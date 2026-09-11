@@ -41,12 +41,16 @@ class UnregisteredProfileNotice {
 		$licenses = $wpdb->prefix . 'wplm_licenses';
 		$plans    = $wpdb->prefix . 'wplm_plans';
 
+		// Runs on every admin screen, including before a new install or an update has created the
+		// tables and columns: a missing one means nothing uses a profile yet, not a printed DB error.
+		$suppressed = $wpdb->suppress_errors();
 		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.DirectDatabaseQuery -- table names only; `licenses.profile` is indexed.
 		$used = array_merge(
 			(array) $wpdb->get_col( "SELECT DISTINCT profile FROM `{$licenses}` WHERE profile IS NOT NULL AND profile <> ''" ),
 			(array) $wpdb->get_col( "SELECT DISTINCT profile FROM `{$plans}` WHERE profile IS NOT NULL AND profile <> ''" )
 		);
 		// phpcs:enable
+		$wpdb->suppress_errors( $suppressed );
 
 		$missing = array_values( array_diff( array_unique( $used ), array_keys( $this->profiles->all() ) ) );
 		sort( $missing );
