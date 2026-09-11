@@ -37,17 +37,27 @@ final class Profile {
 	/** @var string[] */
 	public array $limit_codes;
 
+	/** @var array<string, string> */
+	private array $labels;
+
 	/**
-	 * @param string   $code         Wire identifier, signed into the token as `pid`.
-	 * @param string   $label        Admin label.
-	 * @param string[] $module_codes Allowed module codes.
-	 * @param string[] $limit_codes  Allowed limit codes.
+	 * @param string                $code         Wire identifier, signed into the token as `pid`.
+	 * @param string                $label        Admin and customer-facing product name.
+	 * @param string[]              $module_codes Allowed module codes.
+	 * @param string[]              $limit_codes  Allowed limit codes.
+	 * @param array<string, string> $labels       Human names for module and limit codes.
 	 */
-	public function __construct( string $code, string $label, array $module_codes, array $limit_codes ) {
+	public function __construct( string $code, string $label, array $module_codes, array $limit_codes, array $labels = array() ) {
 		$this->code         = $code;
 		$this->label        = $label;
 		$this->module_codes = array_values( $module_codes );
 		$this->limit_codes  = array_values( $limit_codes );
+		$this->labels       = $labels;
+	}
+
+	/** The human name of a module or limit code; the code itself when none is registered. */
+	public function code_label( string $code ): string {
+		return $this->labels[ $code ] ?? $code;
 	}
 
 	/** Whether a line kind + code pair is allowed for this profile. */

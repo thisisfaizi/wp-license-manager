@@ -50,6 +50,13 @@ Entitlement licences for Super Ledger: per-module and per-limit lines with their
   - They are signed with a **test** keypair derived from a public seed, so regeneration is byte-identical.
   - They are produced by the same composition code as real tokens.
   - `tools/verify-fixtures` verifies them with Dart's `cryptography` Ed25519.
+- **"Will become read-only" email** (`Licensing\LapseNoticeService`, cron `wplm_lapse_notices`, hourly; template `templates/emails/read-only-soon.php`).
+  - Sent on a module's paid-through day, naming the last working day (`paid_through + grace`) and the first read-only day. A lapsing `base` is worded as the whole office; other modules are named.
+  - Sent once per module and date: each notice is logged as `lapse_notice`. A renewal that moves the date starts a new cycle.
+  - A missed run catches up while the module is still in grace, never after read-only has started. A failed send is retried on the next run.
+  - It goes to the purchase order's billing email, else the licence owner's account email (filter `wplm_lapse_notice_recipient`). A licence with neither is logged as `no_recipient`.
+  - Suspended, revoked and terminated licences are not emailed. Action: `wplm_lapse_notice_sent`.
+- Profiles carry human names for their codes (`Profile::code_label()`).
 - `Crypto\CompactToken`: the token format in one place, usable without WordPress. `Signer` delegates to it, and its output is byte-identical to before.
 
 ### Changed

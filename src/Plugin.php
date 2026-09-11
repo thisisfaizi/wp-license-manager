@@ -66,6 +66,7 @@ final class Plugin {
 			'wplm_process_renewals',
 			'wplm_cull_zombies',
 			'wplm_retry_webhooks',
+			'wplm_lapse_notices',
 		);
 		foreach ( $hooks as $hook ) {
 			$timestamp = wp_next_scheduled( $hook );
@@ -242,6 +243,15 @@ final class Plugin {
 			)
 		);
 		$this->container->bind(
+			Licensing\LapseNoticeService::class,
+			fn( $c ) => new Licensing\LapseNoticeService(
+				$c->make( Repositories\EntitlementRepository::class ),
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Repositories\ActivationLogRepository::class ),
+				$c->make( Licensing\ProfileRegistry::class )
+			)
+		);
+		$this->container->bind(
 			Licensing\ContractFixtures::class,
 			fn( $c ) => new Licensing\ContractFixtures( $c->make( Licensing\ProfileRegistry::class ) )
 		);
@@ -336,7 +346,8 @@ final class Plugin {
 			fn( $c ) => new Cron\Scheduler(
 				$c->make( Services\Subscriptions\RenewalProcessor::class ),
 				$c->make( Services\HeartbeatService::class ),
-				$c->make( Services\WebhookService::class )
+				$c->make( Services\WebhookService::class ),
+				$c->make( Licensing\LapseNoticeService::class )
 			)
 		);
 

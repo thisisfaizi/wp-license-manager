@@ -29,7 +29,19 @@ class ProfileRegistry {
 					self::SUPER_LEDGER,
 					'Super Ledger',
 					array( 'base', 'distribution', 'pos', 'factory', 'fbr', 'assets', 'subcontract' ),
-					array( 'users', 'seats', 'phones' )
+					array( 'users', 'seats', 'phones' ),
+					array(
+						'base'         => __( 'Base (accounting)', 'wp-license-manager' ),
+						'distribution' => __( 'Distribution', 'wp-license-manager' ),
+						'pos'          => __( 'Point of Sale', 'wp-license-manager' ),
+						'factory'      => __( 'Factory', 'wp-license-manager' ),
+						'fbr'          => __( 'FBR', 'wp-license-manager' ),
+						'assets'       => __( 'Fixed Assets', 'wp-license-manager' ),
+						'subcontract'  => __( 'Subcontracting', 'wp-license-manager' ),
+						'users'        => __( 'Users', 'wp-license-manager' ),
+						'seats'        => __( 'Seats', 'wp-license-manager' ),
+						'phones'       => __( 'Phones', 'wp-license-manager' ),
+					)
 				),
 			);
 
