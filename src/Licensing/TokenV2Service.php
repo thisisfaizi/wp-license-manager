@@ -89,23 +89,66 @@ class TokenV2Service {
 
 		$now         = isset( $opts['now'] ) ? (int) $opts['now'] : time();
 		$check_in_by = isset( $opts['check_in_by'] ) ? (int) $opts['check_in_by'] : $now + $profile->check_in_days() * DAY_IN_SECONDS;
-		$grace_days  = $profile->grace_days();
-		$summary     = $this->entitlements->summarize( $license, $profile, wp_date( 'Y-m-d', $now ), $grace_days );
+
+		return self::compose(
+			$profile,
+			$license->id,
+			$machine->id,
+			$client_fp,
+			$now,
+			$check_in_by,
+			$profile->grace_days(),
+			4 === $license->status,
+			$this->entitlements->lines( $license->id ),
+			wp_date( 'Y-m-d', $now )
+		);
+	}
+
+	/**
+	 * The pure payload composition, shared by payload() and the contract fixtures.
+	 *
+	 * @param Profile                           $profile     Licence profile.
+	 * @param int                               $lid         Licence id.
+	 * @param int                               $mid         Machine id.
+	 * @param string                            $fp          Client fingerprint value.
+	 * @param int                               $now         Issue time (unix).
+	 * @param int                               $check_in_by Check-in deadline (unix).
+	 * @param int                               $grace_days  Grace signed into the token.
+	 * @param bool                              $suspended   Whether the owner suspended the licence.
+	 * @param \WPLM\Models\Entitlement[]        $lines       The licence's lines.
+	 * @param string                            $today       Site-time-zone date of $now (Y-m-d).
+	 * @return array<string, mixed>
+	 */
+	public static function compose( Profile $profile, int $lid, int $mid, string $fp, int $now, int $check_in_by, int $grace_days, bool $suspended, array $lines, string $today ): array {
+		$summary = EntitlementService::summarize_lines( $lines, $profile, $today, $grace_days );
 
 		return array(
 			'v'         => 2,
 			'pid'       => $profile->code,
-			'lid'       => $license->id,
-			'mid'       => $machine->id,
-			'fp'        => $client_fp,
+			'lid'       => $lid,
+			'mid'       => $mid,
+			'fp'        => $fp,
 			'iat'       => $now,
 			'srv'       => $now,
 			'checkInBy' => $check_in_by,
 			'graceDays' => $grace_days,
-			'status'    => 4 === $license->status ? 'suspended' : 'active',
+			'status'    => $suspended ? 'suspended' : 'active',
 			'modules'   => $summary['modules'],
 			'limits'    => $summary['limits'],
 		);
+	}
+
+	/**
+	 * The payload as it is signed: JSON maps, never lists (an empty PHP array would encode as [] and
+	 * break a Map decode).
+	 *
+	 * @param array<string, mixed> $payload Composed payload.
+	 * @return array<string, mixed>
+	 */
+	public static function wire( array $payload ): array {
+		$payload['modules'] = (object) $payload['modules'];
+		$payload['limits']  = (object) $payload['limits'];
+		return $payload;
 	}
 
 	/**
@@ -123,13 +166,8 @@ class TokenV2Service {
 			return $payload;
 		}
 
-		// JSON maps, never lists: an empty PHP array would encode as [] and break a Map decode.
-		$wire            = $payload;
-		$wire['modules'] = (object) $payload['modules'];
-		$wire['limits']  = (object) $payload['limits'];
-
 		return array(
-			'token'   => $this->signer->sign( $wire ),
+			'token'   => $this->signer->sign( self::wire( $payload ) ),
 			'payload' => $payload,
 		);
 	}

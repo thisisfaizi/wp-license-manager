@@ -41,12 +41,7 @@ class Signer {
 		}
 
 		$this->ensure_keypair();
-		$body = self::base64url_encode( wp_json_encode( $payload ) );
-		$sig  = self::base64url_encode(
-			sodium_crypto_sign_detached( $body, $this->secret_key )
-		);
-
-		return $body . '.' . $sig;
+		return CompactToken::sign( $payload, $this->secret_key );
 	}
 
 	/**

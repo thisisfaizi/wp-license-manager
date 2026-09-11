@@ -38,6 +38,19 @@ Entitlement licences for Super Ledger: per-module and per-limit lines with their
   - `CheckInService::reset_moves()` lets the owner allow moves again. Re-deactivating an inactive machine is not a move.
   - Classic licences keep their responses, and have no move limit.
 - Index `activation_log (machine_id, event, created_at)` for the rate limit.
+- **Offline renewal codes** (`Licensing\OfflineCodeService`, `wp wplm offline-code <machine-id> --days=30`).
+  - A code is an ordinary v2 token for that machine, with the check-in deadline the owner picks (1–365 days).
+  - It is logged as `offline_code`, with who issued it and for how many days.
+  - It is refused for a machine that has not checked in since the upgrade, because its signed `fp` is not yet known.
+- **Fleet extension notice** (`Licensing\FleetNotice`): `{"v":1,"pid":"super-ledger","kind":"extend-check-in","until","iat"}`, signed from a keypair **file**.
+  - `wp wplm fleet-notice --until=YYYY-MM-DD --keypair-file=…` signs it.
+  - `bin/fleet-notice.php` does the same without WordPress: plain PHP with sodium.
+  - It refuses more than 30 days. A bare date means the end of that day in Asia/Karachi (`--timezone`).
+- **Contract fixtures** (`wp wplm contract-fixtures --out=<dir>`): `public_key.txt`, 15 signed cases and `cases.json` with the fixed "now", the raw fingerprint and each case's expected outcome.
+  - They are signed with a **test** keypair derived from a public seed, so regeneration is byte-identical.
+  - They are produced by the same composition code as real tokens.
+  - `tools/verify-fixtures` verifies them with Dart's `cryptography` Ed25519.
+- `Crypto\CompactToken`: the token format in one place, usable without WordPress. `Signer` delegates to it, and its output is byte-identical to before.
 
 ### Changed
 - **An entitlement licence never stores `expires_at`.** Its lines carry the dates, so no path can make classic validation mark it expired or refuse its activation.

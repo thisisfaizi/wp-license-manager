@@ -75,13 +75,27 @@ class EntitlementService {
 	 * @return array{modules: array<string, array{until: string|null}>, limits: array<string, int>}
 	 */
 	public function summarize( License $license, Profile $profile, string $today, int $grace_days ): array {
+		return self::summarize_lines( $this->repo->get_by_license( $license->id ), $profile, $today, $grace_days );
+	}
+
+	/**
+	 * The pure form of summarize(), over lines already in hand (also used by the contract fixtures, so
+	 * they are produced by exactly the code that produces real tokens).
+	 *
+	 * @param Entitlement[] $lines      Lines of one licence.
+	 * @param Profile       $profile    Its profile.
+	 * @param string        $today      The site-time-zone date to evaluate (Y-m-d).
+	 * @param int           $grace_days Grace applied to limit lines.
+	 * @return array{modules: array<string, array{until: string|null}>, limits: array<string, int>}
+	 */
+	public static function summarize_lines( array $lines, Profile $profile, string $today, int $grace_days ): array {
 		$modules = array();
 		$limits  = array_fill_keys( $profile->limit_codes, 0 );
 		$cutoff  = ( new \DateTimeImmutable( $today, new \DateTimeZone( 'UTC' ) ) )
 			->modify( '-' . max( 0, $grace_days ) . ' days' )
 			->format( 'Y-m-d' );
 
-		foreach ( $this->repo->get_by_license( $license->id ) as $line ) {
+		foreach ( $lines as $line ) {
 			if ( ! $profile->allows( $line->kind, $line->code ) ) {
 				continue; // A code the profile no longer lists grants nothing.
 			}

@@ -233,6 +233,19 @@ final class Plugin {
 			)
 		);
 		$this->container->bind(
+			Licensing\OfflineCodeService::class,
+			fn( $c ) => new Licensing\OfflineCodeService(
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Repositories\MachineRepository::class ),
+				$c->make( Repositories\ActivationLogRepository::class ),
+				$c->make( Licensing\TokenV2Service::class )
+			)
+		);
+		$this->container->bind(
+			Licensing\ContractFixtures::class,
+			fn( $c ) => new Licensing\ContractFixtures( $c->make( Licensing\ProfileRegistry::class ) )
+		);
+		$this->container->bind(
 			Services\RevocationService::class,
 			fn( $c ) => new Services\RevocationService(
 				$c->make( Repositories\LicenseRepository::class ),
@@ -349,6 +362,10 @@ final class Plugin {
 	private function boot(): void {
 		// Global PHP API functions (Section 11) — load before REST routes.
 		require_once WPLM_PLUGIN_DIR . 'src/functions.php';
+
+		if ( defined( 'WP_CLI' ) && WP_CLI ) {
+			\WP_CLI::add_command( 'wplm', Cli\LicensingCommand::class );
+		}
 
 		// Safety net: run the installer whenever the stored DB version is behind.
 		// Deferred to admin_init so headers are already sent — prevents the
