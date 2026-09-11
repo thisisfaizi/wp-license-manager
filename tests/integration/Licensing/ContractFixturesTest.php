@@ -123,7 +123,7 @@ class ContractFixturesTest extends TestCase {
 			$this->read_payload( $m, 'summed_limits' )['limits']
 		);
 		$this->assertArrayHasKey( 'payroll', $this->read_payload( $m, 'unknown_module_code' )['modules'] );
-		$this->assertSame( 'karobar', $this->read_payload( $m, 'wrong_product' )['pid'] );
+		$this->assertSame( 'other-product', $this->read_payload( $m, 'wrong_product' )['pid'] );
 
 		$this->assertSame( $now + 20 * DAY_IN_SECONDS, $this->read_payload( $m, 'fleet_notice_valid' )['until'] );
 		$too_long = $this->read_payload( $m, 'fleet_notice_too_long' );

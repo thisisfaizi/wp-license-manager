@@ -297,7 +297,7 @@ class SelfServiceRenewal {
 
 		/**
 		 * Fires after a paid renewal order is applied. Same signature as the cron path so all
-		 * listeners (mail, Karobar credits, LiteLLM) work without change.
+		 * listeners (mail, webhooks, add-ons) work without change.
 		 *
 		 * @param Subscription            $sub     The renewed subscription.
 		 * @param \WPLM\Models\Renewal    $renewal The renewal record.
