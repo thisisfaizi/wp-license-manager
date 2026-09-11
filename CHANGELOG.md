@@ -66,6 +66,12 @@ Entitlement licences for Super Ledger: per-module and per-limit lines with their
   - **Status:** suspend and revoke need a note; reinstate takes an optional one. Each change is logged as `status_note` with the note and the admin.
   - **Licence log:** status notes, offline codes, read-only notices, moves and activations.
   - Logic in `Admin\LicenceAdminActions`; every panel form posts to `admin-post.php?action=wplm_licence_action`.
+- **The plan editor sells modules and limits.** A plan chooses its licence type (classic, or a profile such as Super Ledger).
+  - Each licence type (package) of a profile plan gets module checkboxes and user / seat / phone quantities: the template a purchase writes onto the licence.
+  - Every template is checked before the plan or its packages change, so a bad one leaves the plan as it was.
+  - Saving warns when no licence type grants Base: right for an add-on plan, wrong for a main one.
+  - Grace and Valid-for fields are hidden for a profile plan: its dates come from the lines and the profile's grace.
+  - Logic in `Admin\PlanAdminActions`; save results and warnings are shown through `Admin\Flash`.
 - The Add Licence form chooses the licence type (classic, or a profile such as Super Ledger). An entitlement licence opens on its lines after it is created. Its screen has no expiry, grace or valid-for fields.
 - Bulk Suspend and Revoke leave entitlement licences unchanged and say so: those are locked from their own screen, with a note. Their list rows link there instead of offering Revoke or Delete.
 - `EntitlementService::extend_line()`, `renewed_paid_through()` (the renewal rule, now shared with renewals) and `module_state()`.

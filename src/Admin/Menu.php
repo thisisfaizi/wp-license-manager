@@ -683,21 +683,6 @@ class Menu {
 	}
 
 	/**
-	 * Parse a price string into a float, using WooCommerce's formatter when
-	 * available (handles locale decimal/thousand separators) and falling back
-	 * to a plain float cast otherwise.
-	 *
-	 * @param mixed $value Raw price input.
-	 * @return float
-	 */
-	private function parse_decimal( $value ): float {
-		if ( function_exists( 'wc_format_decimal' ) ) {
-			return (float) wc_format_decimal( $value );
-		}
-		return (float) preg_replace( '/[^0-9.\-]/', '', (string) $value );
-	}
-
-	/**
 	 * Render the Plans list / editor page.
 	 *
 	 * @return void
@@ -705,7 +690,8 @@ class Menu {
 	public function page_plans(): void {
 		( new Screens\PlanListTable(
 			$this->container->make( \WPLM\Services\PlanService::class ),
-			$this->container->make( \WPLM\Repositories\GeneratorRepository::class )
+			$this->container->make( \WPLM\Repositories\GeneratorRepository::class ),
+			$this->container->make( \WPLM\Licensing\ProfileRegistry::class )
 		) )->render_page();
 	}
 
@@ -716,75 +702,12 @@ class Menu {
 			wp_die( esc_html__( 'You do not have permission to do this.', 'wp-license-manager' ) );
 		}
 
-		// phpcs:disable WordPress.Security.NonceVerification.Missing -- nonce verified above.
-		$plan_id = absint( $_POST['plan_id'] ?? 0 );
-		$name    = sanitize_text_field( wp_unslash( $_POST['plan_name'] ?? '' ) );
-		$desc    = sanitize_textarea_field( wp_unslash( $_POST['plan_description'] ?? '' ) );
-		$status  = empty( $_POST['plan_status'] ) ? 0 : 1;
-		// Each package field is sanitized individually in the loop below.
-		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
-		$raw_pkgs = isset( $_POST['packages'] ) && is_array( $_POST['packages'] ) ? wp_unslash( $_POST['packages'] ) : array();
-		// phpcs:enable WordPress.Security.NonceVerification.Missing
+		$post   = wp_unslash( $_POST ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- PlanAdminActions sanitises each field.
+		$result = $this->container->make( PlanAdminActions::class )->save_plan( (array) $post );
+		Flash::set( get_current_user_id(), $result );
 
-		if ( '' === $name ) {
-			wp_safe_redirect( admin_url( 'admin.php?page=wplm-plans&action=add' ) );
-			exit;
-		}
-
-		$service = $this->container->make( \WPLM\Services\PlanService::class );
-
-		if ( $plan_id > 0 ) {
-			$service->update_plan(
-				$plan_id,
-				array(
-					'name'        => $name,
-					'description' => $desc,
-					'status'      => $status,
-				)
-			);
-		} else {
-			$plan_id = $service->create_plan(
-				array(
-					'name'        => $name,
-					'description' => $desc,
-					'status'      => $status,
-				)
-			);
-		}
-
-		// Sanitize package rows before handing to the service.
-		$packages = array();
-		foreach ( (array) $raw_pkgs as $row ) {
-			if ( ! is_array( $row ) ) {
-				continue;
-			}
-			$pkg_name = sanitize_text_field( $row['name'] ?? '' );
-			if ( '' === trim( $pkg_name ) ) {
-				continue; // Skip empty rows.
-			}
-			$packages[] = array(
-				'id'               => absint( $row['id'] ?? 0 ),
-				'name'             => $pkg_name,
-				'billing_type'     => sanitize_key( $row['billing_type'] ?? 'recurring' ),
-				'billing_period'   => sanitize_key( $row['billing_period'] ?? 'month' ),
-				'billing_interval' => absint( $row['billing_interval'] ?? 1 ),
-				'price'            => $this->parse_decimal( $row['price'] ?? '0' ),
-				'signup_fee'       => $this->parse_decimal( $row['signup_fee'] ?? '0' ),
-				'trial_days'       => absint( $row['trial_days'] ?? 0 ),
-				'length_cycles'    => absint( $row['length_cycles'] ?? 0 ),
-				'generator_id'     => absint( $row['generator_id'] ?? 0 ),
-				'max_activations'  => '' !== ( $row['max_activations'] ?? '' ) ? absint( $row['max_activations'] ) : '',
-				'grace_days'       => '' !== ( $row['grace_days'] ?? '' ) ? absint( $row['grace_days'] ) : '',
-				'valid_for_days'   => '' !== ( $row['valid_for_days'] ?? '' ) ? absint( $row['valid_for_days'] ) : '',
-				'overage_strategy' => sanitize_key( $row['overage_strategy'] ?? 'deny' ),
-				'benefits'         => sanitize_textarea_field( $row['benefits'] ?? '' ),
-				'status'           => empty( $row['status'] ) ? 0 : 1,
-			);
-		}
-
-		$service->sync_packages( $plan_id, $packages );
-
-		wp_safe_redirect( admin_url( 'admin.php?page=wplm-plans&action=edit&id=' . $plan_id . '&saved=1' ) );
+		$plan_id = (int) $result['plan_id'];
+		wp_safe_redirect( admin_url( $plan_id > 0 ? 'admin.php?page=wplm-plans&action=edit&id=' . $plan_id : 'admin.php?page=wplm-plans&action=add' ) );
 		exit;
 	}
 

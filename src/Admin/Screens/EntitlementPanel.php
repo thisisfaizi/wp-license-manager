@@ -9,6 +9,7 @@ namespace WPLM\Admin\Screens;
 
 defined( 'ABSPATH' ) || exit;
 
+use WPLM\Admin\Flash;
 use WPLM\Admin\LicenceAdminActions;
 use WPLM\Integrations\Qr\QrGenerator;
 use WPLM\Licensing\CheckInService;
@@ -32,9 +33,6 @@ class EntitlementPanel {
 
 	/** admin-post action every panel form uses. */
 	public const ACTION = 'wplm_licence_action';
-
-	/** How long a result (and an offline code) waits to be shown, in seconds. */
-	private const FLASH_TTL = 300;
 
 	/** Log events worth showing the owner, with their labels resolved at render time. */
 	private const LOG_EVENTS = array( 'status_note', 'offline_code', 'lapse_notice', 'move', 'move_reset', 'revoke', 'activate', 'deactivate' );
@@ -66,17 +64,14 @@ class EntitlementPanel {
 	// Results carried across the redirect
 	// -------------------------------------------------------------------------
 
-	/** Keep an action's result for the admin's next page view. */
+	/** Keep an action's result for the admin's next page view ({@see Flash}). */
 	public static function flash( int $user_id, array $result ): void {
-		set_transient( 'wplm_licence_flash_' . $user_id, $result, self::FLASH_TTL );
+		Flash::set( $user_id, $result );
 	}
 
-	/** Take (and forget) the admin's pending result, or null. */
+	/** Take (and forget) the admin's pending result, or null ({@see Flash}). */
 	public static function take_flash( int $user_id ): ?array {
-		$key    = 'wplm_licence_flash_' . $user_id;
-		$result = get_transient( $key );
-		delete_transient( $key );
-		return is_array( $result ) ? $result : null;
+		return Flash::take( $user_id );
 	}
 
 	// -------------------------------------------------------------------------

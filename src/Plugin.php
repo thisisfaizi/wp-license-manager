@@ -258,6 +258,14 @@ final class Plugin {
 			)
 		);
 		$this->container->bind(
+			Admin\PlanAdminActions::class,
+			fn( $c ) => new Admin\PlanAdminActions(
+				$c->make( Services\PlanService::class ),
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Services\EntitlementService::class )
+			)
+		);
+		$this->container->bind(
 			Admin\Screens\EntitlementPanel::class,
 			fn( $c ) => new Admin\Screens\EntitlementPanel(
 				$c->make( Services\EntitlementService::class ),

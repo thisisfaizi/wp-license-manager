@@ -9,6 +9,10 @@ namespace WPLM\Admin\Screens;
 
 defined( 'ABSPATH' ) || exit;
 
+use WPLM\Admin\Flash;
+use WPLM\Licensing\Profile;
+use WPLM\Licensing\ProfileRegistry;
+use WPLM\Models\Entitlement;
 use WPLM\Repositories\GeneratorRepository;
 use WPLM\Services\PlanService;
 
@@ -29,13 +33,18 @@ class PlanListTable extends \WP_List_Table {
 	/** @var GeneratorRepository */
 	private GeneratorRepository $generator_repo;
 
+	/** @var ProfileRegistry */
+	private ProfileRegistry $profiles;
+
 	/**
-	 * @param PlanService         $service        Plan business logic.
-	 * @param GeneratorRepository $generator_repo Generator data-access (for package generator select).
+	 * @param PlanService          $service        Plan business logic.
+	 * @param GeneratorRepository  $generator_repo Generator data-access (for package generator select).
+	 * @param ProfileRegistry|null $profiles       Licence profiles a plan may sell.
 	 */
-	public function __construct( PlanService $service, GeneratorRepository $generator_repo ) {
+	public function __construct( PlanService $service, GeneratorRepository $generator_repo, ?ProfileRegistry $profiles = null ) {
 		$this->service        = $service;
 		$this->generator_repo = $generator_repo;
+		$this->profiles       = $profiles ?? new ProfileRegistry();
 		parent::__construct(
 			array(
 				'singular' => 'plan',
@@ -178,10 +187,12 @@ class PlanListTable extends \WP_List_Table {
 		$status     = $plan ? (int) $plan->status : 1;
 		$packages   = $plan ? $plan->packages : array();
 		$generators = $this->generator_repo->get_all();
+		$profile    = $plan ? $this->profiles->get( $plan->profile ) : null;
 		?>
 		<div class="wrap">
 			<h1><?php echo esc_html( $id > 0 ? __( 'Edit Plan', 'wp-license-manager' ) : __( 'Add Plan', 'wp-license-manager' ) ); ?></h1>
-			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+			<?php Flash::render( Flash::take( get_current_user_id() ) ); ?>
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" id="wplm-plan-form" data-profile="<?php echo esc_attr( null !== $profile ? $profile->code : '' ); ?>">
 				<input type="hidden" name="action" value="wplm_save_plan">
 				<input type="hidden" name="plan_id" value="<?php echo esc_attr( (string) $id ); ?>">
 				<?php wp_nonce_field( 'wplm_save_plan' ); ?>
@@ -199,6 +210,18 @@ class PlanListTable extends \WP_List_Table {
 						<th scope="row"><?php esc_html_e( 'Status', 'wp-license-manager' ); ?></th>
 						<td><label><input type="checkbox" name="plan_status" value="1" <?php checked( 1, $status ); ?>> <?php esc_html_e( 'Active', 'wp-license-manager' ); ?></label></td>
 					</tr>
+					<tr>
+						<th scope="row"><label for="wplm_plan_profile"><?php esc_html_e( 'Licence type', 'wp-license-manager' ); ?></label></th>
+						<td>
+							<select name="plan_profile" id="wplm_plan_profile">
+								<option value=""><?php esc_html_e( 'Classic (licence with an expiry date)', 'wp-license-manager' ); ?></option>
+								<?php foreach ( $this->profiles->all() as $code => $p ) : ?>
+									<option value="<?php echo esc_attr( $code ); ?>" <?php selected( null !== $profile ? $profile->code : '', $code ); ?>><?php echo esc_html( sprintf( /* translators: %s: product name */ __( '%s (modules and limits)', 'wp-license-manager' ), $p->label ) ); ?></option>
+								<?php endforeach; ?>
+							</select>
+							<p class="description"><?php esc_html_e( 'A plan that sells modules and limits gives each licence type the modules it grants and the users, seats and phones it adds. A purchase writes them onto the customer\'s licence; a renewal extends them. Changing this affects future purchases only.', 'wp-license-manager' ); ?></p>
+						</td>
+					</tr>
 				</table>
 
 				<h2><?php esc_html_e( 'License Types', 'wp-license-manager' ); ?></h2>
@@ -207,12 +230,12 @@ class PlanListTable extends \WP_List_Table {
 				<div id="wplm-packages">
 					<?php
 					if ( empty( $packages ) ) {
-						$this->render_package_row( null, '__INDEX__', $generators, false );
-						$this->render_package_row( $this->blank_package(), 0, $generators, true );
+						$this->render_package_row( null, '__INDEX__', $generators, false, $profile );
+						$this->render_package_row( $this->blank_package(), 0, $generators, true, $profile );
 					} else {
-						$this->render_package_row( null, '__INDEX__', $generators, false );
+						$this->render_package_row( null, '__INDEX__', $generators, false, $profile );
 						foreach ( $packages as $i => $pkg ) {
-							$this->render_package_row( $pkg, $i, $generators, true );
+							$this->render_package_row( $pkg, $i, $generators, true, $profile );
 						}
 					}
 					?>
@@ -244,6 +267,19 @@ class PlanListTable extends \WP_List_Table {
 					if ( row ) { row.parentNode.removeChild(row); }
 				}
 			});
+			// Show the template fields of the chosen licence type; disabled fields are not submitted.
+			var select = document.getElementById('wplm_plan_profile');
+			function applyProfile(){
+				var code = select.value;
+				wrap.querySelectorAll('[data-wplm-profile]').forEach(function(el){
+					var on = el.getAttribute('data-wplm-profile') === code;
+					el.hidden = !on;
+					el.querySelectorAll('input').forEach(function(i){ i.disabled = !on; });
+				});
+				wrap.querySelectorAll('.wplm-classic-only').forEach(function(el){ el.hidden = '' !== code; });
+			}
+			select.addEventListener('change', applyProfile);
+			document.getElementById('wplm-add-package').addEventListener('click', applyProfile);
 		})();
 		</script>
 		<?php
@@ -261,11 +297,13 @@ class PlanListTable extends \WP_List_Table {
 	 * @param int|string                $index      Row index (or __INDEX__ placeholder).
 	 * @param array                     $generators Generator models for the select.
 	 * @param bool                      $visible    Whether this is a real row or the hidden template.
+	 * @param Profile|null              $plan_profile The licence profile the plan sells, if any.
 	 * @return void
 	 */
-	private function render_package_row( $pkg, $index, array $generators, bool $visible ): void {
-		$p = $pkg ?: \WPLM\Models\Package::from_row( array() );
-		$f = 'packages[' . $index . ']';
+	private function render_package_row( $pkg, $index, array $generators, bool $visible, ?Profile $plan_profile = null ): void {
+		$p       = $pkg ?: \WPLM\Models\Package::from_row( array() );
+		$f       = 'packages[' . $index . ']';
+		$classic = null === $plan_profile ? '' : ' hidden';
 
 		if ( ! $visible ) {
 			echo '<script type="text/template" id="wplm-package-tpl">';
@@ -330,15 +368,44 @@ class PlanListTable extends \WP_List_Table {
 					<label><?php esc_html_e( 'Max seats', 'wp-license-manager' ); ?><br>
 					<input type="number" min="1" class="widefat" name="<?php echo esc_attr( $f ); ?>[max_activations]" value="<?php echo esc_attr( null !== $p->max_activations ? (string) $p->max_activations : '' ); ?>"></label>
 				</p>
-				<p style="flex:1 1 120px;">
+				<p style="flex:1 1 120px;" class="wplm-classic-only"<?php echo esc_attr( $classic ); ?>>
 					<label title="<?php esc_attr_e( 'How long an unpaid licence keeps working after its paid term ends. Leave blank for the default in Settings.', 'wp-license-manager' ); ?>"><?php esc_html_e( 'Grace (days)', 'wp-license-manager' ); ?><br>
 					<input type="number" min="0" class="widefat" name="<?php echo esc_attr( $f ); ?>[grace_days]" placeholder="<?php echo esc_attr( (string) get_option( 'wplm_default_grace_days', \WPLM\Models\Package::DEFAULT_GRACE_DAYS ) ); ?>" value="<?php echo esc_attr( null !== $p->grace_days ? (string) $p->grace_days : '' ); ?>"></label>
 				</p>
-				<p style="flex:1 1 120px;">
+				<p style="flex:1 1 120px;" class="wplm-classic-only"<?php echo esc_attr( $classic ); ?>>
 					<label title="<?php esc_attr_e( 'One-time packages only: how many days the licence is valid.', 'wp-license-manager' ); ?>"><?php esc_html_e( 'Valid for (days)', 'wp-license-manager' ); ?><br>
 					<input type="number" min="1" class="widefat" name="<?php echo esc_attr( $f ); ?>[valid_for_days]" value="<?php echo esc_attr( null !== $p->valid_for_days ? (string) $p->valid_for_days : '' ); ?>"></label>
 				</p>
 			</div>
+			<?php foreach ( $this->profiles->all() as $code => $profile ) : ?>
+				<?php
+				$active = null !== $plan_profile && $plan_profile->code === $code;
+				// The stored template belongs to the plan's current profile only.
+				$granted = array();
+				$limits  = array();
+				foreach ( $active ? $p->entitlements : array() as $line ) {
+					if ( Entitlement::KIND_MODULE === ( $line['kind'] ?? '' ) ) {
+						$granted[] = (string) $line['code'];
+					} elseif ( Entitlement::KIND_LIMIT === ( $line['kind'] ?? '' ) ) {
+						$limits[ (string) $line['code'] ] = ( $limits[ (string) $line['code'] ] ?? 0 ) + (int) $line['qty'];
+					}
+				}
+				?>
+				<fieldset data-wplm-profile="<?php echo esc_attr( $code ); ?>" style="margin-top:8px;padding:8px 12px;border:1px dashed #c3c4c7;"<?php echo $active ? '' : ' hidden'; ?>>
+					<legend><strong><?php echo esc_html( sprintf( /* translators: %s: product name */ __( 'What this licence type grants in %s', 'wp-license-manager' ), $profile->label ) ); ?></strong></legend>
+					<p style="display:flex;gap:12px;flex-wrap:wrap;margin:4px 0;">
+						<?php foreach ( $profile->module_codes as $module ) : ?>
+							<label><input type="checkbox" name="<?php echo esc_attr( $f ); ?>[entitlements][modules][]" value="<?php echo esc_attr( $module ); ?>" <?php checked( in_array( $module, $granted, true ) ); ?><?php disabled( ! $active ); ?>> <?php echo esc_html( $profile->code_label( $module ) ); ?></label>
+						<?php endforeach; ?>
+					</p>
+					<p style="display:flex;gap:12px;flex-wrap:wrap;margin:4px 0;">
+						<?php foreach ( $profile->limit_codes as $limit ) : ?>
+							<label><?php echo esc_html( $profile->code_label( $limit ) ); ?> <input type="number" min="0" step="1" class="small-text" name="<?php echo esc_attr( $f ); ?>[entitlements][limits][<?php echo esc_attr( $limit ); ?>]" value="<?php echo esc_attr( isset( $limits[ $limit ] ) ? (string) $limits[ $limit ] : '' ); ?>"<?php disabled( ! $active ); ?>></label>
+						<?php endforeach; ?>
+					</p>
+					<p class="description" style="margin:4px 0;"><?php esc_html_e( 'A recurring licence type grants these until the end of each paid period; lifetime and one-time types grant them for life. An add-on (for example one extra phone) grants only what it adds.', 'wp-license-manager' ); ?></p>
+				</fieldset>
+			<?php endforeach; ?>
 			<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start;margin-top:8px;">
 				<p style="flex:2 1 240px;">
 					<label><?php esc_html_e( 'Benefits (one per line)', 'wp-license-manager' ); ?><br>
