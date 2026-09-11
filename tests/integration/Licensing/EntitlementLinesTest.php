@@ -128,6 +128,28 @@ class EntitlementLinesTest extends TestCase {
 	}
 
 	/**
+	 * The program's state table (Active / Due soon / Grace / Read-only), shown to the owner.
+	 *
+	 * @dataProvider module_states
+	 */
+	public function test_module_state_follows_the_program_table( ?string $until, string $today, string $expected ): void {
+		$this->assertSame( $expected, EntitlementService::module_state( $until, $today, 7 ) );
+	}
+
+	public function module_states(): array {
+		return array(
+			'lifetime'                => array( null, '2026-09-11', EntitlementService::STATE_LIFETIME ),
+			'four days out'           => array( '2026-09-15', '2026-09-11', EntitlementService::STATE_ACTIVE ),
+			'exactly three days out'  => array( '2026-09-14', '2026-09-11', EntitlementService::STATE_ACTIVE ),
+			'two days out'            => array( '2026-09-13', '2026-09-11', EntitlementService::STATE_DUE_SOON ),
+			'the paid-through day'    => array( '2026-09-11', '2026-09-11', EntitlementService::STATE_DUE_SOON ),
+			'the day after'           => array( '2026-09-10', '2026-09-11', EntitlementService::STATE_GRACE ),
+			'the last grace day'      => array( '2026-09-04', '2026-09-11', EntitlementService::STATE_GRACE ),
+			'the first read-only day' => array( '2026-09-03', '2026-09-11', EntitlementService::STATE_READ_ONLY ),
+		);
+	}
+
+	/**
 	 * `paid_through` is the inclusive last paid day **in the site's time zone**: a Karachi customer
 	 * who pays at 02:00 PKT (21:00 UTC the day before) must not get a paid-through date a day early.
 	 */

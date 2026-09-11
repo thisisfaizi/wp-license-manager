@@ -3,10 +3,14 @@
  * My Account — Licenses table template.
  *
  * @var \WPLM\Models\License[] $licenses
+ * @var array<int, array<string, array{label: string, until: string|null, state: string}>> $modules
+ *      Per licence id: an entitlement licence's modules (empty for a classic licence).
  * @package WPLM
  */
 
 defined( 'ABSPATH' ) || exit;
+
+$modules = isset( $modules ) && is_array( $modules ) ? $modules : array();
 ?>
 
 <h2><?php esc_html_e( 'My Licenses', 'wp-license-manager' ); ?></h2>
@@ -48,7 +52,16 @@ defined( 'ABSPATH' ) || exit;
 			</td>
 			<td>
 				<?php
-				if ( $license->expires_at ) {
+				if ( null !== $license->profile ) {
+					// An entitlement licence has no single expiry: each module has its own paid-through date.
+					$parts = array();
+					foreach ( $modules[ $license->id ] ?? array() as $module ) {
+						$parts[] = $module['label'] . ': ' . ( null === $module['until']
+							? __( 'lifetime', 'wp-license-manager' )
+							: date_i18n( get_option( 'date_format' ), strtotime( $module['until'] . ' 12:00:00' ) ) );
+					}
+					echo esc_html( $parts ? implode( ' · ', $parts ) : __( 'No modules yet', 'wp-license-manager' ) );
+				} elseif ( $license->expires_at ) {
 					echo esc_html( date_i18n( get_option( 'date_format' ), strtotime( $license->expires_at ) ) );
 				} else {
 					esc_html_e( 'Never', 'wp-license-manager' );
@@ -56,8 +69,8 @@ defined( 'ABSPATH' ) || exit;
 				?>
 			</td>
 			<td>
-				<?php if ( $license->is_active() ) : ?>
-					<a href="<?php echo esc_url( wc_get_account_endpoint_url( 'wplm-licenses' ) . '?view=' . $license->id ); ?>" class="button">
+				<?php if ( in_array( $license->status, array( 1, 2 ), true ) ) : ?>
+					<a href="<?php echo esc_url( add_query_arg( 'view', $license->id, wc_get_account_endpoint_url( 'wplm-licenses' ) ) ); ?>" class="button">
 						<?php esc_html_e( 'View Devices', 'wp-license-manager' ); ?>
 					</a>
 				<?php endif; ?>

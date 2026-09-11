@@ -140,6 +140,24 @@ abstract class TestCase extends \WP_UnitTestCase {
 		return (array) $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$wpdb->prefix}wplm_subscriptions WHERE id = %d", $id ), ARRAY_A );
 	}
 
+	/**
+	 * A fresh registry in which the test profile has no base module (every module stands alone).
+	 * The container's registry is untouched; the filter is removed with the test's hooks.
+	 */
+	protected function registry_without_base_module(): \WPLM\Licensing\ProfileRegistry {
+		add_filter(
+			'wplm_license_profiles',
+			static function ( array $profiles ): array {
+				$p                       = $profiles['acme-office'];
+				$labels                  = array_combine( array_merge( $p->module_codes, $p->limit_codes ), array_map( array( $p, 'code_label' ), array_merge( $p->module_codes, $p->limit_codes ) ) );
+				$profiles['acme-office'] = new \WPLM\Licensing\Profile( $p->code, $p->label, $p->module_codes, $p->limit_codes, $labels );
+				return $profiles;
+			},
+			20
+		);
+		return new \WPLM\Licensing\ProfileRegistry();
+	}
+
 	/** Overwrite columns on a WPLM table row (time travel). */
 	protected function set_row( string $table, int $id, array $data ): void {
 		global $wpdb;

@@ -9,16 +9,18 @@ namespace WPLM\Cron;
 
 defined( 'ABSPATH' ) || exit;
 
+use WPLM\Licensing\LapseNoticeService;
 use WPLM\Services\Subscriptions\RenewalProcessor;
 use WPLM\Services\HeartbeatService;
 use WPLM\Services\WebhookService;
 
 /**
- * Registers and dispatches three recurring WP-Cron events:
+ * Registers and dispatches four recurring WP-Cron events:
  *
  * 1. wplm_process_renewals  — hourly    — charge due subscription renewals.
  * 2. wplm_cull_zombies      — 5-minute  — deactivate dead heartbeat machines.
  * 3. wplm_retry_webhooks    — hourly    — retry any queued failed webhook deliveries.
+ * 4. wplm_lapse_notices     — hourly    — email "will become read-only" notices (each sent once).
  *
  * Call register() once during plugin boot (after 'init' at the latest).
  */
@@ -33,19 +35,25 @@ class Scheduler {
 	/** @var WebhookService */
 	private WebhookService $webhook_service;
 
+	/** @var LapseNoticeService|null */
+	private ?LapseNoticeService $lapse_notices;
+
 	/**
-	 * @param RenewalProcessor $renewal_processor Processes due subscription renewals.
-	 * @param HeartbeatService $heartbeat_service  Culls zombie (stale) machine records.
-	 * @param WebhookService   $webhook_service    Retries failed outbound webhooks.
+	 * @param RenewalProcessor        $renewal_processor Processes due subscription renewals.
+	 * @param HeartbeatService        $heartbeat_service  Culls zombie (stale) machine records.
+	 * @param WebhookService          $webhook_service    Retries failed outbound webhooks.
+	 * @param LapseNoticeService|null $lapse_notices      Sends "will become read-only" notices.
 	 */
 	public function __construct(
 		RenewalProcessor $renewal_processor,
 		HeartbeatService $heartbeat_service,
-		WebhookService $webhook_service
+		WebhookService $webhook_service,
+		?LapseNoticeService $lapse_notices = null
 	) {
 		$this->renewal_processor = $renewal_processor;
 		$this->heartbeat_service = $heartbeat_service;
 		$this->webhook_service   = $webhook_service;
+		$this->lapse_notices     = $lapse_notices;
 	}
 
 	/**
@@ -69,6 +77,7 @@ class Scheduler {
 		add_action( 'wplm_process_renewals', array( $this, 'run_renewals' ) );
 		add_action( 'wplm_cull_zombies', array( $this, 'run_cull_zombies' ) );
 		add_action( 'wplm_retry_webhooks', array( $this, 'run_retry_webhooks' ) );
+		add_action( 'wplm_lapse_notices', array( $this, 'run_lapse_notices' ) );
 
 		// Defer wp_schedule_event() to 'init' so the textdomain is loaded before
 		// wp_get_schedules() fires (which triggers add_cron_intervals → __()).
@@ -91,6 +100,10 @@ class Scheduler {
 
 		if ( ! wp_next_scheduled( 'wplm_retry_webhooks' ) ) {
 			wp_schedule_event( time(), 'hourly', 'wplm_retry_webhooks' );
+		}
+
+		if ( ! wp_next_scheduled( 'wplm_lapse_notices' ) ) {
+			wp_schedule_event( time(), 'hourly', 'wplm_lapse_notices' );
 		}
 	}
 
@@ -149,5 +162,18 @@ class Scheduler {
 	 */
 	public function run_retry_webhooks(): void {
 		$this->webhook_service->retry_failed();
+	}
+
+	/**
+	 * Email the "will become read-only" notices that are due.
+	 *
+	 * Hooked on 'wplm_lapse_notices' (hourly; each notice is sent once).
+	 *
+	 * @return void
+	 */
+	public function run_lapse_notices(): void {
+		if ( null !== $this->lapse_notices ) {
+			$this->lapse_notices->run();
+		}
 	}
 }

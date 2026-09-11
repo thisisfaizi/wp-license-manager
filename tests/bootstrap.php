@@ -41,7 +41,20 @@ tests_add_filter(
 			'acme-office',
 			'Acme Office',
 			array( 'base', 'distribution', 'pos', 'factory', 'fbr', 'assets', 'subcontract' ),
-			array( 'users', 'seats', 'phones' )
+			array( 'users', 'seats', 'phones' ),
+			array(
+				'base'         => 'Base (accounting)',
+				'distribution' => 'Distribution',
+				'pos'          => 'Point of Sale',
+				'factory'      => 'Factory',
+				'fbr'          => 'FBR',
+				'assets'       => 'Fixed Assets',
+				'subcontract'  => 'Subcontracting',
+				'users'        => 'Users',
+				'seats'        => 'Seats',
+				'phones'       => 'Phones',
+			),
+			'base'
 		);
 		return $profiles;
 	}

@@ -78,6 +78,33 @@ class EntitlementRepository {
 	}
 
 	/**
+	 * Licences of one profile that have a module line paid through a date in a range, excluding
+	 * licences in the given statuses. Used to find modules about to go read-only.
+	 *
+	 * @param string $profile       Licence profile code.
+	 * @param string $from          First paid-through date (Y-m-d, inclusive).
+	 * @param string $to            Last paid-through date (Y-m-d, inclusive).
+	 * @param int[]  $skip_statuses Licence statuses to leave out.
+	 * @return int[] Licence ids, ascending.
+	 */
+	public function license_ids_with_modules_through( string $profile, string $from, string $to, array $skip_statuses ): array {
+		global $wpdb;
+		$table    = $this->table();
+		$licenses = $wpdb->prefix . 'wplm_licenses';
+		$skip     = implode( ',', array_map( 'intval', $skip_statuses ?: array( -1 ) ) );
+		$ids      = $wpdb->get_col(
+			$wpdb->prepare(
+				// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table names are constants and $skip is a list of integers.
+				"SELECT DISTINCT e.license_id FROM `{$table}` e INNER JOIN `{$licenses}` l ON l.id = e.license_id WHERE e.kind = 'module' AND e.paid_through BETWEEN %s AND %s AND l.profile = %s AND l.status NOT IN ({$skip}) ORDER BY e.license_id ASC",
+				$from,
+				$to,
+				$profile
+			)
+		);
+		return array_map( 'intval', is_array( $ids ) ? $ids : array() );
+	}
+
+	/**
 	 * Insert a line.
 	 *
 	 * @param array $data Column => value pairs.

@@ -80,7 +80,7 @@ class LicensingCommand {
 	 * : The machine row id.
 	 *
 	 * [--days=<days>]
-	 * : Days until the office must check in again (1–365).
+	 * : Days until the machine must check in again (1–365).
 	 * ---
 	 * default: 30
 	 * ---
@@ -97,7 +97,7 @@ class LicensingCommand {
 		if ( is_wp_error( $code ) ) {
 			\WP_CLI::error( $code->get_error_message() );
 		}
-		\WP_CLI::log( sprintf( 'Valid until the office must check in: %s UTC.', gmdate( 'Y-m-d H:i:s', $code['check_in_by'] ) ) );
+		\WP_CLI::log( sprintf( 'Valid until the machine must check in: %s UTC.', gmdate( 'Y-m-d H:i:s', $code['check_in_by'] ) ) );
 		\WP_CLI::line( $code['token'] );
 	}
 }

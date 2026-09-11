@@ -168,6 +168,23 @@ class CheckInTest extends TestCase {
 		$this->assertSame( 'suspended', $this->make( Signer::class )->verify( $response->get_data()['data']['token_v2'] )['status'] );
 	}
 
+	/**
+	 * The add-on that registers a profile was deactivated: the machine still checks in on the classic
+	 * path (no error the client would read as an outage), but receives no v2 token, so it lapses when
+	 * its check-in window runs out. UnregisteredProfileNotice tells the owner.
+	 */
+	public function test_a_licence_whose_profile_is_no_longer_registered_gets_no_new_token(): void {
+		$license = $this->profile_licence();
+		$fp      = $this->client_fp( 'office' );
+		$this->post( 'activate', array( 'license_key' => $license->license_key, 'fingerprint' => $fp ) );
+		$this->set_row( 'licenses', $license->id, array( 'profile' => 'gone-product' ) );
+
+		$response = $this->post( 'heartbeat', array( 'license_key' => $license->license_key, 'fingerprint' => $fp ) );
+
+		$this->assertSame( 200, $response->get_status() );
+		$this->assertArrayNotHasKey( 'token_v2', (array) $response->get_data()['data'] );
+	}
+
 	public function test_a_revoked_office_gets_no_token(): void {
 		$license = $this->profile_licence();
 		$fp      = $this->client_fp( 'office' );

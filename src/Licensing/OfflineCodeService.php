@@ -1,6 +1,6 @@
 <?php
 /**
- * Offline renewal codes — a v2 token with a longer check-in deadline, for an office with no internet.
+ * Offline renewal codes — a v2 token with a longer check-in deadline, for a machine with no internet.
  *
  * @package WPLM\Licensing
  */
@@ -56,7 +56,7 @@ class OfflineCodeService {
 	 * Issue a code for one machine.
 	 *
 	 * @param int      $machine_id Machine row id.
-	 * @param int      $days       Days until the office must check in again (1–365).
+	 * @param int      $days       Days until the machine must check in again (1–365).
 	 * @param int      $user_id    The admin issuing it (logged).
 	 * @param int|null $now        Unix time (default now).
 	 * @return array{token: string, check_in_by: int, payload: array<string, mixed>}|WP_Error

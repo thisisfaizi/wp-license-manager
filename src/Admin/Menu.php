@@ -39,6 +39,7 @@ class Menu {
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_assets' ) );
 		add_action( 'admin_init', array( $this, 'init_settings' ) );
 		add_action( 'admin_post_wplm_save_license', array( $this, 'handle_save_license' ) );
+		add_action( 'admin_post_' . Screens\EntitlementPanel::ACTION, array( $this, 'handle_licence_action' ) );
 		add_action( 'wp_ajax_wplm_search_product', array( $this, 'handle_ajax_search_product' ) );
 		add_action( 'wp_ajax_wplm_search_order', array( $this, 'handle_ajax_search_order' ) );
 		add_action( 'wp_ajax_wplm_search_user', array( $this, 'handle_ajax_search_user' ) );
@@ -287,7 +288,7 @@ class Menu {
 
 	/** Register plugin settings via the Settings API. */
 	public function init_settings(): void {
-		( new Settings\SettingsPage() )->register_settings();
+		( new Settings\SettingsPage( $this->container->make( \WPLM\Licensing\ProfileRegistry::class ) ) )->register_settings();
 	}
 
 	/** Handle the save-license admin-post action. */
@@ -297,27 +298,45 @@ class Menu {
 			wp_die( esc_html__( 'You do not have permission to do this.', 'wp-license-manager' ) );
 		}
 
-		$license_id = absint( $_POST['license_id'] ?? 0 );
-		$args       = array(
-			'key_string'       => sanitize_text_field( wp_unslash( $_POST['key_string'] ?? '' ) ),
-			'product_id'       => absint( $_POST['product_id'] ?? 0 ) ?: null,
-			'order_id'         => absint( $_POST['order_id'] ?? 0 ) ?: null,
-			'user_id'          => absint( $_POST['user_id'] ?? 0 ) ?: null,
-			'max_activations'  => absint( $_POST['max_activations'] ?? 1 ),
-			'expires_at'       => sanitize_text_field( wp_unslash( $_POST['expires_at'] ?? '' ) ) ?: null,
-			'grace_days'       => absint( $_POST['grace_days'] ?? 0 ),
-			'overage_strategy' => sanitize_text_field( wp_unslash( $_POST['overage_strategy'] ?? 'deny' ) ),
-			'is_floating'      => ! empty( $_POST['is_floating'] ),
-			'valid_for_days'   => absint( $_POST['valid_for_days'] ?? 0 ) ?: null,
-		);
+		$post   = wp_unslash( $_POST ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- LicenceAdminActions sanitises each field.
+		$result = $this->container->make( LicenceAdminActions::class )->save_licence( (array) $post );
+		Screens\EntitlementPanel::flash( get_current_user_id(), $result );
 
-		if ( $license_id ) {
-			wplm_update_license( $license_id, $args );
+		$license_id = (int) $result['license_id'];
+		if ( ! $result['ok'] ) {
+			$back = $license_id > 0 ? 'admin.php?page=wplm-licenses&action=edit&id=' . $license_id : 'admin.php?page=wplm-licenses&action=add';
+		} elseif ( null !== $this->container->make( \WPLM\Repositories\LicenseRepository::class )->find_by_id( $license_id )?->profile ) {
+			// An entitlement licence is set up on its own screen: its lines come next.
+			$back = 'admin.php?page=wplm-licenses&action=edit&id=' . $license_id . '#wplm-lines';
 		} else {
-			wplm_create_license( $args );
+			$back = 'admin.php?page=wplm-licenses';
+		}
+		wp_safe_redirect( admin_url( $back ) );
+		exit;
+	}
+
+	/** Handle every form on an entitlement licence's screen (lines, computers, status). */
+	public function handle_licence_action(): void {
+		$license_id = absint( $_POST['license_id'] ?? 0 );
+		check_admin_referer( Screens\EntitlementPanel::ACTION . '_' . $license_id, '_wplm_nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You do not have permission to do this.', 'wp-license-manager' ) );
 		}
 
-		wp_safe_redirect( admin_url( 'admin.php?page=wplm-licenses&saved=1' ) );
+		$post   = wp_unslash( $_POST ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- LicenceAdminActions sanitises each field.
+		$result = $this->container->make( LicenceAdminActions::class )->dispatch( (array) $post, get_current_user_id() );
+		Screens\EntitlementPanel::flash( get_current_user_id(), $result );
+
+		$anchors = array(
+			'line_save'    => 'wplm-lines',
+			'line_extend'  => 'wplm-lines',
+			'line_delete'  => 'wplm-lines',
+			'status'       => 'wplm-status',
+			'offline_code' => 'wplm-machines',
+			'reset_moves'  => 'wplm-machines',
+		);
+		$anchor  = $anchors[ (string) ( $post['do'] ?? '' ) ] ?? 'wplm-grants';
+		wp_safe_redirect( admin_url( 'admin.php?page=wplm-licenses&action=edit&id=' . $license_id . '#' . $anchor ) );
 		exit;
 	}
 
@@ -332,8 +351,8 @@ class Menu {
 			wp_send_json_error( array(), 403 );
 		}
 
-		$q      = sanitize_text_field( wp_unslash( $_GET['q'] ?? '' ) );
-		$types  = array( 'product', 'product_variation' );
+		$q     = sanitize_text_field( wp_unslash( $_GET['q'] ?? '' ) );
+		$types = array( 'product', 'product_variation' );
 		// Include non-WC post types as fallback.
 		if ( ! function_exists( 'wc_get_product' ) ) {
 			$types = array( 'post', 'page' );
@@ -664,21 +683,6 @@ class Menu {
 	}
 
 	/**
-	 * Parse a price string into a float, using WooCommerce's formatter when
-	 * available (handles locale decimal/thousand separators) and falling back
-	 * to a plain float cast otherwise.
-	 *
-	 * @param mixed $value Raw price input.
-	 * @return float
-	 */
-	private function parse_decimal( $value ): float {
-		if ( function_exists( 'wc_format_decimal' ) ) {
-			return (float) wc_format_decimal( $value );
-		}
-		return (float) preg_replace( '/[^0-9.\-]/', '', (string) $value );
-	}
-
-	/**
 	 * Render the Plans list / editor page.
 	 *
 	 * @return void
@@ -686,7 +690,8 @@ class Menu {
 	public function page_plans(): void {
 		( new Screens\PlanListTable(
 			$this->container->make( \WPLM\Services\PlanService::class ),
-			$this->container->make( \WPLM\Repositories\GeneratorRepository::class )
+			$this->container->make( \WPLM\Repositories\GeneratorRepository::class ),
+			$this->container->make( \WPLM\Licensing\ProfileRegistry::class )
 		) )->render_page();
 	}
 
@@ -697,75 +702,12 @@ class Menu {
 			wp_die( esc_html__( 'You do not have permission to do this.', 'wp-license-manager' ) );
 		}
 
-		// phpcs:disable WordPress.Security.NonceVerification.Missing -- nonce verified above.
-		$plan_id = absint( $_POST['plan_id'] ?? 0 );
-		$name    = sanitize_text_field( wp_unslash( $_POST['plan_name'] ?? '' ) );
-		$desc    = sanitize_textarea_field( wp_unslash( $_POST['plan_description'] ?? '' ) );
-		$status  = empty( $_POST['plan_status'] ) ? 0 : 1;
-		// Each package field is sanitized individually in the loop below.
-		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
-		$raw_pkgs = isset( $_POST['packages'] ) && is_array( $_POST['packages'] ) ? wp_unslash( $_POST['packages'] ) : array();
-		// phpcs:enable WordPress.Security.NonceVerification.Missing
+		$post   = wp_unslash( $_POST ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- PlanAdminActions sanitises each field.
+		$result = $this->container->make( PlanAdminActions::class )->save_plan( (array) $post );
+		Flash::set( get_current_user_id(), $result );
 
-		if ( '' === $name ) {
-			wp_safe_redirect( admin_url( 'admin.php?page=wplm-plans&action=add' ) );
-			exit;
-		}
-
-		$service = $this->container->make( \WPLM\Services\PlanService::class );
-
-		if ( $plan_id > 0 ) {
-			$service->update_plan(
-				$plan_id,
-				array(
-					'name'        => $name,
-					'description' => $desc,
-					'status'      => $status,
-				)
-			);
-		} else {
-			$plan_id = $service->create_plan(
-				array(
-					'name'        => $name,
-					'description' => $desc,
-					'status'      => $status,
-				)
-			);
-		}
-
-		// Sanitize package rows before handing to the service.
-		$packages = array();
-		foreach ( (array) $raw_pkgs as $row ) {
-			if ( ! is_array( $row ) ) {
-				continue;
-			}
-			$pkg_name = sanitize_text_field( $row['name'] ?? '' );
-			if ( '' === trim( $pkg_name ) ) {
-				continue; // Skip empty rows.
-			}
-			$packages[] = array(
-				'id'               => absint( $row['id'] ?? 0 ),
-				'name'             => $pkg_name,
-				'billing_type'     => sanitize_key( $row['billing_type'] ?? 'recurring' ),
-				'billing_period'   => sanitize_key( $row['billing_period'] ?? 'month' ),
-				'billing_interval' => absint( $row['billing_interval'] ?? 1 ),
-				'price'            => $this->parse_decimal( $row['price'] ?? '0' ),
-				'signup_fee'       => $this->parse_decimal( $row['signup_fee'] ?? '0' ),
-				'trial_days'       => absint( $row['trial_days'] ?? 0 ),
-				'length_cycles'    => absint( $row['length_cycles'] ?? 0 ),
-				'generator_id'     => absint( $row['generator_id'] ?? 0 ),
-				'max_activations'  => '' !== ( $row['max_activations'] ?? '' ) ? absint( $row['max_activations'] ) : '',
-				'grace_days'       => '' !== ( $row['grace_days'] ?? '' ) ? absint( $row['grace_days'] ) : '',
-				'valid_for_days'   => '' !== ( $row['valid_for_days'] ?? '' ) ? absint( $row['valid_for_days'] ) : '',
-				'overage_strategy' => sanitize_key( $row['overage_strategy'] ?? 'deny' ),
-				'benefits'         => sanitize_textarea_field( $row['benefits'] ?? '' ),
-				'status'           => empty( $row['status'] ) ? 0 : 1,
-			);
-		}
-
-		$service->sync_packages( $plan_id, $packages );
-
-		wp_safe_redirect( admin_url( 'admin.php?page=wplm-plans&action=edit&id=' . $plan_id . '&saved=1' ) );
+		$plan_id = (int) $result['plan_id'];
+		wp_safe_redirect( admin_url( $plan_id > 0 ? 'admin.php?page=wplm-plans&action=edit&id=' . $plan_id : 'admin.php?page=wplm-plans&action=add' ) );
 		exit;
 	}
 
@@ -1095,7 +1037,7 @@ class Menu {
 	 * @return void
 	 */
 	public function page_settings(): void {
-		( new Settings\SettingsPage() )->render_settings_page();
+		( new Settings\SettingsPage( $this->container->make( \WPLM\Licensing\ProfileRegistry::class ) ) )->render_settings_page();
 	}
 
 	// -------------------------------------------------------------------------
