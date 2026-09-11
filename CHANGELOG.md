@@ -72,6 +72,11 @@ Entitlement licences for Super Ledger: per-module and per-limit lines with their
   - Saving warns when no licence type grants Base: right for an add-on plan, wrong for a main one.
   - Grace and Valid-for fields are hidden for a profile plan: its dates come from the lines and the profile's grace.
   - Logic in `Admin\PlanAdminActions`; save results and warnings are shown through `Admin\Flash`.
+- **My Account → My Licenses → View Devices** now opens (the link went nowhere):
+  - the licence's active computers;
+  - for Super Ledger, each module's paid-through date and state, and the moves left;
+  - a **Move to another computer** button per computer. This is a self-service move that counts against the limit like one made from the app. A third move within 30 days is refused, naming the day it frees up.
+  - A customer sees and moves only their own licences. The list shows a Super Ledger licence's modules instead of "Expires: Never". (`Integrations\WooCommerce\MyAccountLicences`.)
 - The Add Licence form chooses the licence type (classic, or a profile such as Super Ledger). An entitlement licence opens on its lines after it is created. Its screen has no expiry, grace or valid-for fields.
 - Bulk Suspend and Revoke leave entitlement licences unchanged and say so: those are locked from their own screen, with a note. Their list rows link there instead of offering Revoke or Delete.
 - `EntitlementService::extend_line()`, `renewed_paid_through()` (the renewal rule, now shared with renewals) and `module_state()`.
@@ -88,6 +93,7 @@ Entitlement licences for Super Ledger: per-module and per-limit lines with their
 ### Fixed
 - **Saving the Settings page failed with a fatal error.** `options.php` passes `null` for the group option the form never posts, and `validate_settings()` accepted only an array.
 - **The dunning retry schedule entered in Settings was ignored.** The page saves a comma list ("2,4,9") but dunning read only a JSON array, so it always used 1, 3, 5. Both forms are read now. The field also showed "3,7,14" as the default, which was never the default.
+- **My Account → My Licenses was always empty.** Listing licences without an explicit sort built `ORDER BY  DESC`, so the query failed and customers were told they had no licences.
 - **Add New Licence always failed.** The form had no key field and ignored the chosen generator, so creation threw "key_string is required". A blank key is now generated with the chosen generator, else the default one. Errors come back to the form as a notice instead of a fatal.
 
 ### Requirements

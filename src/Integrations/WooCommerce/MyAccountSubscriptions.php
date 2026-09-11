@@ -52,16 +52,15 @@ class MyAccountSubscriptions {
 
 	/** Render the My Licenses tab. */
 	public function render_licenses(): void {
-		$user_id  = get_current_user_id();
-		$result   = wplm_get_licenses( array( 'user_id' => $user_id ) );
-		$licenses = $result['items'] ?? array();
+		$account = \WPLM\Plugin::get_instance()->container()->make( MyAccountLicences::class );
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- a read-only view; ownership is checked.
+		$view = absint( $_GET['view'] ?? 0 );
 
-		wc_get_template(
-			'myaccount/wplm-licenses.php',
-			array( 'licenses' => $licenses ),
-			'',
-			WPLM_PLUGIN_DIR . 'templates/'
-		);
+		if ( $view > 0 ) {
+			$account->render_view( get_current_user_id(), $view );
+		} else {
+			$account->render_list( get_current_user_id() );
+		}
 	}
 
 	/** Render the My Subscriptions tab. */

@@ -258,6 +258,16 @@ final class Plugin {
 			)
 		);
 		$this->container->bind(
+			Integrations\WooCommerce\MyAccountLicences::class,
+			fn( $c ) => new Integrations\WooCommerce\MyAccountLicences(
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Repositories\MachineRepository::class ),
+				$c->make( Licensing\CheckInService::class ),
+				$c->make( Services\EntitlementService::class ),
+				$c->make( Licensing\ProfileRegistry::class )
+			)
+		);
+		$this->container->bind(
 			Admin\PlanAdminActions::class,
 			fn( $c ) => new Admin\PlanAdminActions(
 				$c->make( Services\PlanService::class ),
@@ -486,6 +496,7 @@ final class Plugin {
 		( new Integrations\WooCommerce\MyAccountSubscriptions(
 			$this->container->make( Services\Subscriptions\SubscriptionService::class )
 		) )->register();
+		$this->container->make( Integrations\WooCommerce\MyAccountLicences::class )->register();
 
 		// Order admin meta box — shows issued keys + subscription link per order.
 		( new Integrations\WooCommerce\OrderMetaBox(
