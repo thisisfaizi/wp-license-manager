@@ -28,13 +28,23 @@ Entitlement licences for Super Ledger: per-module and per-limit lines with their
   - Lifetime lines and other subscriptions' lines never move.
   - `next_payment` becomes the start of the day after the new paid-through date, in the site's time zone.
   - The order note tells the owner the new date.
-- Machine columns `token_fp` and `usage_json`, for check-in (next change).
+- **Check-in for entitlement licences** (`Licensing\CheckInService`), on the existing public routes:
+  - `POST /activate` and `POST /heartbeat` also return `token_v2` (a fresh signed v2 token) and `server_time` (unix seconds).
+  - They accept `usage: {users, seats, phones}` and `app_version`, and store them on the machine (`usage_json`), with the signed `fp` (`token_fp`).
+  - A malformed fingerprint (anything but lowercase 64-hex) is refused before any machine is created.
+  - A suspended licence still checks in, and its token says `suspended`. A revoked or terminated licence gets 403 and no token.
+  - **Rate limit:** 30 check-ins per machine per rolling hour (`wplm_check_in_rate_limit`). Beyond that: HTTP 429 `wplm_rate_limited` with `retry_after`.
+  - **Moves:** a self-service `POST /deactivate` of an active machine is a move, limited to 2 per rolling 30 days (`wplm_move_limit`). Beyond that: HTTP 429 `wplm_move_limit_reached` with `moves_reset_at`. The response carries `moves_left`.
+  - `CheckInService::reset_moves()` lets the owner allow moves again. Re-deactivating an inactive machine is not a move.
+  - Classic licences keep their responses, and have no move limit.
+- Index `activation_log (machine_id, event, created_at)` for the rate limit.
 
 ### Changed
 - **An entitlement licence never stores `expires_at`.** Its lines carry the dates, so no path can make classic validation mark it expired or refuse its activation.
   - Covered paths: checkout, renewal payment, subscription cancellation, first activation with `valid_for_days`, admin, REST.
   - Enforced once, in `LicenseRepository`. Turning a licence into an entitlement licence clears its expiry.
 - `LicenseService::extend_term()` returns `null` for an entitlement licence.
+- `ActivationLogRepository::count_events_since()` compared a UTC cutoff with site-time `created_at` values; it now compares in site time.
 
 ### Requirements
 - DB version 1.2.0 (adds `wplm_entitlements`, `licenses.profile`, `plans.profile`, `packages.entitlements`, `machines.token_fp`, `machines.usage_json`).

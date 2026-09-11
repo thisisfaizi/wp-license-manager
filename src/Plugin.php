@@ -221,6 +221,18 @@ final class Plugin {
 			)
 		);
 		$this->container->bind(
+			Licensing\CheckInService::class,
+			fn( $c ) => new Licensing\CheckInService(
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Repositories\MachineRepository::class ),
+				$c->make( Repositories\ActivationLogRepository::class ),
+				$c->make( Services\ActivationService::class ),
+				$c->make( Licensing\TokenV2Service::class ),
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Crypto\Fingerprint::class )
+			)
+		);
+		$this->container->bind(
 			Services\RevocationService::class,
 			fn( $c ) => new Services\RevocationService(
 				$c->make( Repositories\LicenseRepository::class ),

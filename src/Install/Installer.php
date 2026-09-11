@@ -230,7 +230,8 @@ class Installer {
   PRIMARY KEY  (id),
   KEY license_id (license_id),
   KEY created_at (created_at),
-  KEY event (event)
+  KEY event (event),
+  KEY machine_event (machine_id,event,created_at)
 ) ENGINE=InnoDB {$charset_collate};",
 
 			// 5 — generators

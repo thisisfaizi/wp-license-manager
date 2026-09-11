@@ -423,10 +423,11 @@ class ActivationService {
 	 * Deactivate a device directly by its machine row id.
 	 * Used by admin UI and internal tooling.
 	 *
-	 * @param int $machine_id Machine row id.
+	 * @param int    $machine_id Machine row id.
+	 * @param string $source     Who asked, for the log (e.g. admin_by_machine_id, public_by_machine_id).
 	 * @return bool|WP_Error True on success, WP_Error on failure.
 	 */
-	public function deactivate_by_machine_id( int $machine_id ): bool|WP_Error {
+	public function deactivate_by_machine_id( int $machine_id, string $source = 'admin_by_machine_id' ): bool|WP_Error {
 		// 1. Load the machine.
 		$machine = $this->machine_repo->find_by_id( $machine_id );
 		if ( ! $machine ) {
@@ -458,7 +459,7 @@ class ActivationService {
 				'machine_id' => $machine->id,
 				'event'      => 'deactivate',
 				'result'     => 'success',
-				'meta'       => array( 'source' => 'admin_by_machine_id' ),
+				'meta'       => array( 'source' => $source ),
 			)
 		);
 

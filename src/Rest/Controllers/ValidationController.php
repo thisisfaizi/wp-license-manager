@@ -10,6 +10,7 @@ namespace WPLM\Rest\Controllers;
 defined( 'ABSPATH' ) || exit;
 
 use WPLM\Crypto\Signer;
+use WPLM\Licensing\CheckInService;
 use WPLM\Services\ActivationService;
 use WPLM\Services\HeartbeatService;
 use WPLM\Services\LicenseService;
@@ -166,6 +167,13 @@ class ValidationController extends BaseController {
 				'components'  => is_array( $body['components'] ?? null ) ? $body['components'] : array(),
 			);
 
+			// An entitlement licence (e.g. Super Ledger) gets its v2 token with the activation.
+			$license = $this->container->make( LicenseService::class )->get_by_key( $license_key );
+			$checkin = $this->container->make( CheckInService::class );
+			if ( $checkin->handles( $license ) ) {
+				return $this->check_in_response( $checkin->activate( $license, $license_key, $fingerprint, $meta, $body['usage'] ?? null ), 201 );
+			}
+
 			/** @var ActivationService $service */
 			$service = $this->container->make( ActivationService::class );
 			$machine = $service->activate( $license_key, $fingerprint, $meta );
@@ -209,11 +217,33 @@ class ValidationController extends BaseController {
 				);
 			}
 
+			/** @var LicenseService $licenses */
+			$licenses = $this->container->make( LicenseService::class );
+			$license  = $licenses->get_by_key( $license_key );
+			$checkin  = $this->container->make( CheckInService::class );
+
+			// An entitlement licence's self-service deactivation is a move, and moves are limited.
+			if ( $checkin->handles( $license ) && ( $machine_id > 0 || '' !== $fingerprint ) ) {
+				$machines = $this->container->make( \WPLM\Repositories\MachineRepository::class );
+				$machine  = $machine_id > 0
+					? $machines->find_by_id( $machine_id )
+					: $machines->find_by_license_and_fingerprint( $license->id, $this->container->make( \WPLM\Crypto\Fingerprint::class )->hash( $fingerprint ) );
+
+				if ( null === $machine || (int) $machine->license_id !== $license->id ) {
+					return ResponseFactory::error( 'wplm_machine_not_found', __( 'No matching device activation found for this license.', 'wp-license-manager' ), 404 );
+				}
+
+				$result = $checkin->move_off( $license, $machine );
+				return is_wp_error( $result ) ? $result : ResponseFactory::success(
+					array(
+						'deactivated' => true,
+						'moves_left'  => $checkin->moves_left( $license ),
+					)
+				);
+			}
+
 			if ( $machine_id > 0 ) {
-				/** @var LicenseService $licenses */
-				$licenses = $this->container->make( LicenseService::class );
-				$license  = $licenses->get_by_key( $license_key );
-				$machine  = null !== $license
+				$machine = null !== $license
 					? $this->container->make( \WPLM\Repositories\MachineRepository::class )->find_by_id( $machine_id )
 					: null;
 
@@ -222,7 +252,7 @@ class ValidationController extends BaseController {
 					return ResponseFactory::error( 'wplm_machine_not_found', __( 'No matching device activation found for this license.', 'wp-license-manager' ), 404 );
 				}
 
-				$result = $service->deactivate_by_machine_id( $machine_id );
+				$result = $service->deactivate_by_machine_id( $machine_id, 'public_by_machine_id' );
 			} elseif ( '' !== $fingerprint ) {
 				$result = $service->deactivate( $license_key, $fingerprint );
 			} else {
@@ -273,6 +303,12 @@ class ValidationController extends BaseController {
 				'ip_address'  => sanitize_text_field( wp_unslash( $body['ip_address'] ?? '' ) ) ?: $this->get_client_ip(),
 				'app_version' => sanitize_text_field( wp_unslash( $body['app_version'] ?? '' ) ),
 			);
+
+			// An entitlement licence's heartbeat is its check-in: a fresh v2 token every time.
+			$checkin = $this->container->make( CheckInService::class );
+			if ( $checkin->handles( $license ) ) {
+				return $this->check_in_response( $checkin->check_in( $license, $fingerprint, $context, $body['usage'] ?? null ), 200 );
+			}
 
 			/** @var HeartbeatService $hb_service */
 			$hb_service = $this->container->make( HeartbeatService::class );
@@ -331,6 +367,30 @@ class ValidationController extends BaseController {
 	// -------------------------------------------------------------------------
 	// Private helpers
 	// -------------------------------------------------------------------------
+
+	/**
+	 * The machine response plus `token_v2` (the signed v2 token) and `server_time` (unix seconds).
+	 *
+	 * @param array|\WP_Error $result CheckInService result.
+	 * @param int             $status HTTP status on success.
+	 * @return \WP_REST_Response|\WP_Error
+	 */
+	private function check_in_response( $result, int $status ) {
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+		return ResponseFactory::success(
+			array_merge(
+				$result['machine']->to_array(),
+				array(
+					'token_v2'    => $result['token'],
+					'server_time' => $result['server_time'],
+				)
+			),
+			array(),
+			$status
+		);
+	}
 
 	/**
 	 * Return the best-guess client IP address from the current request.
