@@ -242,10 +242,6 @@ final class Plugin {
 			)
 		);
 		$this->container->bind(
-			Licensing\ContractFixtures::class,
-			fn( $c ) => new Licensing\ContractFixtures( $c->make( Licensing\ProfileRegistry::class ) )
-		);
-		$this->container->bind(
 			Services\RevocationService::class,
 			fn( $c ) => new Services\RevocationService(
 				$c->make( Repositories\LicenseRepository::class ),

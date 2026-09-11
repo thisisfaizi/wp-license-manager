@@ -1,6 +1,6 @@
 <?php
 /**
- * The fleet extension notice (M5-27a §7): if the licence site is down, the owner signs a short notice
+ * The fleet extension notice: if the licence site is down, the owner signs a short notice
  * from the offline key backup that stretches every office's check-in deadline — by at most 30 days,
  * and never the paid-through dates. It must be producible with WordPress stopped.
  *
@@ -47,12 +47,12 @@ class FleetNoticeTest extends TestCase {
 	}
 
 	public function test_a_notice_signs_the_contract_shape(): void {
-		$token = FleetNotice::sign( FleetNotice::build( self::IAT + 20 * DAY_IN_SECONDS, self::IAT ), $this->keypair['sec'] );
+		$token = FleetNotice::sign( FleetNotice::build( self::IAT + 20 * DAY_IN_SECONDS, self::IAT, 'acme-office' ), $this->keypair['sec'] );
 
 		$this->assertSame(
 			array(
 				'v'     => 1,
-				'pid'   => 'super-ledger',
+				'pid'   => 'acme-office',
 				'kind'  => 'extend-check-in',
 				'until' => self::IAT + 20 * DAY_IN_SECONDS,
 				'iat'   => self::IAT,
@@ -62,14 +62,28 @@ class FleetNoticeTest extends TestCase {
 	}
 
 	public function test_more_than_30_days_or_a_past_date_is_refused(): void {
-		$this->assertIsArray( FleetNotice::build( self::IAT + 30 * DAY_IN_SECONDS, self::IAT ), 'Exactly 30 days is allowed.' );
+		$this->assertIsArray( FleetNotice::build( self::IAT + 30 * DAY_IN_SECONDS, self::IAT, 'acme-office' ), 'Exactly 30 days is allowed.' );
 
 		foreach ( array( self::IAT + 30 * DAY_IN_SECONDS + 1, self::IAT, self::IAT - 1 ) as $until ) {
 			try {
-				FleetNotice::build( $until, self::IAT );
+				FleetNotice::build( $until, self::IAT, 'acme-office' );
 				$this->fail( "until={$until} should be refused" );
 			} catch ( \InvalidArgumentException $e ) {
 				$this->assertNotSame( '', $e->getMessage() );
+			}
+		}
+	}
+
+	/** The pid is the product's profile code; a typo there makes every client reject the notice. */
+	public function test_a_notice_needs_a_profile_code_as_its_pid(): void {
+		$this->assertSame( 'a1-b', FleetNotice::build( self::IAT + DAY_IN_SECONDS, self::IAT, 'a1-b' )['pid'] );
+
+		foreach ( array( '', 'Acme Office', 'ACME', '-acme', 'acme|office' ) as $pid ) {
+			try {
+				FleetNotice::build( self::IAT + DAY_IN_SECONDS, self::IAT, $pid );
+				$this->fail( "pid '{$pid}' should be refused" );
+			} catch ( \InvalidArgumentException $e ) {
+				$this->assertStringContainsString( 'profile code', $e->getMessage() );
 			}
 		}
 	}
@@ -99,7 +113,7 @@ class FleetNoticeTest extends TestCase {
 	public function test_the_standalone_script_runs_without_wordpress(): void {
 		$php = getenv( 'WP_PHP_BINARY' ) ?: 'php';
 		$cmd = sprintf(
-			'%s %s --until=%s --keypair-file=%s --now=%d 2>&1',
+			'%s %s --pid=acme-office --until=%s --keypair-file=%s --now=%d 2>&1',
 			$php,
 			escapeshellarg( dirname( __DIR__, 3 ) . '/bin/fleet-notice.php' ),
 			escapeshellarg( '2026-09-25' ),
@@ -113,6 +127,7 @@ class FleetNoticeTest extends TestCase {
 		$this->assertCount( 1, $tokens, 'Exactly one notice on the output.' );
 		$notice = CompactToken::verify( (string) reset( $tokens ), $this->keypair['pub'] );
 		$this->assertSame( 'extend-check-in', $notice['kind'] );
+		$this->assertSame( 'acme-office', $notice['pid'] );
 		$this->assertSame( strtotime( '2026-09-25 23:59:59 +05:00' ), $notice['until'] );
 		$this->assertSame( self::IAT, $notice['iat'] );
 
@@ -120,5 +135,10 @@ class FleetNoticeTest extends TestCase {
 		exec( str_replace( escapeshellarg( '2026-09-25' ), escapeshellarg( '2026-10-25' ), $cmd ), $out, $code );
 		$this->assertSame( 1, $code, 'More than 30 days: refused with a message.' );
 		$this->assertStringContainsString( '30 days', implode( "\n", $out ) );
+
+		$out = array();
+		exec( str_replace( '--pid=acme-office ', '', $cmd ), $out, $code );
+		$this->assertSame( 1, $code, 'No --pid: refused, never a notice for a guessed product.' );
+		$this->assertStringContainsString( '--pid', implode( "\n", $out ) );
 	}
 }

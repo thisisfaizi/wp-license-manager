@@ -1,7 +1,7 @@
 <?php
 /**
- * The v2 token: the signed, machine-bound statement of what one Super Ledger office may do and
- * until when. Its field shape is the contract Super Ledger (M5-27b) verifies without PHP.
+ * The v2 token: the signed, machine-bound statement of what one machine of an entitlement licence may
+ * do and until when. Its field shape is the contract a client verifies without PHP.
  *
  * @package WPLM\Tests
  */
@@ -47,7 +47,7 @@ class TokenV2Test extends TestCase {
 		$this->assertSame( array( 'checkInBy', 'fp', 'graceDays', 'iat', 'lid', 'limits', 'mid', 'modules', 'pid', 'srv', 'status', 'v' ), $keys );
 
 		$this->assertSame( 2, $payload['v'] );
-		$this->assertSame( 'super-ledger', $payload['pid'] );
+		$this->assertSame( 'acme-office', $payload['pid'] );
 		$this->assertSame( $bound['license']->id, $payload['lid'] );
 		$this->assertSame( $bound['machine']->id, $payload['mid'] );
 		$this->assertSame( $bound['fp'], $payload['fp'] );
@@ -127,7 +127,7 @@ class TokenV2Test extends TestCase {
 	}
 
 	public function test_check_in_window_and_grace_come_from_the_profile_settings(): void {
-		$profile = $this->make( ProfileRegistry::class )->get( 'super-ledger' );
+		$profile = $this->make( ProfileRegistry::class )->get( 'acme-office' );
 		update_option( $profile->option_name( 'check_in_days' ), '3' );
 		update_option( $profile->option_name( 'grace_days' ), '10' );
 
@@ -168,7 +168,7 @@ class TokenV2Test extends TestCase {
 	public function test_the_fingerprint_must_be_the_machines_own(): void {
 		$bound = $this->activated_profile_licence();
 
-		$other = $this->tokens()->payload( $bound['license'], $bound['machine'], hash( 'sha256', 'super-ledger|another-pc' ), array( 'now' => self::NOW ) );
+		$other = $this->tokens()->payload( $bound['license'], $bound['machine'], hash( 'sha256', 'acme-office|another-pc' ), array( 'now' => self::NOW ) );
 		$this->assertWPError( $other );
 		$this->assertSame( 'wplm_fingerprint_mismatch', $other->get_error_code() );
 

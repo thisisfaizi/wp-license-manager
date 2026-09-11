@@ -8,12 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ## [1.2.0] — Unreleased
 
-Entitlement licences for Super Ledger: per-module and per-limit lines with their own paid-through dates, and a signed, machine-bound v2 token. Classic licences, their v1 tokens and every other product are unchanged.
+Entitlement licences: per-module and per-limit lines with their own paid-through dates, and a signed, machine-bound v2 token. Classic licences, their v1 tokens and every other product are unchanged.
 
 ### Added
-- **Licence profiles.** A plan can sell a licence profile (built in: `super-ledger`; others via the `wplm_license_profiles` filter). A licence bought from such a plan is an *entitlement licence*.
+- **Licence profiles.** A plan can sell a licence profile. A licence bought from such a plan is an *entitlement licence*.
+  - WPLM builds no profile in. A product's add-on plugin registers its own (`Licensing\Profile`: code, label, module codes, limit codes) through the `wplm_license_profiles` filter.
+  - A profile code is lower-case letters, digits and hyphens (at most 32); a malformed registration is ignored.
+  - A licence whose profile nobody registers gets no v2 token, so the add-on must stay active on the licence server.
 - **Entitlement lines** (`wplm_entitlements`).
-  - A `module` line grants a module; a `limit` line adds to `users`, `seats` or `phones`.
+  - A `module` line grants one of the profile's modules; a `limit` line adds to one of its limits (for example `users`).
   - `paid_through` is the inclusive last paid day in the site's time zone; `NULL` means lifetime.
   - Codes are a closed list per profile, and an unknown code is refused on save.
   - Actions: `wplm_entitlement_saved`, `wplm_entitlement_deleted`.
@@ -42,14 +45,11 @@ Entitlement licences for Super Ledger: per-module and per-limit lines with their
   - A code is an ordinary v2 token for that machine, with the check-in deadline the owner picks (1–365 days).
   - It is logged as `offline_code`, with who issued it and for how many days.
   - It is refused for a machine that has not checked in since the upgrade, because its signed `fp` is not yet known.
-- **Fleet extension notice** (`Licensing\FleetNotice`): `{"v":1,"pid":"super-ledger","kind":"extend-check-in","until","iat"}`, signed from a keypair **file**.
-  - `wp wplm fleet-notice --until=YYYY-MM-DD --keypair-file=…` signs it.
+- **Fleet extension notice** (`Licensing\FleetNotice`): `{"v":1,"pid":"<profile code>","kind":"extend-check-in","until","iat"}`, signed from a keypair **file**.
+  - `wp wplm fleet-notice --pid=<profile code> --until=YYYY-MM-DD --keypair-file=…` signs it. `--pid` is required: a notice for the wrong product is rejected by every client.
   - `bin/fleet-notice.php` does the same without WordPress: plain PHP with sodium.
   - It refuses more than 30 days. A bare date means the end of that day in Asia/Karachi (`--timezone`).
-- **Contract fixtures** (`wp wplm contract-fixtures --out=<dir>`): `public_key.txt`, 15 signed cases and `cases.json` with the fixed "now", the raw fingerprint and each case's expected outcome.
-  - They are signed with a **test** keypair derived from a public seed, so regeneration is byte-identical.
-  - They are produced by the same composition code as real tokens.
-  - `tools/verify-fixtures` verifies them with Dart's `cryptography` Ed25519.
+- `TokenV2Service::compose()` and `wire()` are public and static, so a product's add-on can build contract fixtures with the same composition code as real tokens.
 - `Crypto\CompactToken`: the token format in one place, usable without WordPress. `Signer` delegates to it, and its output is byte-identical to before.
 
 ### Changed

@@ -1,6 +1,6 @@
 <?php
 /**
- * WP-CLI commands for entitlement licences: offline codes, fleet notices, contract fixtures.
+ * WP-CLI commands for entitlement licences: offline codes and fleet notices.
  *
  * @package WPLM\Cli
  */
@@ -8,7 +8,6 @@
 namespace WPLM\Cli;
 
 use WPLM\Crypto\CompactToken;
-use WPLM\Licensing\ContractFixtures;
 use WPLM\Licensing\FleetNotice;
 use WPLM\Licensing\OfflineCodeService;
 use WPLM\Plugin;
@@ -16,7 +15,7 @@ use WPLM\Plugin;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Licence tooling for Super Ledger (M5-27a).
+ * Licence tooling for entitlement licences (licences with a profile).
  */
 class LicensingCommand {
 
@@ -27,6 +26,9 @@ class LicensingCommand {
 	 * key you hold. With WordPress down, run bin/fleet-notice.php instead — same arguments.
 	 *
 	 * ## OPTIONS
+	 *
+	 * --pid=<profile>
+	 * : Licence profile code of the product, e.g. the code its add-on registers.
 	 *
 	 * --until=<date>
 	 * : YYYY-MM-DD (end of that day in --timezone) or an ISO 8601 time with an offset. At most 30 days from now.
@@ -42,7 +44,7 @@ class LicensingCommand {
 	 *
 	 * ## EXAMPLES
 	 *
-	 *     wp wplm fleet-notice --until=2026-09-30 --keypair-file=/secure/wplm-keypair.json
+	 *     wp wplm fleet-notice --pid=my-product --until=2026-09-30 --keypair-file=/secure/wplm-keypair.json
 	 *
 	 * @subcommand fleet-notice
 	 *
@@ -60,11 +62,12 @@ class LicensingCommand {
 			$keypair = CompactToken::keypair_from_json( $json );
 			$now     = time();
 			$until   = FleetNotice::parse_until( (string) $assoc_args['until'], (string) ( $assoc_args['timezone'] ?? 'Asia/Karachi' ) );
-			$token   = FleetNotice::sign( FleetNotice::build( $until, $now ), $keypair['sec'] );
+			$notice  = FleetNotice::build( $until, $now, (string) $assoc_args['pid'] );
+			$token   = FleetNotice::sign( $notice, $keypair['sec'] );
 		} catch ( \InvalidArgumentException $e ) {
 			\WP_CLI::error( $e->getMessage() );
 		}
-		\WP_CLI::log( sprintf( 'Check-in may stretch to %s UTC.', gmdate( 'Y-m-d H:i:s', $until ) ) );
+		\WP_CLI::log( sprintf( 'Fleet notice for %s: check-in may stretch to %s UTC.', $notice['pid'], gmdate( 'Y-m-d H:i:s', $until ) ) );
 		\WP_CLI::line( $token );
 	}
 
@@ -96,24 +99,5 @@ class LicensingCommand {
 		}
 		\WP_CLI::log( sprintf( 'Valid until the office must check in: %s UTC.', gmdate( 'Y-m-d H:i:s', $code['check_in_by'] ) ) );
 		\WP_CLI::line( $code['token'] );
-	}
-
-	/**
-	 * Write the Super Ledger contract fixtures (signed with a fixed TEST key, never the site key).
-	 *
-	 * ## OPTIONS
-	 *
-	 * --out=<dir>
-	 * : Output directory, e.g. Super Ledger's app/packages/core/test/fixtures/licensing.
-	 *
-	 * @subcommand contract-fixtures
-	 *
-	 * @param array $args       Positional arguments.
-	 * @param array $assoc_args Options.
-	 * @return void
-	 */
-	public function contract_fixtures( array $args, array $assoc_args ): void {
-		$files = Plugin::get_instance()->container()->make( ContractFixtures::class )->write( (string) $assoc_args['out'] );
-		\WP_CLI::success( sprintf( 'Wrote %d files to %s.', count( $files ), $assoc_args['out'] ) );
 	}
 }

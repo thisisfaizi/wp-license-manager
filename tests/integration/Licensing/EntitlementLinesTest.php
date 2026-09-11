@@ -21,7 +21,7 @@ class EntitlementLinesTest extends TestCase {
 		return $this->make( LicenseService::class )->create(
 			array(
 				'key_string' => 'SL-' . wp_generate_password( 16, false ),
-				'profile'    => 'super-ledger',
+				'profile'    => 'acme-office',
 			)
 		)->id;
 	}

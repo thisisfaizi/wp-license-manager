@@ -15,8 +15,8 @@ use WPLM\Repositories\MachineRepository;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * M5-27a §6. The owner presses "Offline renewal code" for one machine and sends the result over
- * WhatsApp; it is pasted into Super Ledger's Licence screen. **The code is an ordinary v2 token** for
+ * The owner presses "Offline renewal code" for one machine and sends the result to the customer
+ * (for example over WhatsApp), who pastes it into the product on that machine. **The code is an ordinary v2 token** for
  * that machine — same signature, same `fp`, same paid-through dates — whose only difference is a
  * `checkInBy` the owner chose. There is no second format to secure, and it cannot extend what is paid.
  */

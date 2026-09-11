@@ -13,12 +13,13 @@ use WPLM\Crypto\CompactToken;
 defined( 'ABSPATH' ) || defined( 'WPLM_STANDALONE' ) || exit;
 
 /**
- * M5-27a §7. When the licence site is down, check-ins fail everywhere at once, and after the check-in
- * window every paying office would go read-only. The owner signs this notice from the **offline key
- * backup** and publishes it on a second host; an office that cannot check in fetches it and moves its
- * check-in deadline to `min(until, token.iat + 30 days)`. It never touches paid-through dates.
+ * When the licence site is down, check-ins fail everywhere at once, and after the check-in window
+ * every paying machine of an entitlement licence would stop. The owner signs this notice from the
+ * **offline key backup** and publishes it on a second host; a client that cannot check in fetches it
+ * and moves its check-in deadline to `min(until, token.iat + 30 days)`. It never touches paid-through
+ * dates. `pid` is the profile code, so one notice serves one product.
  *
- *     {"v": 1, "pid": "super-ledger", "kind": "extend-check-in", "until": <unix>, "iat": <unix>}
+ *     {"v": 1, "pid": "<profile code>", "kind": "extend-check-in", "until": <unix>, "iat": <unix>}
  */
 final class FleetNotice {
 
@@ -30,11 +31,15 @@ final class FleetNotice {
 	 *
 	 * @param int    $until Unix time the deadline may stretch to.
 	 * @param int    $iat   Unix time of issue.
-	 * @param string $pid   Product the notice applies to.
+	 * @param string $pid   Profile code of the product the notice applies to. There is no default: a
+	 *                      notice with the wrong pid is rejected by every client, during an outage.
 	 * @return array{v: int, pid: string, kind: string, until: int, iat: int}
-	 * @throws \InvalidArgumentException When `until` is not after `iat`, or more than 30 days after it.
+	 * @throws \InvalidArgumentException When the pid is not a profile code, or `until` is not after `iat`, or more than 30 days after it.
 	 */
-	public static function build( int $until, int $iat, string $pid = 'super-ledger' ): array {
+	public static function build( int $until, int $iat, string $pid ): array {
+		if ( 1 !== preg_match( '/^[a-z0-9][a-z0-9-]{0,31}$/', $pid ) ) {
+			throw new \InvalidArgumentException( sprintf( 'The product id "%s" is not a licence profile code (lower-case letters, digits and hyphens).', $pid ) );
+		}
 		if ( $until <= $iat ) {
 			throw new \InvalidArgumentException( 'The notice must extend to a time after now.' );
 		}

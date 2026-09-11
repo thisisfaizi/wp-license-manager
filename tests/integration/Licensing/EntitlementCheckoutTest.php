@@ -1,7 +1,7 @@
 <?php
 /**
- * Buying a Super Ledger plan writes entitlement lines, and a Super Ledger licence never expires as
- * a whole: its lines carry the dates, and the app computes grace and read-only from the token (D7).
+ * Buying a plan that sells a licence profile writes entitlement lines, and such a licence never expires
+ * as a whole: its lines carry the dates, and the client computes grace and read-only from the token.
  * Every other product keeps its classic licence and v1 token, untouched.
  *
  * @package WPLM\Tests
@@ -54,7 +54,7 @@ class EntitlementCheckoutTest extends TestCase {
 	}
 
 	private function buy_profile( array $package ): array {
-		$plan     = $this->create_plan( array( $package ), array( 'profile' => 'super-ledger' ) );
+		$plan     = $this->create_plan( array( $package ), array( 'profile' => 'acme-office' ) );
 		$product  = $this->create_plan_product( $plan['plan_id'] );
 		$customer = $this->create_customer();
 		$bought   = $this->buy( $product, $plan['packages'][0], $customer );
@@ -72,7 +72,7 @@ class EntitlementCheckoutTest extends TestCase {
 		$license = $this->license_row( $bought['license_id'] );
 		$sub     = $this->subscription_row( $bought['subscription_id'] );
 
-		$this->assertSame( 'super-ledger', $license['profile'] );
+		$this->assertSame( 'acme-office', $license['profile'] );
 		$this->assertNull( $license['expires_at'], 'The lines carry the dates, not the licence.' );
 
 		$expected_through = EntitlementService::paid_through_for( $sub['next_payment'] );
@@ -118,7 +118,7 @@ class EntitlementCheckoutTest extends TestCase {
 		$plan_id = $plans->create_plan(
 			array(
 				'name'    => 'Typo plan',
-				'profile' => 'super-ledger',
+				'profile' => 'acme-office',
 			)
 		);
 
@@ -146,7 +146,7 @@ class EntitlementCheckoutTest extends TestCase {
 	}
 
 	// ---------------------------------------------------------------------------------------------
-	// A Super Ledger licence never gets an expiry, whichever path tries to give it one.
+	// An entitlement licence never gets an expiry, whichever path tries to give it one.
 	// ---------------------------------------------------------------------------------------------
 
 	public function test_cancelling_the_subscription_does_not_give_the_licence_an_expiry(): void {
@@ -170,7 +170,7 @@ class EntitlementCheckoutTest extends TestCase {
 		$license = $this->make( LicenseService::class )->create(
 			array(
 				'key_string'     => 'SL-' . wp_generate_password( 16, false ),
-				'profile'        => 'super-ledger',
+				'profile'        => 'acme-office',
 				'valid_for_days' => 30,
 			)
 		);
@@ -184,7 +184,7 @@ class EntitlementCheckoutTest extends TestCase {
 		$license = $this->make( LicenseService::class )->create(
 			array(
 				'key_string' => 'SL-' . wp_generate_password( 16, false ),
-				'profile'    => 'super-ledger',
+				'profile'    => 'acme-office',
 				'expires_at' => '2026-01-01 00:00:00',
 			)
 		);
@@ -207,10 +207,10 @@ class EntitlementCheckoutTest extends TestCase {
 			)
 		);
 
-		$this->make( LicenseService::class )->update( $license->id, array( 'profile' => 'super-ledger' ) );
+		$this->make( LicenseService::class )->update( $license->id, array( 'profile' => 'acme-office' ) );
 
 		$row = $this->license_row( $license->id );
-		$this->assertSame( 'super-ledger', $row['profile'] );
+		$this->assertSame( 'acme-office', $row['profile'] );
 		$this->assertNull( $row['expires_at'] );
 	}
 

@@ -1,7 +1,7 @@
 <?php
 /**
  * A renewal payment moves the paid-through date of the subscription's dated lines — the only way a
- * lapsed Super Ledger module comes back. Same rule as classic licences (1.1.0): inside grace the
+ * lapsed module comes back. Same rule as classic licences (1.1.0): inside grace the
  * period continues from the old end; after grace a full period starts today.
  *
  * @package WPLM\Tests
@@ -41,7 +41,7 @@ class EntitlementRenewalTest extends TestCase {
 					),
 				),
 			),
-			array( 'profile' => 'super-ledger' )
+			array( 'profile' => 'acme-office' )
 		);
 		$product  = $this->create_plan_product( $plan['plan_id'] );
 		$bought   = $this->buy( $product, $plan['packages'][0], $this->create_customer() );

@@ -19,7 +19,7 @@ class Plan {
 	public int $id              = 0;
 	public string $name         = '';
 	public ?string $description = null;
-	/** Licence profile the plan sells (e.g. 'super-ledger'), or null for classic licences. */
+	/** Licence profile the plan sells (see ProfileRegistry), or null for classic licences. */
 	public ?string $profile   = null;
 	public int $status        = 1; // 1 active, 0 inactive.
 	public string $created_at = '';

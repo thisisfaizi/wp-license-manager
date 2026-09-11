@@ -232,9 +232,9 @@ class LicenseRepository {
 
 	/**
 	 * A profile licence never stores an expiry: its entitlement lines carry the dates, and the app
-	 * computes grace and read-only from the token (Super Ledger D7). If one were written, classic
-	 * validation would mark the licence expired and activation/check-in would refuse a customer who
-	 * can only recover by paying — the lock-out D2 forbids.
+	 * computes grace and read-only from the token. If one were written, classic validation would mark
+	 * the licence expired and activation/check-in would refuse a customer who can only recover by
+	 * paying: a lock-out the server must never impose on an entitlement licence.
 	 *
 	 * Enforced here, the one place every path writes through (checkout, renewals, subscription
 	 * cancellation, first activation, admin, REST, CSV import), rather than in each caller.
