@@ -12,6 +12,7 @@ use WPLM\Models\Renewal;
 use WPLM\Models\Subscription;
 use WPLM\Repositories\RenewalRepository;
 use WPLM\Repositories\SubscriptionRepository;
+use WPLM\Services\EntitlementService;
 use WPLM\Services\LicenseService;
 use WPLM\Support\Logger;
 
@@ -48,6 +49,9 @@ class RenewalProcessor {
 	/** @var SubscriptionService */
 	private SubscriptionService $sub_service;
 
+	/** @var EntitlementService */
+	private EntitlementService $entitlements;
+
 	/**
 	 * @param SubscriptionRepository $sub_repo        Subscription data-access layer.
 	 * @param RenewalRepository      $renewal_repo    Renewal data-access layer.
@@ -56,6 +60,7 @@ class RenewalProcessor {
 	 * @param LicenseService         $license_service License lifecycle service.
 	 * @param BillingScheduler       $scheduler       Next-payment date computation.
 	 * @param SubscriptionService    $sub_service     Subscription lifecycle service.
+	 * @param EntitlementService     $entitlements    Entitlement lines (profile licences).
 	 */
 	public function __construct(
 		SubscriptionRepository $sub_repo,
@@ -64,8 +69,10 @@ class RenewalProcessor {
 		DunningManager $dunning,
 		LicenseService $license_service,
 		BillingScheduler $scheduler,
-		SubscriptionService $sub_service
+		SubscriptionService $sub_service,
+		EntitlementService $entitlements
 	) {
+		$this->entitlements    = $entitlements;
 		$this->sub_repo        = $sub_repo;
 		$this->renewal_repo    = $renewal_repo;
 		$this->gateway         = $gateway;
@@ -174,9 +181,13 @@ class RenewalProcessor {
 	}
 
 	/**
-	 * Apply a confirmed renewal payment: extend the licence by one period (LicenseService::
-	 * extend_term()), align next_payment with the new paid-through date, clear dunning, bring an
-	 * on-hold subscription back to active, and record the renewal.
+	 * Apply a confirmed renewal payment: extend what was paid for by one period, align next_payment
+	 * with the new paid-through date, clear dunning, bring an on-hold subscription back to active, and
+	 * record the renewal.
+	 *
+	 * What is extended: a classic licence's expiry (LicenseService::extend_term()), or — for an
+	 * entitlement licence, which has no expiry — the subscription's dated entitlement lines
+	 * (EntitlementService::extend_subscription_lines()). Both use the same grace rule.
 	 *
 	 * Shared by the cron card charge and paid renewal invoices, so both produce identical state.
 	 *
@@ -184,16 +195,20 @@ class RenewalProcessor {
 	 * @param int|null     $order_id WooCommerce order that carried the payment, if any.
 	 * @param float        $amount   Amount received.
 	 * @param string       $txn      Gateway transaction reference.
+	 * @param int|null     $now      Unix time of the payment (default: now).
 	 * @return Renewal The recorded renewal.
 	 */
-	public function apply_payment( Subscription $sub, ?int $order_id, float $amount, string $txn = '' ): Renewal {
-		$now      = time();
+	public function apply_payment( Subscription $sub, ?int $order_id, float $amount, string $txn = '', ?int $now = null ): Renewal {
+		$now      = $now ?? time();
 		$now_utc  = gmdate( 'Y-m-d H:i:s', $now );
 		$interval = $this->scheduler->period_to_interval( $sub->billing_interval, $sub->billing_period );
 
 		$next = null;
 		if ( null !== $sub->license_id ) {
 			$next = $this->license_service->extend_term( $sub->license_id, $interval, $now );
+		}
+		if ( null === $next ) {
+			$next = $this->entitlements->extend_subscription_lines( $sub->id, $sub->billing_interval, $sub->billing_period, $now );
 		}
 		if ( null === $next ) {
 			$next = $this->scheduler->next_payment( $sub, $now_utc );

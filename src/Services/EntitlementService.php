@@ -128,6 +128,89 @@ class EntitlementService {
 			->format( 'Y-m-d' );
 	}
 
+	/**
+	 * Add whole periods to a calendar date, clamping month and year steps to the last day of a shorter
+	 * month (2027-01-31 + 1 month = 2027-02-28, never 2027-03-03).
+	 *
+	 * @param string $date   Y-m-d.
+	 * @param int    $n      Number of periods.
+	 * @param string $period day|week|month|year.
+	 * @return string Y-m-d
+	 */
+	public static function add_period( string $date, int $n, string $period ): string {
+		$d = new \DateTimeImmutable( $date, new \DateTimeZone( 'UTC' ) );
+
+		if ( 'day' === $period || 'week' === $period ) {
+			$days = 'week' === $period ? 7 * $n : $n;
+			return $d->modify( ( $days >= 0 ? '+' : '' ) . $days . ' days' )->format( 'Y-m-d' );
+		}
+
+		// Count months from year 0, so negative steps borrow a year correctly.
+		$total = (int) $d->format( 'Y' ) * 12 + (int) $d->format( 'n' ) - 1 + ( 'year' === $period ? 12 * $n : $n );
+		$year  = intdiv( $total, 12 );
+		$month = $total % 12 + 1;
+		$last  = (int) ( new \DateTimeImmutable( sprintf( '%04d-%02d-01', $year, $month ), new \DateTimeZone( 'UTC' ) ) )->format( 't' );
+
+		return sprintf( '%04d-%02d-%02d', $year, $month, min( (int) $d->format( 'j' ), $last ) );
+	}
+
+	/**
+	 * Apply a renewal payment to a subscription's lines and return the subscription's next payment.
+	 *
+	 * Moves only lines paid by this subscription that have a date; lifetime lines never move. Per line,
+	 * with `grace` = the licence profile's grace setting and dates in the site's time zone:
+	 * - paid on or before `paid_through + grace` → the new period continues from the old end;
+	 * - paid after that (the module had gone read-only) → a full period from today.
+	 *
+	 * @param int      $subscription_id Subscription that was paid.
+	 * @param int      $interval        Billing interval (e.g. 1).
+	 * @param string   $period          day|week|month|year.
+	 * @param int|null $now             Unix time of the payment (default: now).
+	 * @return string|null The next payment (UTC datetime): the start of the day after the latest new
+	 *                     paid-through date, in the site's time zone. Null when no dated line moved.
+	 */
+	public function extend_subscription_lines( int $subscription_id, int $interval, string $period, ?int $now = null ): ?string {
+		$now    = $now ?? time();
+		$today  = wp_date( 'Y-m-d', $now );
+		$latest = null;
+		$grace  = array();
+
+		foreach ( $this->repo->get_by_subscription( $subscription_id ) as $line ) {
+			if ( null === $line->paid_through ) {
+				continue;
+			}
+
+			if ( ! array_key_exists( $line->license_id, $grace ) ) {
+				$license                    = $this->licenses->find_by_id( $line->license_id );
+				$profile                    = null !== $license ? $this->profiles->get( $license->profile ) : null;
+				$grace[ $line->license_id ] = null !== $profile ? $profile->grace_days() : null;
+			}
+			if ( null === $grace[ $line->license_id ] ) {
+				continue; // The licence is gone or no longer a profile licence.
+			}
+
+			$grace_end = self::add_period( $line->paid_through, $grace[ $line->license_id ], 'day' );
+			$base      = strcmp( $today, $grace_end ) <= 0 ? self::add_period( $line->paid_through, 1, 'day' ) : $today;
+			$through   = self::add_period( self::add_period( $base, max( 1, $interval ), $period ), -1, 'day' );
+
+			$this->repo->update( $line->id, array( 'paid_through' => $through ) );
+			/** This action is documented in EntitlementService::add_line(). */
+			do_action( 'wplm_entitlement_saved', $this->repo->find_by_id( $line->id ), 'extended' );
+
+			if ( null === $latest || strcmp( $through, $latest ) > 0 ) {
+				$latest = $through;
+			}
+		}
+
+		if ( null === $latest ) {
+			return null;
+		}
+
+		return ( new \DateTimeImmutable( self::add_period( $latest, 1, 'day' ) . ' 00:00:00', wp_timezone() ) )
+			->setTimezone( new \DateTimeZone( 'UTC' ) )
+			->format( 'Y-m-d H:i:s' );
+	}
+
 	// -------------------------------------------------------------------------
 	// Writes
 	// -------------------------------------------------------------------------

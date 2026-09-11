@@ -283,12 +283,17 @@ class SelfServiceRenewal {
 		);
 
 		$license = null !== $sub->license_id ? $this->license_service->get_by_id( $sub->license_id ) : null;
-		$order->add_order_note(
-			null !== $license && null !== $license->expires_at
-				/* translators: %s: new paid-through date (UTC) */
-				? sprintf( __( 'WPLM: renewal applied — licence paid through %s (UTC).', 'wp-license-manager' ), $license->expires_at )
-				: __( 'WPLM: renewal applied.', 'wp-license-manager' )
-		);
+		$renewed = $this->sub_repo->find_by_id( $sub->id );
+		if ( null !== $license && null !== $license->expires_at ) {
+			/* translators: %s: new paid-through date (UTC) */
+			$note = sprintf( __( 'WPLM: renewal applied — licence paid through %s (UTC).', 'wp-license-manager' ), $license->expires_at );
+		} elseif ( null !== $license && null !== $license->profile && null !== $renewed && null !== $renewed->next_payment ) {
+			/* translators: %s: new inclusive paid-through date (site time zone) */
+			$note = sprintf( __( 'WPLM: renewal applied — modules paid through %s. The customer unlocks at the next check-in.', 'wp-license-manager' ), \WPLM\Services\EntitlementService::paid_through_for( $renewed->next_payment ) );
+		} else {
+			$note = __( 'WPLM: renewal applied.', 'wp-license-manager' );
+		}
+		$order->add_order_note( $note );
 
 		/**
 		 * Fires after a paid renewal order is applied. Same signature as the cron path so all

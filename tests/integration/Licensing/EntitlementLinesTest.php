@@ -109,6 +109,24 @@ class EntitlementLinesTest extends TestCase {
 		$this->assertSame( array(), $this->lines()->lines( $lid ) );
 	}
 
+	/** @dataProvider periods */
+	public function test_period_arithmetic_clamps_to_month_end( string $from, int $n, string $period, string $expected ): void {
+		$this->assertSame( $expected, EntitlementService::add_period( $from, $n, $period ) );
+	}
+
+	public function periods(): array {
+		return array(
+			'plain month'           => array( '2026-09-11', 1, 'month', '2026-10-11' ),
+			'31 Jan + 1 month'      => array( '2027-01-31', 1, 'month', '2027-02-28' ),
+			'31 Jan + 1 month leap' => array( '2028-01-31', 1, 'month', '2028-02-29' ),
+			'across the year'       => array( '2026-12-15', 2, 'month', '2027-02-15' ),
+			'29 Feb + 1 year'       => array( '2028-02-29', 1, 'year', '2029-02-28' ),
+			'back a month'          => array( '2027-01-15', -1, 'month', '2026-12-15' ),
+			'back a day'            => array( '2027-03-01', -1, 'day', '2027-02-28' ),
+			'two weeks'             => array( '2026-09-11', 2, 'week', '2026-09-25' ),
+		);
+	}
+
 	/**
 	 * `paid_through` is the inclusive last paid day **in the site's time zone**: a Karachi customer
 	 * who pays at 02:00 PKT (21:00 UTC the day before) must not get a paid-through date a day early.

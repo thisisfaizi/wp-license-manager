@@ -285,7 +285,8 @@ final class Plugin {
 				$c->make( Services\Subscriptions\DunningManager::class ),
 				$c->make( Services\LicenseService::class ),
 				$c->make( Services\Subscriptions\BillingScheduler::class ),
-				$c->make( Services\Subscriptions\SubscriptionService::class )
+				$c->make( Services\Subscriptions\SubscriptionService::class ),
+				$c->make( Services\EntitlementService::class )
 			)
 		);
 		$this->container->bind(

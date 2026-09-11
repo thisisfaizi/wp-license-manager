@@ -22,6 +22,12 @@ Entitlement licences for Super Ledger: per-module and per-limit lines with their
   - fields `{v, pid, lid, mid, fp, iat, srv, checkInBy, graceDays, status, modules, limits}`, signed with the existing key and format;
   - per-profile settings for the check-in window and grace (default 7 days each);
   - `status` is `suspended` only when the owner suspended the licence; revoked and terminated licences get no token.
+- **Renewals extend entitlement lines.** A card charge or a renewal order marked Completed moves the paying subscription's dated lines (`EntitlementService::extend_subscription_lines()`).
+  - It uses the same rule as classic licences: inside the profile's grace, the period continues from the old end; after grace, a full period starts today.
+  - Month and year steps clamp to month end.
+  - Lifetime lines and other subscriptions' lines never move.
+  - `next_payment` becomes the start of the day after the new paid-through date, in the site's time zone.
+  - The order note tells the owner the new date.
 - Machine columns `token_fp` and `usage_json`, for check-in (next change).
 
 ### Changed
