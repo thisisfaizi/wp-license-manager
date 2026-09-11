@@ -66,6 +66,7 @@ final class Plugin {
 			'wplm_process_renewals',
 			'wplm_cull_zombies',
 			'wplm_retry_webhooks',
+			'wplm_lapse_notices',
 		);
 		foreach ( $hooks as $hook ) {
 			$timestamp = wp_next_scheduled( $hook );
@@ -242,6 +243,58 @@ final class Plugin {
 			)
 		);
 		$this->container->bind(
+			Admin\LicenceAdminActions::class,
+			fn( $c ) => new Admin\LicenceAdminActions(
+				$c->make( Services\EntitlementService::class ),
+				$c->make( Repositories\EntitlementRepository::class ),
+				$c->make( Services\LicenseService::class ),
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Repositories\MachineRepository::class ),
+				$c->make( Services\RevocationService::class ),
+				$c->make( Repositories\ActivationLogRepository::class ),
+				$c->make( Licensing\OfflineCodeService::class ),
+				$c->make( Licensing\CheckInService::class ),
+				$c->make( Services\GeneratorService::class )
+			)
+		);
+		$this->container->bind(
+			Integrations\WooCommerce\MyAccountLicences::class,
+			fn( $c ) => new Integrations\WooCommerce\MyAccountLicences(
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Repositories\MachineRepository::class ),
+				$c->make( Licensing\CheckInService::class ),
+				$c->make( Services\EntitlementService::class ),
+				$c->make( Licensing\ProfileRegistry::class )
+			)
+		);
+		$this->container->bind(
+			Admin\PlanAdminActions::class,
+			fn( $c ) => new Admin\PlanAdminActions(
+				$c->make( Services\PlanService::class ),
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Services\EntitlementService::class )
+			)
+		);
+		$this->container->bind(
+			Admin\Screens\EntitlementPanel::class,
+			fn( $c ) => new Admin\Screens\EntitlementPanel(
+				$c->make( Services\EntitlementService::class ),
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Repositories\MachineRepository::class ),
+				$c->make( Licensing\CheckInService::class ),
+				$c->make( Repositories\ActivationLogRepository::class )
+			)
+		);
+		$this->container->bind(
+			Licensing\LapseNoticeService::class,
+			fn( $c ) => new Licensing\LapseNoticeService(
+				$c->make( Repositories\EntitlementRepository::class ),
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Repositories\ActivationLogRepository::class ),
+				$c->make( Licensing\ProfileRegistry::class )
+			)
+		);
+		$this->container->bind(
 			Services\RevocationService::class,
 			fn( $c ) => new Services\RevocationService(
 				$c->make( Repositories\LicenseRepository::class ),
@@ -332,7 +385,8 @@ final class Plugin {
 			fn( $c ) => new Cron\Scheduler(
 				$c->make( Services\Subscriptions\RenewalProcessor::class ),
 				$c->make( Services\HeartbeatService::class ),
-				$c->make( Services\WebhookService::class )
+				$c->make( Services\WebhookService::class ),
+				$c->make( Licensing\LapseNoticeService::class )
 			)
 		);
 
@@ -381,6 +435,9 @@ final class Plugin {
 		// A missing secret used to fatal every request, admin included (audit F9). Crypto now
 		// loads secrets lazily, so the site stays up and the owner is told what to fix.
 		add_action( 'admin_notices', array( $this, 'notice_missing_secrets' ) );
+
+		// Licence profiles come from add-ons; a deactivated one silently stops its licences' tokens.
+		( new Admin\UnregisteredProfileNotice( $this->container->make( Licensing\ProfileRegistry::class ) ) )->register();
 
 		// REST API.
 		add_action(
@@ -438,6 +495,7 @@ final class Plugin {
 		( new Integrations\WooCommerce\MyAccountSubscriptions(
 			$this->container->make( Services\Subscriptions\SubscriptionService::class )
 		) )->register();
+		$this->container->make( Integrations\WooCommerce\MyAccountLicences::class )->register();
 
 		// Order admin meta box — shows issued keys + subscription link per order.
 		( new Integrations\WooCommerce\OrderMetaBox(

@@ -213,6 +213,42 @@ class ActivationLogRepository {
 	}
 
 	/**
+	 * A licence's events of one type since a given time, oldest first, with their result and meta.
+	 *
+	 * @param int    $license_id      Licence row id.
+	 * @param string $event           Event name.
+	 * @param int    $since_timestamp Unix timestamp; rows on or after it are returned.
+	 * @return array<int, array{id: int, result: string, meta: array}>
+	 */
+	public function events_with_meta_since( int $license_id, string $event, int $since_timestamp ): array {
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'wplm_activation_log';
+		$rows  = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT id, result, meta FROM `{$table}` WHERE license_id = %d AND event = %s AND created_at >= %s ORDER BY id ASC",
+				$license_id,
+				$event,
+				// created_at is written as current_time( 'mysql' ) (site time), so compare in site time.
+				wp_date( 'Y-m-d H:i:s', $since_timestamp )
+			),
+			ARRAY_A
+		);
+
+		return array_map(
+			static function ( array $r ): array {
+				$meta = json_decode( (string) $r['meta'], true );
+				return array(
+					'id'     => (int) $r['id'],
+					'result' => (string) $r['result'],
+					'meta'   => is_array( $meta ) ? $meta : array(),
+				);
+			},
+			is_array( $rows ) ? $rows : array()
+		);
+	}
+
+	/**
 	 * The id of a licence's most recent event of one type, or 0.
 	 *
 	 * @param int    $license_id Licence row id.

@@ -119,7 +119,7 @@ class LicenseRepository {
 
 		// Whitelist orderby to prevent injection.
 		$allowed_orderby = array( 'id', 'status', 'product_id', 'order_id', 'user_id', 'created_at', 'expires_at', 'activation_count' );
-		$orderby         = in_array( $args['orderby'] ?? 'id', $allowed_orderby, true ) ? $args['orderby'] : 'id';
+		$orderby         = in_array( $args['orderby'] ?? 'id', $allowed_orderby, true ) ? ( $args['orderby'] ?? 'id' ) : 'id';
 		$order           = strtoupper( $args['order'] ?? 'DESC' ) === 'ASC' ? 'ASC' : 'DESC';
 
 		$where  = array();

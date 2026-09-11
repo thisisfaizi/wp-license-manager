@@ -40,4 +40,10 @@ class ProfileRegistryTest extends TestCase {
 
 		$this->assertSame( array( 'acme-office' ), array_keys( ( new ProfileRegistry() )->all() ) );
 	}
+
+	public function test_a_base_module_must_be_one_of_the_modules(): void {
+		$this->assertSame( 'core', ( new Profile( 'p', 'P', array( 'core', 'extra' ), array(), array(), 'core' ) )->base_module );
+		$this->assertNull( ( new Profile( 'p', 'P', array( 'core' ), array(), array(), 'missing' ) )->base_module );
+		$this->assertNull( ( new Profile( 'p', 'P', array( 'core' ), array() ) )->base_module );
+	}
 }

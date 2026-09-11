@@ -60,8 +60,12 @@ class DunningManager {
 	 * @return int[]
 	 */
 	public function retry_schedule(): array {
-		$stored   = json_decode( (string) get_option( 'wplm_dunning_schedule', '' ), true );
-		$schedule = is_array( $stored ) && ! empty( $stored ) ? $stored : array( 1, 3, 5 );
+		// The Settings page saves a comma list ("1,3,5"); a JSON array is accepted too.
+		$raw      = (string) get_option( 'wplm_dunning_schedule', '' );
+		$stored   = json_decode( $raw, true );
+		$stored   = is_array( $stored ) ? $stored : array_filter( array_map( 'trim', explode( ',', $raw ) ), 'is_numeric' );
+		$schedule = array_filter( array_map( 'absint', $stored ) );
+		$schedule = ! empty( $schedule ) ? $schedule : array( 1, 3, 5 );
 
 		/**
 		 * Filter the dunning retry schedule.
