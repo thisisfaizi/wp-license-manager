@@ -133,7 +133,7 @@ class PlanAdminTest extends TestCase {
 
 		$result = $this->actions()->save_plan(
 			array(
-				'plan_name' => 'Karobar',
+				'plan_name' => 'Another product',
 				'packages'  => array( $this->package_row( 'Yearly', array(), array(), array( 'price' => '1234,50', 'signup_fee' => '10,25' ) ) ),
 			)
 		);
