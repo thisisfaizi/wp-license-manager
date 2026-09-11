@@ -110,7 +110,7 @@ This release fixes billing and licensing correctness. The problems were found by
   - a failed fulfilment adds an order note and stays retryable (set the order to Processing or Completed again);
   - a retry never issues a second licence for an item already issued.
 - The package editor had no "Valid for (days)" field, so saving a plan erased a one-time package's validity (F12).
-- A licence that ran out was marked `expired` without firing `wplm_license_status_changed`, so the `license.expired` webhook and add-ons listening for it (e.g. Karobar's AI-key switch) never heard. It matters more now that expiry, not suspension, is how an unpaid licence ends. It fires once.
+- A licence that ran out was marked `expired` without firing `wplm_license_status_changed`, so the `license.expired` webhook and add-ons listening for it never heard. It matters more now that expiry, not suspension, is how an unpaid licence ends. It fires once.
 - Admin deactivation by machine id and zombie culling decremented the seat count instead of recomputing it. Deactivating an already inactive device is now a no-op.
 - The schema upgrade ran only on `admin_init`. It now also runs on REST and cron requests, so a licence server updated without anyone opening wp-admin still migrates.
 

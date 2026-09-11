@@ -267,8 +267,8 @@ class ContractFixtures {
 			),
 			array(
 				'name'        => 'wrong_product',
-				'description' => 'Correctly signed, but for another product (pid "karobar"). Rejected.',
-				'token'       => $token( array( $base_ok ), array( 'inject' => array( 'pid' => 'karobar' ) ) ),
+				'description' => 'Correctly signed, but for another product (pid "other-product"). Rejected.',
+				'token'       => $token( array( $base_ok ), array( 'inject' => array( 'pid' => 'other-product' ) ) ),
 				'expect'      => array(
 					'accepted' => false,
 					'why'      => 'pid is not super-ledger',
