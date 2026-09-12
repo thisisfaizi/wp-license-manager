@@ -101,6 +101,41 @@ class EntitlementCheckoutTest extends TestCase {
 		$this->assertNull( $lines[0]->subscription_id );
 	}
 
+	public function test_a_paid_but_unconfirmed_order_issues_nothing_until_it_is_completed(): void {
+		$plan     = $this->create_plan( array( $this->pos_lifetime() ), array( 'profile' => 'acme-office' ) );
+		$product  = $this->create_plan_product( $plan['plan_id'] );
+		$customer = $this->create_customer();
+
+		$order   = wc_create_order( array( 'customer_id' => $customer ) );
+		$item_id = $order->add_product( $product, 1 );
+		$item    = $order->get_item( $item_id );
+		$item->add_meta_data( '_wplm_package_id', $plan['packages'][0]->id, true );
+		$item->save();
+		$order->set_billing_email( 'customer' . $customer . '@example.org' );
+		$order->calculate_totals();
+		$order->save();
+
+		// Payment taken, but the shop has not confirmed the order yet.
+		$order->update_status( 'processing' );
+
+		$order = wc_get_order( $order->get_id() );
+		$this->assertSame( '', (string) $order->get_meta( '_wplm_plan_fulfilled' ), 'Processing must not fulfil.' );
+		foreach ( $order->get_items() as $line ) {
+			$this->assertSame( '', (string) $line->get_meta( '_wplm_license_ids' ), 'No key may be issued on Processing.' );
+		}
+
+		$order->update_status( 'completed' );
+
+		$order      = wc_get_order( $order->get_id() );
+		$license_id = 0;
+		foreach ( $order->get_items() as $line ) {
+			$ids        = json_decode( (string) $line->get_meta( '_wplm_license_ids' ), true );
+			$license_id = (int) ( $ids[0] ?? 0 );
+		}
+		$this->assertGreaterThan( 0, $license_id, 'Completing the order issues the key.' );
+		$this->assertCount( 1, $this->lines( $license_id ) );
+	}
+
 	public function test_a_retried_fulfilment_does_not_write_the_lines_twice(): void {
 		$bought = $this->buy_profile( $this->pos_lifetime() );
 		$order  = $bought['order'];
