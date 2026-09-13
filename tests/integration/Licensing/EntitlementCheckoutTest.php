@@ -66,6 +66,22 @@ class EntitlementCheckoutTest extends TestCase {
 		return $this->make( EntitlementService::class )->lines( $license_id );
 	}
 
+	/**
+	 * What WooCommerce prints below the order table of the customer's completed-order email.
+	 *
+	 * Rendered directly rather than by sending: WooCommerce attaches each email's trigger once, in
+	 * a constructor, and WP_UnitTestCase's hook-table restore strips those between tests while the
+	 * mailer singleton refuses to build again — so a suite run sends nothing. What is under test
+	 * here is what WPLM contributes to that email, not WooCommerce's ability to post it.
+	 */
+	private function completed_order_email_body( \WC_Order $order ): string {
+		$email = new \WC_Email_Customer_Completed_Order();
+
+		ob_start();
+		do_action( 'woocommerce_email_after_order_table', $order, false, false, $email );
+		return (string) ob_get_clean();
+	}
+
 	public function test_a_monthly_plan_writes_its_lines_paid_through_the_day_before_next_payment(): void {
 		update_option( 'timezone_string', 'Asia/Karachi' );
 		$bought  = $this->buy_profile( $this->monthly_distribution() );
@@ -99,6 +115,29 @@ class EntitlementCheckoutTest extends TestCase {
 		$this->assertSame( 'pos', $lines[0]->code );
 		$this->assertNull( $lines[0]->paid_through );
 		$this->assertNull( $lines[0]->subscription_id );
+	}
+
+	public function test_the_key_reaches_the_customer_in_the_completed_order_email(): void {
+		$mail = array();
+		add_filter(
+			'wp_mail',
+			static function ( $args ) use ( &$mail ) {
+				$mail[] = $args;
+				return $args;
+			}
+		);
+
+		$bought = $this->buy_profile( $this->pos_lifetime() );
+		$key    = $this->make( LicenseService::class )->get_by_id( $bought['license_id'] )->license_key;
+
+		$this->assertStringContainsString(
+			$key,
+			$this->completed_order_email_body( $bought['order'] ),
+			'The customer finds the key in the email they actually open, not a separate one.'
+		);
+
+		$separate = array_filter( $mail, static fn( $sent ) => false !== strpos( (string) ( $sent['subject'] ?? '' ), 'License Keys' ) );
+		$this->assertEmpty( $separate, 'And there is no second plain-text key email.' );
 	}
 
 	public function test_a_paid_but_unconfirmed_order_issues_nothing_until_it_is_completed(): void {

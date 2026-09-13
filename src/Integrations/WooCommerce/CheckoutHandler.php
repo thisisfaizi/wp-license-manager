@@ -45,13 +45,10 @@ class CheckoutHandler {
 
 	/** Register WooCommerce order hooks. */
 	public function register(): void {
-		add_action( 'woocommerce_order_status_completed', array( $this, 'handle_order_completed' ), 10, 1 );
+		// Priority 5: WooCommerce sends the completed-order email on this same hook at 10, and that
+		// email now carries the keys (see OrderEmailKeys), so they must exist before it renders.
+		add_action( 'woocommerce_order_status_completed', array( $this, 'handle_order_completed' ), 5, 1 );
 		add_action( 'woocommerce_order_status_refunded', array( $this, 'handle_order_refunded' ), 10, 1 );
-
-		// Single delivery path for ALL issuance routes (standard products here
-		// AND plan/package products via PlanCheckout), so every purchase emails
-		// its keys exactly once.
-		add_action( 'wplm_order_licenses_issued', array( $this, 'deliver_license_email' ), 10, 2 );
 
 		// Force account creation at checkout when the cart contains a licensed
 		// or plan product, so every license is bound to a real account.
@@ -112,31 +109,6 @@ class CheckoutHandler {
 		}
 
 		return false;
-	}
-
-	/**
-	 * Email the issued license keys to the customer, exactly once per order.
-	 *
-	 * Hooked to wplm_order_licenses_issued, which both CheckoutHandler and
-	 * PlanCheckout fire, so plan/package purchases are covered too.
-	 *
-	 * @param int                    $order_id Order id.
-	 * @param \WPLM\Models\License[] $licenses Issued license models (plaintext key).
-	 */
-	public function deliver_license_email( int $order_id, array $licenses ): void {
-		if ( empty( $licenses ) ) {
-			return;
-		}
-		$order = wc_get_order( $order_id );
-		if ( ! $order instanceof \WC_Order ) {
-			return;
-		}
-		if ( '1' === $order->get_meta( '_wplm_email_sent' ) ) {
-			return; // Already delivered.
-		}
-		$this->send_license_email( $order, $licenses );
-		$order->update_meta_data( '_wplm_email_sent', '1' );
-		$order->save();
 	}
 
 	// -------------------------------------------------------------------------
@@ -273,45 +245,11 @@ class CheckoutHandler {
 		$order->save();
 
 		if ( ! empty( $licenses_all ) ) {
-			// Email delivery is handled by deliver_license_email(), hooked to
-			// this action, so both standard and plan purchases send once.
+			// The keys reach the customer in WooCommerce's completed-order email
+			// (see OrderEmailKeys); this action is for everything else that reacts
+			// to issuance, such as provisioning an office address.
 			do_action( 'wplm_order_licenses_issued', $order_id, $licenses_all );
 		}
-	}
-
-	// -------------------------------------------------------------------------
-	// License email delivery
-	// -------------------------------------------------------------------------
-
-	/**
-	 * Send the license delivery email to the customer.
-	 *
-	 * @param \WC_Order              $order
-	 * @param \WPLM\Models\License[] $licenses
-	 */
-	public function send_license_email( \WC_Order $order, array $licenses ): void {
-		$lines = array();
-
-		foreach ( $licenses as $license ) {
-			$lines[] = $license->license_key ?? '';
-		}
-
-		/* translators: %s: customer first name */
-		$greeting = sprintf( __( 'Hi %s,', 'wp-license-manager' ), $order->get_billing_first_name() );
-		$intro    = __( 'Thank you for your purchase. Here are your license key(s):', 'wp-license-manager' );
-		$key_list = implode( "\n", $lines );
-		/* translators: %s: store name */
-		$footer = sprintf( __( 'Thank you for choosing %s.', 'wp-license-manager' ), get_bloginfo( 'name' ) );
-
-		$message = implode( "\n\n", array( $greeting, $intro, $key_list, $footer ) );
-
-		$message = apply_filters( 'wplm_email_license_keys', $message, $order, $licenses );
-
-		wp_mail(
-			$order->get_billing_email(),
-			__( 'Your License Keys', 'wp-license-manager' ),
-			$message
-		);
 	}
 
 	// -------------------------------------------------------------------------
