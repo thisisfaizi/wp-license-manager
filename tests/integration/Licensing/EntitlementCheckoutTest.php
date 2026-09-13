@@ -82,6 +82,19 @@ class EntitlementCheckoutTest extends TestCase {
 		return (string) ob_get_clean();
 	}
 
+	/** The bytes of the setup sheet attached to that email, or '' when none is attached. */
+	private function setup_sheet( \WC_Order $order ): string {
+		$attached = apply_filters( 'woocommerce_email_attachments', array(), 'customer_completed_order', $order, null );
+
+		foreach ( (array) $attached as $path ) {
+			if ( is_string( $path ) && file_exists( $path ) ) {
+				return (string) file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+			}
+		}
+
+		return '';
+	}
+
 	public function test_a_monthly_plan_writes_its_lines_paid_through_the_day_before_next_payment(): void {
 		update_option( 'timezone_string', 'Asia/Karachi' );
 		$bought  = $this->buy_profile( $this->monthly_distribution() );
@@ -132,8 +145,16 @@ class EntitlementCheckoutTest extends TestCase {
 
 		$this->assertStringContainsString(
 			$key,
+			$this->setup_sheet( $bought['order'] ),
+			'The key reaches the customer as a PDF attached to the email they actually open.'
+		);
+
+		// A licence key sitting in the body of an email is the thing mail filters and forwarded
+		// threads leak; the body only says the attachment is there.
+		$this->assertStringNotContainsString(
+			$key,
 			$this->completed_order_email_body( $bought['order'] ),
-			'The customer finds the key in the email they actually open, not a separate one.'
+			'The key is not written into the email body.'
 		);
 
 		$separate = array_filter( $mail, static fn( $sent ) => false !== strpos( (string) ( $sent['subject'] ?? '' ), 'License Keys' ) );

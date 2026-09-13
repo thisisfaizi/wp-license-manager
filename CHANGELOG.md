@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.2.4] — 2026-09-13
+
+### Changed
+- **The licence key now travels as a PDF attached to the completed-order email, not as text in the body.**
+  A key in an email body is the thing mail filters inspect and forwarded threads leak, and the one message
+  that carried setup details inline was the one message that never arrived. The body now says only that the
+  attachment is there; the sheet holds the key and whatever else an add-on contributes.
+- New filter `wplm_setup_sheet_sections` (label => value) replaces `wplm_email_order_licence_lines`, which
+  printed into the body.
+
+### Added
+- `WPLM\Support\SetupPdf`, a dependency-free one-page PDF writer using only the fonts every reader has
+  built in — the plugin ships without a `vendor/` directory, and a text sheet needs nothing more. The file is
+  written to the system temp directory, never below `uploads/` where a web server could serve a key, and is
+  deleted when the request that mailed it ends.
+
 ## [1.2.3] — 2026-09-13
 
 ### Changed
