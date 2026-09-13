@@ -46,7 +46,6 @@ class CheckoutHandler {
 	/** Register WooCommerce order hooks. */
 	public function register(): void {
 		add_action( 'woocommerce_order_status_completed', array( $this, 'handle_order_completed' ), 10, 1 );
-		add_action( 'woocommerce_order_status_processing', array( $this, 'handle_order_completed' ), 10, 1 );
 		add_action( 'woocommerce_order_status_refunded', array( $this, 'handle_order_refunded' ), 10, 1 );
 
 		// Single delivery path for ALL issuance routes (standard products here
@@ -141,7 +140,7 @@ class CheckoutHandler {
 	}
 
 	// -------------------------------------------------------------------------
-	// Order completed / processing
+	// Order completed
 	// -------------------------------------------------------------------------
 
 	/**
@@ -162,6 +161,7 @@ class CheckoutHandler {
 		}
 
 		$licenses_all = array();
+		$failed       = 0;
 
 		/** @var \WC_Order_Item_Product $item */
 		foreach ( $order->get_items() as $item ) {
@@ -174,6 +174,11 @@ class CheckoutHandler {
 			// Plan/package-driven items are fulfilled by PlanCheckout — skip them
 			// here so they are not processed twice.
 			if ( $item->get_meta( '_wplm_package_id' ) ) {
+				continue;
+			}
+
+			// Already issued on an earlier attempt: never issue a second key.
+			if ( '' !== (string) $item->get_meta( '_wplm_license_ids' ) ) {
 				continue;
 			}
 
@@ -209,25 +214,46 @@ class CheckoutHandler {
 			// (Recurring subscriptions are handled by PlanCheckout via plans/packages.)
 			$licenses = array();
 
-			for ( $i = 0; $i < $keys_to_issue; $i++ ) {
-				$key_strings = $gen_service->generate_batch( $generator_id, 1 );
+			try {
+				for ( $i = 0; $i < $keys_to_issue; $i++ ) {
+					$key_strings = $gen_service->generate_batch( $generator_id, 1 );
 
-				if ( empty( $key_strings ) ) {
-					continue;
+					if ( empty( $key_strings ) ) {
+						continue;
+					}
+
+					$license = $this->license_service->create(
+						array(
+							'key_string'      => $key_strings[0],
+							'product_id'      => $item->get_product_id(),
+							'order_id'        => $order_id,
+							'user_id'         => $order->get_customer_id(),
+							'max_activations' => $max_activations,
+							'source'          => 3,
+						)
+					);
+
+					$licenses[] = $license;
 				}
+			} catch ( \Throwable $e ) {
+				\WPLM\Support\Logger::error(
+					'CheckoutHandler: issuance failed for order ' . $order_id . ' — ' . $e->getMessage()
+				);
+			}
 
-				$license = $this->license_service->create(
-					array(
-						'key_string'      => $key_strings[0],
-						'product_id'      => $item->get_product_id(),
-						'order_id'        => $order_id,
-						'user_id'         => $order->get_customer_id(),
-						'max_activations' => $max_activations,
-						'source'          => 3,
+			// A licensed line that produced fewer keys than it owes leaves the order
+			// retryable, so a paying customer is never left without a key (audit F10).
+			if ( count( $licenses ) < $keys_to_issue ) {
+				++$failed;
+				$order->add_order_note(
+					sprintf(
+						/* translators: 1: product name, 2: keys issued, 3: keys owed */
+						__( 'WPLM: only %2$d of %3$d keys could be issued for "%1$s". Fix the cause, then set the order to Completed again to retry.', 'wp-license-manager' ),
+						$product->get_name(),
+						count( $licenses ),
+						$keys_to_issue
 					)
 				);
-
-				$licenses[] = $license;
 			}
 
 			if ( ! empty( $licenses ) ) {
@@ -241,7 +267,9 @@ class CheckoutHandler {
 			$licenses_all = array_merge( $licenses_all, $licenses );
 		}
 
-		$order->update_meta_data( '_wplm_keys_delivered', '1' );
+		if ( 0 === $failed ) {
+			$order->update_meta_data( '_wplm_keys_delivered', '1' );
+		}
 		$order->save();
 
 		if ( ! empty( $licenses_all ) ) {

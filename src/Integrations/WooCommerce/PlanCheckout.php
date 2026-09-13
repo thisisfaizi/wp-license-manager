@@ -98,9 +98,9 @@ class PlanCheckout {
 		// Persist the package on the order line item.
 		add_action( 'woocommerce_checkout_create_order_line_item', array( $this, 'save_order_line_item' ), 10, 4 );
 
-		// Fulfilment on payment.
+		// Fulfilment: Completed only. Payment alone (Processing) does not issue a
+		// licence — the shop confirms the order first.
 		add_action( 'woocommerce_order_status_completed', array( $this, 'fulfill_order' ), 10, 1 );
-		add_action( 'woocommerce_order_status_processing', array( $this, 'fulfill_order' ), 10, 1 );
 	}
 
 	// -------------------------------------------------------------------------
@@ -429,7 +429,7 @@ class PlanCheckout {
 				$order->add_order_note(
 					sprintf(
 						/* translators: 1: package name, 2: error message */
-						__( 'WPLM: a licence could not be issued for "%1$s" — %2$s. Fix the cause, then set the order to Processing or Completed again to retry.', 'wp-license-manager' ),
+						__( 'WPLM: a licence could not be issued for "%1$s" — %2$s. Fix the cause, then set the order to Completed again to retry.', 'wp-license-manager' ),
 						$pkg->name,
 						$e->getMessage()
 					)

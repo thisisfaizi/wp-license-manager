@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.2.2] — 2026-09-13
+
+### Changed
+- **Licences are issued when an order is Completed, and no longer when it reaches Processing.** Both the
+  standard and the plan/package path used to fulfil on either status, so a customer paying through a gateway
+  that lands orders in Processing received their key before the shop had confirmed the order. The shop now
+  decides when a key goes out, by marking the order Completed. **A store that leaves paid orders in Processing
+  and never completes them will stop delivering keys** — complete those orders and the keys are issued and
+  emailed as usual.
+
+### Fixed
+- **A standard order that could not issue every key was still marked delivered**, so re-completing it never
+  retried and the customer was left without a key. Issuance now records the failure as an order note, leaves
+  the order retryable (as the plan path already did), and skips line items that already have their keys so a
+  retry never issues a second one.
+
 ## [1.2.1] — 2026-09-12
 
 ### Fixed
