@@ -99,8 +99,10 @@ class PlanCheckout {
 		add_action( 'woocommerce_checkout_create_order_line_item', array( $this, 'save_order_line_item' ), 10, 4 );
 
 		// Fulfilment: Completed only. Payment alone (Processing) does not issue a
-		// licence — the shop confirms the order first.
-		add_action( 'woocommerce_order_status_completed', array( $this, 'fulfill_order' ), 10, 1 );
+		// licence — the shop confirms the order first. Priority 5, because WooCommerce
+		// sends the completed-order email on this hook at 10 and that email carries the
+		// keys: they have to exist before it renders.
+		add_action( 'woocommerce_order_status_completed', array( $this, 'fulfill_order' ), 5, 1 );
 	}
 
 	// -------------------------------------------------------------------------

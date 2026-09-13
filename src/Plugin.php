@@ -502,6 +502,11 @@ final class Plugin {
 			$this->container->make( Repositories\LicenseRepository::class )
 		) )->register();
 
+		// The keys ride in WooCommerce's own completed-order email.
+		( new Integrations\WooCommerce\OrderEmailKeys(
+			$this->container->make( Repositories\LicenseRepository::class )
+		) )->register();
+
 		// Subscription lifecycle emails (created / renewed / payment-failed / cancelled).
 		( new Integrations\WooCommerce\SubscriptionMailer(
 			$this->container->make( Repositories\LicenseRepository::class )
