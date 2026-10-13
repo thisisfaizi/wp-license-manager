@@ -56,6 +56,18 @@ class AddonCheckoutTest extends TestCase {
 						),
 					)
 				),
+				$this->recurring(
+					'Extra seat monthly',
+					'month',
+					1000,
+					array(
+						array(
+							'kind' => 'limit',
+							'code' => 'seats',
+							'qty'  => 1,
+						),
+					)
+				),
 				array(
 					'name'           => 'Assets 30-day pack',
 					'billing_type'   => 'onetime',
@@ -540,18 +552,88 @@ class AddonCheckoutTest extends TestCase {
 		}
 	}
 
-	public function test_a_read_only_base_is_refused_and_grace_is_not(): void {
-		$base = $this->customer_with( 'month' );
+	/** Move every line of a licence to one paid-through date. */
+	private function paid_through( int $license_id, string $date ): void {
 		global $wpdb;
-		$set = static function ( string $date ) use ( $wpdb, $base ): void {
-			$wpdb->update( $wpdb->prefix . 'wplm_entitlements', array( 'paid_through' => $date ), array( 'license_id' => $base['license_id'] ) );
-		};
+		$wpdb->update( $wpdb->prefix . 'wplm_entitlements', array( 'paid_through' => $date ), array( 'license_id' => $license_id ) );
+	}
 
-		$set( EntitlementService::add_period( wp_date( 'Y-m-d' ), -3, 'day' ) );
-		$this->assertTrue( $this->service()->check( $base['license'], $this->addon( 'FBR monthly' ) ), 'In grace the office still works.' );
+	public function test_a_read_only_base_is_refused(): void {
+		$base = $this->customer_with( 'month' );
+		$this->paid_through( $base['license_id'], EntitlementService::add_period( wp_date( 'Y-m-d' ), -60, 'day' ) );
 
-		$set( EntitlementService::add_period( wp_date( 'Y-m-d' ), -60, 'day' ) );
 		$this->assertRefused( 'base_read_only', $this->service()->check( $base['license'], $this->addon( 'FBR monthly' ) ) );
+	}
+
+	/** In grace the plan is overdue: an add-on aligned to it would be paid for again at the next renewal. */
+	public function test_a_plan_in_grace_must_pay_its_renewal_first(): void {
+		$base = $this->customer_with( 'month' );
+		$this->paid_through( $base['license_id'], EntitlementService::add_period( wp_date( 'Y-m-d' ), -3, 'day' ) );
+
+		$refused = $this->service()->check( $base['license'], $this->addon( 'FBR monthly' ) );
+		$this->assertRefused( 'overdue', $refused );
+		$this->assertSame( "Pay your plan's renewal first, then add this.", $refused->get_error_message() );
+
+		$this->paid_through( $base['license_id'], wp_date( 'Y-m-d' ) );
+		$this->assertTrue( $this->service()->check( $base['license'], $this->addon( 'FBR monthly' ) ), 'Paid through today is still paid up.' );
+	}
+
+	public function test_an_on_hold_plan_must_pay_its_renewal_first(): void {
+		$base = $this->customer_with( 'month' );
+		$this->set_row( 'subscriptions', $base['subscription_id'], array( 'status' => 'on-hold' ) );
+
+		$this->assertRefused( 'overdue', $this->service()->check( $base['license'], $this->addon( 'FBR monthly' ) ) );
+	}
+
+	public function test_a_plan_in_trial_takes_addons_after_the_trial(): void {
+		$base = $this->customer_with( 'month' );
+		$this->set_row( 'subscriptions', $base['subscription_id'], array( 'status' => 'trial' ) );
+
+		$refused = $this->service()->check( $base['license'], $this->addon( 'FBR monthly' ) );
+		$this->assertRefused( 'trial', $refused );
+		$this->assertSame( 'Add-ons can be bought after your trial ends.', $refused->get_error_message() );
+	}
+
+	public function test_a_lifetime_licence_is_unaffected_by_the_renewal_rules(): void {
+		$base = $this->customer_with( 'lifetime' );
+
+		$this->assertTrue( $this->service()->check( $base['license'], $this->addon( 'FBR lifetime' ) ) );
+		$this->assertTrue( $this->service()->check( $base['license'], $this->addon( 'Assets 30-day pack' ) ) );
+	}
+
+	public function test_the_product_page_says_why_an_overdue_licence_cannot_take_addons(): void {
+		$overdue = $this->customer_with( 'month' );
+		$this->paid_through( $overdue['license_id'], EntitlementService::add_period( wp_date( 'Y-m-d' ), -3, 'day' ) );
+		wp_set_current_user( $overdue['customer'] );
+		global $product;
+		$product = $this->addon_product;
+
+		$this->assertFalse( $this->checkout()->plan_is_purchasable( true, $this->addon_product ) );
+		ob_start();
+		$this->checkout()->render_addon_notice();
+		$notice = (string) ob_get_clean();
+		$this->assertStringContainsString( 'Pay your plan&#039;s renewal first, then add this.', $notice );
+		$this->assertStringContainsString( strtoupper( substr( $overdue['license']->license_key, -4 ) ), $notice );
+
+		// A second, paid-up licence is offered; the overdue one is listed, disabled, with the reason.
+		$paid = $this->customer_with( 'month' );
+		$this->set_row( 'licenses', $paid['license_id'], array( 'user_id' => $overdue['customer'] ) );
+		ob_start();
+		$this->checkout()->render_package_options();
+		$html = (string) ob_get_clean();
+		$this->assertMatchesRegularExpression( '/<option value="' . $paid['license_id'] . '"\s+selected/', $html );
+		$this->assertMatchesRegularExpression( '/<option value="' . $overdue['license_id'] . '" disabled>[^<]*Pay your plan/', $html );
+	}
+
+	/** Seats and phones are counted by the product; the computers per key stay as they were. */
+	public function test_a_seats_addon_leaves_computers_per_key_unchanged(): void {
+		$base   = $this->customer_with( 'month' );
+		$before = $this->license_row( $base['license_id'] )['max_activations'];
+
+		$this->buy_addon( $this->addon( 'Extra seat monthly' ), $base['customer'], $base['license_id'], 2 );
+
+		$this->assertSame( 2, $this->line( $base['license_id'], 'seats', 'addon' )->qty );
+		$this->assertSame( $before, $this->license_row( $base['license_id'] )['max_activations'] );
 	}
 
 	public function test_a_cancelled_plan_subscription_is_refused(): void {

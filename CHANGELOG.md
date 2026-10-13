@@ -22,7 +22,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     ABCD"). Only the add-on types that fit the chosen licence are shown. `?wplm_license=<id>` preselects a
     licence.
   - **Who can buy:** logged-out visitors see "Log in to add this to your licence." Customers with no
-    licence that can take the add-on are told so. For both, the product is not purchasable.
+    licence that can take the add-on are told why, per licence (for example "Pay your plan's renewal
+    first, then add this."). For both, the product is not purchasable. A customer with several licences
+    sees the ones that cannot take it now listed, disabled, with the reason.
   - **Checks are repeated** on add to cart, in `woocommerce_check_cart_items` (an error stops the checkout),
     and at fulfilment. At fulfilment the licence must belong to the order's customer.
 - **Which add-ons fit which licence.** An add-on type must match how the licence's base module is billed:
@@ -34,7 +36,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   - a licence of another profile;
   - a licence that is suspended, revoked, expired or terminated (active and inactive licences are
     accepted — a licence is *inactive* until its first computer);
-  - no base module, or a read-only one (grace is accepted);
+  - no base module, or a read-only one;
+  - **a recurring add-on while the plan is in trial** ("Add-ons can be bought after your trial ends.")
+    **or overdue** — on hold, or paid through a day before today, i.e. in grace ("Pay your plan's
+    renewal first, then add this."). An add-on aligned to an overdue plan would be paid for again at the
+    very next renewal. Lifetime and one-time add-ons on a lifetime licence have no subscription and are
+    unaffected;
   - an add-on whose modules the licence already has for the same term;
   - a module whose requirement is not met (`Profile::$requires`);
   - more than one of an add-on that grants only modules.
@@ -85,6 +92,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 - `EntitlementRepository::get_by_order()`.
 - `SubscriptionRepository::get_items()`, `add_item()`, `update_item()` and `delete_item()`.
 - `Plan::$kind` / `Plan::is_addon()`, and `Entitlement::$order_id`.
+
+### Known limits
+- **Seats and phones add-ons add to the profile's limits only.** They do not raise "Computers per licence
+  key" (`max_activations`), and they do not fire `wplm_order_licenses_issued`, so nothing listening to it
+  (such as remote-access provisioning) runs.
+- **An overwritten subscription amount drops add-on billing.** A plan switch (`SwitchManager`) or an admin
+  or REST edit that sets `recurring_total` replaces the total the items add up to. An add-on that had
+  joined the subscription keeps renewing with the plan, but is no longer in the amount charged, until an
+  add-on joins or leaves (which itemises the difference again) or the amount is corrected by hand.
+- **Re-completing a refunded add-on order does not add the add-on back.** The refund cleared the item's
+  `_wplm_entitlement_ids`, but the order stays marked fulfilled. Add the lines on the licence screen, or
+  place a new order.
 
 ### Changed
 - **Database 1.2.2.** `wplm_plans.kind` (`standalone` | `addon`, default `standalone`) and

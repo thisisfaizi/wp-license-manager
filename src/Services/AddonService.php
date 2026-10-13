@@ -28,8 +28,9 @@ defined( 'ABSPATH' ) || exit;
  * How long a line lasts follows the add-on's type, which must match how the licence is billed
  * ({@see check()}):
  *
- * - **Recurring** (a monthly licence buys monthly add-ons, a yearly one yearly): the customer pays the
- *   full price now, the line is paid through the same day as the plan, it joins the plan's
+ * - **Recurring** (a monthly licence buys monthly add-ons, a yearly one yearly; not during the plan's
+ *   trial, nor while it is overdue): the customer pays the full price now, the line is paid through the
+ *   same day as the plan, it joins the plan's
  *   subscription (a subscription item, and the recurring total re-derived from the items), and every
  *   renewal extends it with the plan ({@see EntitlementService::extend_subscription_lines()}).
  * - **Lifetime**: for life.
@@ -165,7 +166,8 @@ class AddonService {
 	 * Refused, in order: a package that is not an add-on; another product's licence; a suspended,
 	 * revoked, expired or terminated licence (these three are final). Then: no base module, or a
 	 * read-only one; a subscription that is not active, in trial or on hold; a type that does not match
-	 * the licence's billing; modules the licence already has for the same term; a module whose
+	 * the licence's billing; a recurring add-on while the plan is in trial, or overdue (on hold, or paid
+	 * through a day before today — in grace); modules the licence already has for the same term; a module whose
 	 * requirement ({@see Profile::$requires}) is not met. Last, the filter
 	 * `wplm_addon_eligibility( true|\WP_Error $result, License, Package, Profile, array $summary,
 	 * ?Subscription $subscription )` may refuse (return a `WP_Error`), or reword a refusal; returning
@@ -302,6 +304,60 @@ class AddonService {
 			}
 		}
 		return $targets;
+	}
+
+	/**
+	 * The customer's licences of the plan's profile that no add-on of the plan fits, each with the
+	 * reason to show. The most telling refusal wins: anything but "billed differently" (an overdue plan
+	 * refuses its own monthly add-ons and, being monthly, every lifetime one too).
+	 *
+	 * @param int      $user_id The customer.
+	 * @param Plan     $plan    An add-on plan (with its packages loaded).
+	 * @param int|null $now     Unix time (tests).
+	 * @return array<int, array{license: License, reason: string}> Keyed by licence id.
+	 */
+	public function blocked_targets( int $user_id, Plan $plan, ?int $now = null ): array {
+		if ( $user_id <= 0 || ! $plan->is_addon() || null === $plan->profile ) {
+			return array();
+		}
+		$eligible = $this->eligible_targets( $user_id, $plan, $now );
+		$found    = $this->licenses->get_list(
+			array(
+				'user_id'  => $user_id,
+				'per_page' => 100,
+				'orderby'  => 'id',
+				'order'    => 'ASC',
+			)
+		);
+		$blocked  = array();
+		foreach ( $found['items'] ?? array() as $license ) {
+			if ( $plan->profile !== $license->profile || isset( $eligible[ $license->id ] ) ) {
+				continue;
+			}
+			$reason = null;
+			foreach ( $plan->packages as $package ) {
+				if ( 1 !== (int) $package->status ) {
+					continue;
+				}
+				$result = $this->check( $license, $package, $now );
+				if ( ! is_wp_error( $result ) ) {
+					continue;
+				}
+				if ( null === $reason || 'wplm_addon_billing_mismatch' === $reason->get_error_code() ) {
+					$reason = $result;
+				}
+				if ( 'wplm_addon_billing_mismatch' !== $reason->get_error_code() ) {
+					break;
+				}
+			}
+			if ( null !== $reason ) {
+				$blocked[ $license->id ] = array(
+					'license' => $license,
+					'reason'  => $reason->get_error_message(),
+				);
+			}
+		}
+		return $blocked;
 	}
 
 	// -------------------------------------------------------------------------
@@ -736,6 +792,15 @@ class AddonService {
 							self::schedule( (int) $sub->billing_interval, $sub->billing_period )
 						)
 					);
+				}
+				// A recurring add-on is paid in full now and ends with the plan's paid period. During a
+				// trial that period is the trial, and once the plan is overdue (in grace, on hold) it is
+				// already over: the add-on would be paid for again at the very next renewal.
+				if ( 'trial' === $sub->status ) {
+					return $this->error( 'trial', __( 'Add-ons can be bought after your trial ends.', 'wp-license-manager' ) );
+				}
+				if ( 'on-hold' === $sub->status || null === $billing['paid_through'] || strcmp( (string) $billing['paid_through'], $today ) < 0 ) {
+					return $this->error( 'overdue', __( 'Pay your plan\'s renewal first, then add this.', 'wp-license-manager' ) );
 				}
 				break;
 			case 'lifetime':

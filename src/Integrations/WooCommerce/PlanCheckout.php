@@ -210,6 +210,14 @@ class PlanCheckout {
 				esc_html( ucfirst( AddonService::licence_label( $target['license'] ) ) )
 			);
 		}
+		// Licences that cannot take an add-on now are listed, disabled, with the reason.
+		foreach ( $this->addons()->blocked_targets( get_current_user_id(), $plan ) as $id => $blocked ) {
+			printf(
+				'<option value="%1$d" disabled>%2$s</option>',
+				(int) $id,
+				esc_html( ucfirst( AddonService::licence_label( $blocked['license'] ) ) . ' — ' . $blocked['reason'] )
+			);
+		}
 		echo '</select></p>';
 		echo '<p style="font-weight:600;margin-bottom:8px;">' . esc_html__( 'Choose an add-on', 'wp-license-manager' ) . '</p>';
 
@@ -298,7 +306,16 @@ class PlanCheckout {
 			return;
 		}
 		if ( array() === $this->targets( $user_id, $plan ) ) {
-			echo '<p class="wplm-addon-none woocommerce-info">' . esc_html__( 'None of your licences can take this add-on. Add-ons are added to an active licence billed the same way (monthly, yearly or lifetime).', 'wp-license-manager' ) . '</p>';
+			$blocked = $this->addons()->blocked_targets( $user_id, $plan );
+			if ( array() === $blocked ) {
+				echo '<p class="wplm-addon-none woocommerce-info">' . esc_html__( 'None of your licences can take this add-on. Add-ons are added to an active licence billed the same way (monthly, yearly or lifetime).', 'wp-license-manager' ) . '</p>';
+				return;
+			}
+			echo '<div class="wplm-addon-none woocommerce-info">';
+			foreach ( $blocked as $entry ) {
+				echo '<p style="margin:0 0 4px;">' . esc_html( ucfirst( AddonService::licence_label( $entry['license'] ) ) . ': ' . $entry['reason'] ) . '</p>';
+			}
+			echo '</div>';
 		}
 	}
 
