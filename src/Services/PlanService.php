@@ -226,20 +226,27 @@ class PlanService {
 			$benefits = array_values( array_filter( array_map( 'trim', explode( "\n", $benefits ) ) ) );
 		}
 
+		$recurring = 'recurring' === $type;
+		$days      = isset( $pkg['valid_for_days'] ) && '' !== $pkg['valid_for_days'] ? (int) $pkg['valid_for_days'] : null;
+
+		// Only a recurring type has a schedule, a sign-up fee, a trial or a length, and only a one-time
+		// type has a term. Whatever was posted for the other types — or not posted, since the editor
+		// disables the fields it hides — is reset here, so a stored row never carries a field that
+		// cannot apply to it. A one-time row with no days stays null: it grants for life, as before.
 		return array(
 			'plan_id'          => $plan_id,
 			'name'             => trim( (string) ( $pkg['name'] ?? '' ) ),
 			'billing_type'     => $type,
-			'billing_period'   => $period,
-			'billing_interval' => max( 1, (int) ( $pkg['billing_interval'] ?? 1 ) ),
+			'billing_period'   => $recurring ? $period : 'month',
+			'billing_interval' => $recurring ? max( 1, (int) ( $pkg['billing_interval'] ?? 1 ) ) : 1,
 			'price'            => (float) ( $pkg['price'] ?? 0 ),
-			'signup_fee'       => (float) ( $pkg['signup_fee'] ?? 0 ),
-			'trial_days'       => max( 0, (int) ( $pkg['trial_days'] ?? 0 ) ),
-			'length_cycles'    => max( 0, (int) ( $pkg['length_cycles'] ?? 0 ) ),
+			'signup_fee'       => $recurring ? (float) ( $pkg['signup_fee'] ?? 0 ) : 0.0,
+			'trial_days'       => $recurring ? max( 0, (int) ( $pkg['trial_days'] ?? 0 ) ) : 0,
+			'length_cycles'    => $recurring ? max( 0, (int) ( $pkg['length_cycles'] ?? 0 ) ) : 0,
 			'generator_id'     => ! empty( $pkg['generator_id'] ) ? (int) $pkg['generator_id'] : null,
-			'max_activations'  => isset( $pkg['max_activations'] ) && '' !== $pkg['max_activations'] ? (int) $pkg['max_activations'] : null,
+			'max_activations'  => isset( $pkg['max_activations'] ) && '' !== $pkg['max_activations'] && (int) $pkg['max_activations'] > 0 ? (int) $pkg['max_activations'] : null,
 			'overage_strategy' => (string) ( $pkg['overage_strategy'] ?? 'deny' ),
-			'valid_for_days'   => isset( $pkg['valid_for_days'] ) && '' !== $pkg['valid_for_days'] ? (int) $pkg['valid_for_days'] : null,
+			'valid_for_days'   => 'onetime' === $type && null !== $days && $days > 0 ? $days : null,
 			'grace_days'       => isset( $pkg['grace_days'] ) && '' !== $pkg['grace_days'] ? max( 0, (int) $pkg['grace_days'] ) : null,
 			'benefits'         => array_values( (array) $benefits ),
 			'sort_order'       => $order,

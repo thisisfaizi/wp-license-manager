@@ -206,15 +206,46 @@ final class LapseNoticeService {
 	 * @param string[] $codes Module codes the notice names.
 	 */
 	private function send( string $to, License $license, Profile $profile, array $codes, string $until, string $read_only_on, int $grace ): bool {
-		$whole_product = null !== $profile->base_module && in_array( $profile->base_module, $codes, true );
-		$module_names  = array_map( array( $profile, 'code_label' ), $codes );
-		$read_only     = $this->format_date( $read_only_on );
+		$read_only = $this->format_date( $read_only_on );
 
-		$subject = $whole_product
+		// A profile may word a module's lapse itself (for example a module whose lapse does not make
+		// anything read-only). Such a module gets its own sentence; every other module keeps WPLM's wording.
+		$standard  = array();
+		$sentences = array();
+		foreach ( $codes as $code ) {
+			/**
+			 * Filter the sentence the read-only notice uses for one lapsing module.
+			 *
+			 * Return '' (the default) to keep WPLM's own wording for the module. Return a non-empty plain-text
+			 * sentence to print it instead: the module is then left out of the "will become read-only"
+			 * wording, the subject and the base-module (whole product) check. The text is escaped on output.
+			 *
+			 * @param string  $phrase      '' for WPLM's wording, or the sentence an earlier callback chose.
+			 * @param string  $module_code The lapsing module code.
+			 * @param string  $date        The first read-only day, formatted in the site's date format.
+			 * @param Profile $profile     The licence's profile.
+			 * @param License $license     The licence.
+			 */
+			$phrase = apply_filters( 'wplm_lapse_notice_module_phrase', '', $code, $read_only, $profile, $license );
+			if ( is_string( $phrase ) && '' !== trim( $phrase ) ) {
+				$sentences[] = trim( $phrase );
+			} else {
+				$standard[] = $code;
+			}
+		}
+
+		$whole_product = null !== $profile->base_module && in_array( $profile->base_module, $standard, true );
+		$module_names  = array_map( array( $profile, 'code_label' ), $standard );
+
+		if ( array() === $standard ) {
+			$subject = wp_strip_all_tags( $sentences[0] );
+		} elseif ( $whole_product ) {
 			/* translators: 1: product name, 2: date */
-			? sprintf( __( 'Your %1$s will become read-only on %2$s', 'wp-license-manager' ), $profile->label, $read_only )
+			$subject = sprintf( __( 'Your %1$s will become read-only on %2$s', 'wp-license-manager' ), $profile->label, $read_only );
+		} else {
 			/* translators: 1: module names, 2: product name, 3: date */
-			: sprintf( __( '%1$s in your %2$s will become read-only on %3$s', 'wp-license-manager' ), wp_sprintf_l( '%l', $module_names ), $profile->label, $read_only );
+			$subject = sprintf( __( '%1$s in your %2$s will become read-only on %3$s', 'wp-license-manager' ), wp_sprintf_l( '%l', $module_names ), $profile->label, $read_only );
+		}
 
 		$vars = array(
 			'email_heading'    => $subject,
@@ -222,6 +253,7 @@ final class LapseNoticeService {
 			'product_name'     => $profile->label,
 			'whole_product'    => $whole_product,
 			'module_names'     => $module_names,
+			'module_sentences' => $sentences,
 			'last_working_day' => $this->format_date( EntitlementService::add_period( $until, $grace, 'day' ) ),
 			'read_only_on'     => $read_only,
 			'account_url'      => function_exists( 'wc_get_account_endpoint_url' ) ? wc_get_account_endpoint_url( 'wplm-subscriptions' ) : '',

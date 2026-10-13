@@ -9,7 +9,10 @@
  *   @var \WPLM\Models\License $license
  *   @var string               $product_name      The licence profile's label.
  *   @var bool                 $whole_product     True when the profile's base module lapses (everything goes read-only).
- *   @var string[]             $module_names      Names of the modules the notice is about.
+ *   @var string[]             $module_names      Names of the modules the notice words as going read-only
+ *                                                 (empty when every module has its own sentence).
+ *   @var string[]             $module_sentences  Plain-text sentences a profile chose for the other modules
+ *                                                 (filter `wplm_lapse_notice_module_phrase`).
  *   @var string               $last_working_day  Formatted date: the last day of grace.
  *   @var string               $read_only_on      Formatted date: the first read-only day.
  *   @var string               $account_url       My Account subscriptions page, or ''.
@@ -18,8 +21,11 @@
  */
 
 defined( 'ABSPATH' ) || exit;
+
+$module_sentences = isset( $module_sentences ) ? (array) $module_sentences : array();
 ?>
 
+<?php if ( array() !== $module_names ) : ?>
 <p>
 	<?php
 	if ( $whole_product ) {
@@ -70,6 +76,11 @@ defined( 'ABSPATH' ) || exit;
 	);
 	?>
 </p>
+<?php endif; ?>
+
+<?php foreach ( $module_sentences as $module_sentence ) : ?>
+<p><?php echo esc_html( $module_sentence ); ?></p>
+<?php endforeach; ?>
 
 <?php if ( '' !== $account_url ) : ?>
 <p style="margin-top:16px;">

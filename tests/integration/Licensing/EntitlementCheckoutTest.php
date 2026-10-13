@@ -130,6 +130,99 @@ class EntitlementCheckoutTest extends TestCase {
 		$this->assertNull( $lines[0]->subscription_id );
 	}
 
+	/** A one-time (fixed term) type with days: its lines are paid through the term's last day, today + days − 1. */
+	public function test_a_one_time_plan_with_days_writes_lines_paid_through_its_last_day(): void {
+		update_option( 'timezone_string', 'Asia/Karachi' );
+		$bought = $this->buy_profile(
+			array(
+				'name'           => 'Year pass',
+				'billing_type'   => 'onetime',
+				'valid_for_days' => 30,
+				'price'          => 25000,
+				'entitlements'   => array( array( 'kind' => 'module', 'code' => 'base' ) ),
+			)
+		);
+		$lines  = $this->lines( $bought['license_id'] );
+
+		$this->assertCount( 1, $lines );
+		$this->assertSame( EntitlementService::add_period( wp_date( 'Y-m-d' ), 29, 'day' ), $lines[0]->paid_through );
+		$this->assertNull( $lines[0]->subscription_id );
+		$this->assertSame( 0, $bought['subscription_id'], 'A one-time type is never a subscription.' );
+		$this->assertNull( $this->license_row( $bought['license_id'] )['expires_at'], 'The lines carry the date, not the licence.' );
+	}
+
+	/** The owner's live "Lifetime" row is a one-time type with no days: it keeps granting for life. */
+	public function test_a_one_time_plan_without_days_still_writes_lifetime_lines(): void {
+		$bought = $this->buy_profile(
+			array(
+				'name'         => 'Lifetime',
+				'billing_type' => 'onetime',
+				'price'        => 25000,
+				'entitlements' => array( array( 'kind' => 'module', 'code' => 'base' ) ),
+			)
+		);
+		$lines  = $this->lines( $bought['license_id'] );
+
+		$this->assertCount( 1, $lines );
+		$this->assertNull( $lines[0]->paid_through );
+	}
+
+	public function test_a_blank_computer_limit_issues_the_default_and_a_set_one_is_kept(): void {
+		$blank = $this->buy_profile( $this->pos_lifetime() );
+		$this->assertSame( '1', (string) $this->license_row( $blank['license_id'] )['max_activations'], 'Blank used to mean unlimited.' );
+
+		update_option( 'wplm_default_max_activations', 3 );
+		$default = $this->buy_profile( $this->pos_lifetime() );
+		$this->assertSame( '3', (string) $this->license_row( $default['license_id'] )['max_activations'] );
+
+		update_option( 'wplm_default_max_activations', 0 );
+		$floor = $this->buy_profile( $this->pos_lifetime() );
+		$this->assertSame( '1', (string) $this->license_row( $floor['license_id'] )['max_activations'], 'Never fewer than one.' );
+
+		$set = $this->buy_profile( $this->pos_lifetime() + array( 'max_activations' => 2 ) );
+		$this->assertSame( '2', (string) $this->license_row( $set['license_id'] )['max_activations'] );
+	}
+
+	/** A package saved blank before 1.2.5 (null in the table) also issues the default now. */
+	public function test_a_package_stored_blank_before_the_change_issues_the_default(): void {
+		$plan = $this->create_plan( array( $this->pos_lifetime() ), array( 'profile' => 'acme-office' ) );
+		$this->set_row( 'packages', $plan['packages'][0]->id, array( 'max_activations' => null ) );
+		$package = $this->make( PlanService::class )->get( $plan['plan_id'] )->packages[0];
+		$this->assertNull( $package->max_activations );
+
+		$bought = $this->buy( $this->create_plan_product( $plan['plan_id'] ), $package, $this->create_customer() );
+
+		$this->assertSame( '1', (string) $this->license_row( $bought['license_id'] )['max_activations'] );
+	}
+
+	/** A sign-up fee belongs to recurring types; one stored on an older lifetime row is not charged unseen. */
+	public function test_only_a_recurring_type_charges_a_sign_up_fee(): void {
+		$plan     = $this->create_plan(
+			array(
+				$this->pos_lifetime(),
+				array( 'signup_fee' => 100 ) + $this->monthly_distribution(),
+			),
+			array( 'profile' => 'acme-office' )
+		);
+		$lifetime = $plan['packages'][0];
+		$monthly  = $plan['packages'][1];
+		$this->assertSame( 0.0, $lifetime->signup_fee );
+		$lifetime->signup_fee = 500.0; // As stored by an older version.
+
+		$checkout = new \WPLM\Integrations\WooCommerce\PlanCheckout(
+			$this->make( PlanService::class ),
+			$this->make( \WPLM\Services\GeneratorService::class ),
+			$this->make( LicenseService::class ),
+			$this->make( SubscriptionService::class ),
+			$this->make( EntitlementService::class ),
+			$this->make( \WPLM\Licensing\ProfileRegistry::class )
+		);
+		$amount   = new \ReflectionMethod( $checkout, 'first_payment_amount' );
+
+		$this->assertSame( 60000.0, $amount->invoke( $checkout, $lifetime ) );
+		$this->assertSame( 5100.0, $amount->invoke( $checkout, $monthly ) );
+	}
+
 	public function test_the_key_reaches_the_customer_in_the_completed_order_email(): void {
 		$mail = array();
 		add_filter(

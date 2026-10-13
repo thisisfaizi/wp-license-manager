@@ -72,7 +72,7 @@ class PlanAdminActions {
 		}
 
 		// Check every template against the profile before anything is written.
-		$warnings = array();
+		$warnings = $this->term_warnings( $packages );
 		if ( null !== $profile ) {
 			$grants_base = false;
 			foreach ( $packages as $package ) {
@@ -115,6 +115,27 @@ class PlanAdminActions {
 		}
 
 		return $this->result( true, __( 'Plan saved.', 'wp-license-manager' ), $plan_id, $warnings );
+	}
+
+	/**
+	 * A one-time licence type with no "Valid for (days)" grants for life, exactly like Lifetime. That is
+	 * kept so older rows keep selling what they sold, but it is almost never meant, so it is called out.
+	 *
+	 * @param array[] $packages Rows from {@see package_fields()}.
+	 * @return string[]
+	 */
+	private function term_warnings( array $packages ): array {
+		$warnings = array();
+		foreach ( $packages as $package ) {
+			if ( 'onetime' === $package['billing_type'] && (int) $package['valid_for_days'] < 1 ) {
+				$warnings[] = sprintf(
+					/* translators: %s: licence type name */
+					__( '%s: One-time needs "Valid for (days)"; blank grants for life — choose Lifetime instead.', 'wp-license-manager' ),
+					$package['name']
+				);
+			}
+		}
+		return $warnings;
 	}
 
 	/**

@@ -46,6 +46,16 @@ final class Profile {
 	 */
 	public ?string $base_module;
 
+	/**
+	 * Module codes kept off the licence-type (plan package) checkboxes. They stay valid module codes:
+	 * an admin can still add them to a licence on its edit screen, and a stored template that already
+	 * grants one keeps it. Use it for a module that must only ever be granted per licence (a licence
+	 * type that granted it would grant it to every buyer, for the life of a lifetime type).
+	 *
+	 * @var string[]
+	 */
+	public array $template_excluded_codes = array();
+
 	/** @var array<string, string> */
 	private array $labels;
 
@@ -69,6 +79,30 @@ final class Profile {
 	/** The human name of a module or limit code; the code itself when none is registered. */
 	public function code_label( string $code ): string {
 		return $this->labels[ $code ] ?? $code;
+	}
+
+	/**
+	 * The module codes a licence type (plan package) may offer as checkboxes: every module code except
+	 * {@see $template_excluded_codes}. Validation is unchanged — {@see allows()} still accepts every code.
+	 *
+	 * @return string[]
+	 */
+	public function template_module_codes(): array {
+		$codes = array_values( array_diff( $this->module_codes, $this->template_excluded_codes ) );
+
+		/**
+		 * Filter the module codes a licence type of this profile offers as checkboxes.
+		 *
+		 * Only codes in the profile's module list are kept, so the filter can hide codes, not invent them.
+		 *
+		 * @param string[] $codes   Module codes offered (module_codes minus template_excluded_codes).
+		 * @param Profile  $profile The profile.
+		 */
+		$filtered = apply_filters( 'wplm_profile_template_module_codes', $codes, $this );
+		if ( ! is_array( $filtered ) ) {
+			return $codes;
+		}
+		return array_values( array_intersect( $this->module_codes, array_map( 'strval', $filtered ) ) );
 	}
 
 	/** Whether a line kind + code pair is allowed for this profile. */
