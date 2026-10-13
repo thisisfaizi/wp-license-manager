@@ -6,6 +6,55 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.2.5] — 2026-10-13
+
+### Changed
+- **The plan editor shows only the fields that apply to each licence type.** Recurring shows Every, Period,
+  Sign-up fee, Trial days and Length (cycles); Lifetime shows none of them; One-time, now labelled
+  **"One-time (fixed term)"**, shows "Valid for (days)" instead. Hidden fields are also disabled, so they are
+  not posted. The script runs on load, when a row's type changes, and after "+ Add license type".
+- **The save resets the fields a type cannot use, whether or not they were posted.** A lifetime or one-time
+  package is stored with interval 1, period `month`, sign-up fee 0, trial 0 and length 0. Any type other than
+  one-time is stored with no "Valid for (days)". A limit of 0 is stored blank.
+- **Lifetime and one-time packages no longer charge a sign-up fee.** Before 1.2.5, checkout added a stored
+  sign-up fee to every type, but the storefront showed it only for recurring types. So a lifetime or one-time
+  package that had a fee charged price + fee without showing it. From 1.2.5 that package charges its price
+  only, even if the fee was stored before the upgrade. **If you meant that fee, add it to the price.**
+- **"Valid for (days)" is shown on plans that sell a licence profile too** (it used to be classic-only).
+  Grace stays classic-only.
+- **A profiled one-time package WITH days now expires.** Its licence's lines are paid through
+  `today + days − 1` (the same `paid_through_for()` convention as a recurring period). Before 1.2.5 the
+  editor hid the field on such plans, so in practice they granted for life. Once the date passes, those lines
+  lapse like any dated line, and the read-only email is sent.
+- **A one-time package with no days still grants for life**, exactly as before, so existing rows keep selling
+  what they sold. Saving one shows a warning: "One-time needs 'Valid for (days)'; blank grants for life —
+  choose Lifetime instead."
+- **"Max seats" is now "Computers per licence key".** It is the number of computers that may activate one
+  key, which is not the same as a product's own limits (users, phones…) set in the template box below it.
+- **A package with a blank computer limit now issues the default (Settings → Default Max Activations, at
+  least 1).** Before 1.2.5, licences issued from such a package allowed unlimited computers. The default now
+  applies when the licence is issued, so packages already saved blank are covered without being re-saved.
+  **Existing licences are unchanged — check the Licences list for blank limits.**
+
+### Added
+- **`Profile::$template_excluded_codes`** (`string[]`, default `array()`): module codes kept off the
+  licence-type (package) checkboxes of the plan editor. They are still valid codes. A licence's own screen
+  (EntitlementPanel) still offers them, `Profile::allows()` and template validation still accept them, and a
+  package whose stored template already grants one still shows it, so a re-save does not drop it.
+- **`Profile::template_module_codes(): string[]`**, which returns the module codes the editor offers:
+  `module_codes` minus `template_excluded_codes`, then passed through the filter
+  **`apply_filters( 'wplm_profile_template_module_codes', string[] $codes, Profile $profile )`**. Only codes
+  in the profile's module list survive the filter, so it can hide codes but not add them.
+- **Filter `apply_filters( 'wplm_lapse_notice_module_phrase', string $phrase, string $module_code, string
+  $date, Profile $profile, License $license )`**, applied to each module a read-only notice names:
+  - `$phrase` is `''` (WPLM's own wording). Return a non-empty plain-text sentence to use it instead.
+  - `$date` is the first read-only day, formatted in the site's date format.
+  - A module with its own sentence is left out of the "will become read-only" wording and out of the
+    base-module (whole product) check. Its sentence is printed as its own paragraph (escaped).
+  - When every module in a notice has its own sentence, the email omits the read-only paragraphs, and its
+    subject is the first sentence.
+  - Default output is unchanged.
+
 ## [1.2.4] — 2026-09-13
 
 ### Changed

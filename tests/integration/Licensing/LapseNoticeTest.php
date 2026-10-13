@@ -148,6 +148,56 @@ class LapseNoticeTest extends TestCase {
 		$this->assertStringNotContainsString( 'Distribution', $sent[0]['body'] );
 	}
 
+	public function test_a_profile_can_word_one_modules_lapse_itself(): void {
+		$seen = array();
+		add_filter(
+			'wplm_lapse_notice_module_phrase',
+			static function ( string $phrase, string $code, string $date, $profile, $license ) use ( &$seen ): string {
+				$seen[] = array( $code, $date, $profile instanceof \WPLM\Licensing\Profile ? $profile->code : null, $license instanceof \WPLM\Models\License );
+				return 'pos' === $code ? "Point of Sale updates stop on {$date}. Your sales keep working." : $phrase;
+			},
+			10,
+			5
+		);
+		$this->licence(
+			array(
+				'base' => $this->day( 30 ),
+				'pos'  => self::TODAY,
+			)
+		);
+
+		$this->assertSame( 1, $this->notices()->run( self::NOW ) );
+
+		$this->assertSame( array( array( 'pos', '2026-09-19', 'acme-office', true ) ), $seen );
+		$sent = $this->sent();
+		$this->assertSame( 'Point of Sale updates stop on 2026-09-19. Your sales keep working.', $sent[0]['subject'] );
+		$this->assertStringContainsString( 'Your sales keep working.', $sent[0]['body'] );
+		$this->assertStringNotContainsString( 'read-only', $sent[0]['body'], 'No read-only wording for a module the profile worded itself.' );
+	}
+
+	public function test_a_worded_module_beside_a_standard_one_keeps_the_standard_wording_for_the_other(): void {
+		add_filter(
+			'wplm_lapse_notice_module_phrase',
+			static fn( string $phrase, string $code ): string => 'pos' === $code ? 'Point of Sale <b>updates</b> stop.' : $phrase,
+			10,
+			2
+		);
+		$this->licence(
+			array(
+				'base' => self::TODAY,
+				'pos'  => self::TODAY,
+			)
+		);
+
+		$this->notices()->run( self::NOW );
+
+		$sent = $this->sent();
+		$this->assertCount( 1, $sent );
+		$this->assertSame( 'Your Acme Office will become read-only on 2026-09-19', $sent[0]['subject'] );
+		$this->assertStringContainsString( 'Point of Sale &lt;b&gt;updates&lt;/b&gt; stop.', $sent[0]['body'], 'The sentence is escaped.' );
+		$this->assertStringContainsString( 'nothing is deleted', strtolower( $sent[0]['body'] ) );
+	}
+
 	/** Only the profile's own base module is worded as the whole product. */
 	public function test_without_a_base_module_every_lapse_names_its_modules(): void {
 		$this->licence( array( 'base' => self::TODAY ) );

@@ -483,8 +483,13 @@ class PlanCheckout {
 		}
 
 		// All subscription/licence dates are UTC; current_time( 'mysql' ) is site-local (audit F7).
-		$now     = gmdate( 'Y-m-d H:i:s' );
-		$max_act = $pkg->max_activations;
+		$now = gmdate( 'Y-m-d H:i:s' );
+
+		// A package with no limit issues the default number of computers (Settings, at least 1). Before
+		// 1.2.5 a blank limit issued an unlimited licence; licences already issued keep what they have.
+		$max_act = null !== $pkg->max_activations && $pkg->max_activations > 0
+			? $pkg->max_activations
+			: max( 1, (int) get_option( 'wplm_default_max_activations', 1 ) );
 		$sub_id  = 0;
 		$expires = null;
 		$status  = 'active';
@@ -645,15 +650,19 @@ class PlanCheckout {
 	}
 
 	/**
-	 * First-order amount: sign-up fee + (trial ? 0 : price). Lifetime/one-time
-	 * charge the full price.
+	 * First-order amount: sign-up fee + (trial ? 0 : price) for a recurring package. Lifetime and
+	 * one-time packages charge their price only: they have no sign-up fee (the plan editor hides it and
+	 * the save resets it), and a fee stored on an older row is ignored rather than charged unseen.
 	 *
 	 * @param Package $pkg Package.
 	 * @return float
 	 */
 	private function first_payment_amount( Package $pkg ): float {
+		if ( ! $pkg->is_recurring() ) {
+			return $pkg->price;
+		}
 		$amount = $pkg->signup_fee;
-		if ( $pkg->is_recurring() && $pkg->trial_days > 0 ) {
+		if ( $pkg->trial_days > 0 ) {
 			return $amount; // Trial: only the sign-up fee now.
 		}
 		return $amount + $pkg->price;
