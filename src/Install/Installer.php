@@ -409,6 +409,7 @@ class Installer {
   name VARCHAR(191) NOT NULL,
   description TEXT DEFAULT NULL,
   profile VARCHAR(40) DEFAULT NULL,
+  kind VARCHAR(20) NOT NULL DEFAULT 'standalone',
   status TINYINT NOT NULL DEFAULT 1,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL,
@@ -444,7 +445,8 @@ class Installer {
 ) ENGINE=InnoDB {$charset_collate};",
 
 			// 17 — entitlements (what a profile licence grants: module lines and limit lines;
-			// paid_through is the inclusive last paid day, NULL = lifetime)
+			// paid_through is the inclusive last paid day, NULL = lifetime; order_id is the order that
+			// added an add-on line to an existing licence, so a refund can take exactly those lines back)
 			"CREATE TABLE {$p}entitlements (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   license_id BIGINT NOT NULL,
@@ -454,11 +456,13 @@ class Installer {
   paid_through DATE DEFAULT NULL,
   source VARCHAR(10) NOT NULL DEFAULT 'manual',
   subscription_id BIGINT DEFAULT NULL,
+  order_id BIGINT DEFAULT NULL,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL,
   PRIMARY KEY  (id),
   KEY license_id (license_id),
-  KEY subscription_id (subscription_id)
+  KEY subscription_id (subscription_id),
+  KEY order_id (order_id)
 ) ENGINE=InnoDB {$charset_collate};",
 		);
 	}

@@ -11,6 +11,7 @@ defined( 'ABSPATH' ) || exit;
 
 use WPLM\Licensing\ProfileRegistry;
 use WPLM\Models\Entitlement;
+use WPLM\Models\Plan;
 use WPLM\Services\EntitlementService;
 use WPLM\Services\PlanService;
 
@@ -41,7 +42,8 @@ class PlanAdminActions {
 	 * Create or update a plan and its packages from the editor.
 	 *
 	 * @param array $post Unslashed form fields: plan_id, plan_name, plan_description, plan_status,
-	 *                    plan_profile, packages[] (each with entitlements[modules][] and
+	 *                    plan_profile, plan_addon (checkbox: the plan sells add-ons to an existing
+	 *                    licence), packages[] (each with entitlements[modules][] and
 	 *                    entitlements[limits][code]).
 	 * @return array{ok: bool, message: string, plan_id: int, warnings: string[]}
 	 */
@@ -57,6 +59,10 @@ class PlanAdminActions {
 		if ( '' !== $code && null === $profile ) {
 			/* translators: %s: profile code */
 			return $this->result( false, sprintf( __( 'Unknown licence type "%s".', 'wp-license-manager' ), $code ), $plan_id );
+		}
+		$addon = ! empty( $post['plan_addon'] );
+		if ( $addon && null === $profile ) {
+			return $this->result( false, __( 'An add-on plan adds modules and limits to a customer\'s existing licence, so it needs a licence type with modules and limits. Choose one, or untick "This plan sells add-ons to an existing licence".', 'wp-license-manager' ), $plan_id );
 		}
 
 		$packages = array();
@@ -82,11 +88,21 @@ class PlanAdminActions {
 					/* translators: 1: licence type name, 2: reason */
 					return $this->result( false, sprintf( __( '%1$s: %2$s', 'wp-license-manager' ), $package['name'], $e->getMessage() ), $plan_id );
 				}
+				$package_grants_base = false;
 				foreach ( $lines as $line ) {
-					$grants_base = $grants_base || ( Entitlement::KIND_MODULE === $line['kind'] && $profile->base_module === $line['code'] );
+					$package_grants_base = $package_grants_base || ( Entitlement::KIND_MODULE === $line['kind'] && $profile->base_module === $line['code'] );
+				}
+				$grants_base = $grants_base || $package_grants_base;
+				if ( $addon && $package_grants_base ) {
+					$warnings[] = sprintf(
+						/* translators: 1: licence type name, 2: base module name */
+						__( '%1$s grants %2$s. An add-on is added to a licence that already has %2$s; %2$s belongs on the plan that sells the licence.', 'wp-license-manager' ),
+						$package['name'],
+						$profile->code_label( (string) $profile->base_module )
+					);
 				}
 			}
-			if ( null !== $profile->base_module && ! $grants_base ) {
+			if ( ! $addon && null !== $profile->base_module && ! $grants_base ) {
 				$warnings[] = sprintf(
 					/* translators: 1: base module name, 2: product name */
 					__( 'No licence type in this plan grants %1$s. That is right for an add-on plan, but a customer who buys only this plan cannot use %2$s.', 'wp-license-manager' ),
@@ -101,6 +117,7 @@ class PlanAdminActions {
 			'description' => sanitize_textarea_field( (string) ( $post['plan_description'] ?? '' ) ),
 			'status'      => empty( $post['plan_status'] ) ? 0 : 1,
 			'profile'     => null !== $profile ? $profile->code : null,
+			'kind'        => $addon ? Plan::KIND_ADDON : Plan::KIND_STANDALONE,
 		);
 
 		try {

@@ -432,4 +432,136 @@ class PlanAdminTest extends TestCase {
 		$this->assertStringNotContainsString( 'value="fbr"', $this->row_html( $html, 1 ) );
 		$this->assertStringNotContainsString( 'packages[__INDEX__][entitlements][modules][]" value="fbr"', $html );
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Add-on plans (1.2.6)
+	// ---------------------------------------------------------------------------------------------
+
+	public function test_an_addon_plan_is_saved_as_one_with_no_base_warning_and_no_key_fields(): void {
+		$result = $this->actions()->save_plan(
+			array(
+				'plan_name'    => 'Acme add-ons',
+				'plan_profile' => 'acme-office',
+				'plan_addon'   => '1',
+				'packages'     => array(
+					$this->package_row(
+						'FBR monthly',
+						array( 'fbr' ),
+						array(),
+						array(
+							'signup_fee'      => '500',
+							'trial_days'      => '14',
+							'length_cycles'   => '12',
+							'generator_id'    => '3',
+							'max_activations' => '5',
+							'grace_days'      => '9',
+						)
+					),
+				),
+			)
+		);
+
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$this->assertSame( array(), $result['warnings'], 'An add-on plan is not expected to grant base.' );
+		$plan = $this->make( PlanService::class )->get( $result['plan_id'] );
+		$this->assertTrue( $plan->is_addon() );
+		$this->assertSame( 'addon', $plan->kind );
+
+		$fbr = $this->packages( $result['plan_id'] )['FBR monthly'];
+		$this->assertSame( 0.0, $fbr->signup_fee, 'Paid in full now: no sign-up fee.' );
+		$this->assertSame( 0, $fbr->trial_days );
+		$this->assertSame( 0, $fbr->length_cycles );
+		$this->assertNull( $fbr->generator_id, 'No key is issued.' );
+		$this->assertNull( $fbr->max_activations );
+		$this->assertNull( $fbr->grace_days );
+		$this->assertSame( 'month', $fbr->billing_period, 'Its schedule is kept: it must match the plan it joins.' );
+	}
+
+	public function test_an_addon_type_that_grants_base_is_saved_with_a_warning(): void {
+		$result = $this->actions()->save_plan(
+			array(
+				'plan_name'    => 'Acme add-ons',
+				'plan_profile' => 'acme-office',
+				'plan_addon'   => '1',
+				'packages'     => array( $this->package_row( 'Oops', array( 'base', 'fbr' ) ) ),
+			)
+		);
+
+		$this->assertTrue( $result['ok'] );
+		$this->assertCount( 1, $result['warnings'] );
+		$this->assertStringContainsString( 'Oops grants Base (accounting)', $result['warnings'][0] );
+	}
+
+	public function test_an_addon_plan_needs_a_profile(): void {
+		$result = $this->actions()->save_plan(
+			array(
+				'plan_name'  => 'Classic add-ons',
+				'plan_addon' => '1',
+				'packages'   => array( $this->package_row( 'Thing', array() ) ),
+			)
+		);
+
+		$this->assertFalse( $result['ok'] );
+		$this->assertSame( 0, $result['plan_id'], 'Nothing was saved.' );
+
+		$this->expectException( \InvalidArgumentException::class );
+		$this->make( PlanService::class )->create_plan(
+			array(
+				'name' => 'Classic add-ons',
+				'kind' => 'addon',
+			)
+		);
+	}
+
+	public function test_a_plan_saved_before_kinds_existed_reads_as_standalone(): void {
+		$result = $this->actions()->save_plan(
+			array(
+				'plan_name'    => 'Acme Office',
+				'plan_profile' => 'acme-office',
+				'packages'     => array( $this->package_row( 'Monthly', array( 'base' ) ) ),
+			)
+		);
+
+		$plan = $this->make( PlanService::class )->get( $result['plan_id'] );
+		$this->assertFalse( $plan->is_addon() );
+		$this->assertSame( 'standalone', $plan->kind );
+	}
+
+	public function test_the_editor_hides_key_fields_on_an_addon_plan_and_offers_every_module(): void {
+		$addon = $this->actions()->save_plan(
+			array(
+				'plan_name'    => 'Acme add-ons',
+				'plan_profile' => 'acme-office',
+				'plan_addon'   => '1',
+				'packages'     => array( $this->package_row( 'FBR monthly', array( 'fbr' ) ) ),
+			)
+		);
+		$plain = $this->actions()->save_plan(
+			array(
+				'plan_name'    => 'Acme Office',
+				'plan_profile' => 'acme-office',
+				'packages'     => array( $this->package_row( 'Monthly', array( 'base' ) ) ),
+			)
+		);
+		add_filter(
+			'wplm_profile_template_module_codes',
+			static fn( array $codes ) => array_values( array_diff( $codes, array( 'assets' ) ) )
+		);
+
+		$html = $this->editor( $addon['plan_id'] );
+		$row  = $this->row_html( $html, 0 );
+		$this->assertMatchesRegularExpression( '/name="plan_addon"[^>]*checked/', $html );
+		$this->assertStringContainsString( 'This plan sells add-ons to an existing licence', $html );
+		$this->assertMatchesRegularExpression( '/data-wplm-standalone-only\s*hidden>\s*<label>[^<]*<br>\s*<select[^>]*name="packages\[0\]\[generator_id\]"[^>]*disabled/', $row, 'No generator: no key is issued.' );
+		$this->assertMatchesRegularExpression( '/name="packages\[0\]\[max_activations\]"[^>]*disabled/', $row, 'No computers per key.' );
+		foreach ( array( 'signup_fee', 'trial_days', 'length_cycles' ) as $field ) {
+			$this->assertMatchesRegularExpression( '/name="packages\[0\]\[' . $field . '\]"[^>]*disabled/', $row, "No {$field}." );
+		}
+		$this->assertMatchesRegularExpression( '/name="packages\[0\]\[billing_period\]"(?![^>]*disabled)/', $row, 'The schedule stays: it must match the plan.' );
+		$this->assertStringContainsString( '[entitlements][modules][]" value="assets"', $row, 'An add-on may sell a module kept off licence types.' );
+
+		$plain_html = $this->editor( $plain['plan_id'] );
+		$this->assertStringNotContainsString( '[entitlements][modules][]" value="assets"', $plain_html );
+		$this->assertMatchesRegularExpression( '/name="packages\[0\]\[generator_id\]"(?![^>]*disabled)/', $this->row_html( $plain_html, 0 ) );
+	}
 }

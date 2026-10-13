@@ -112,7 +112,8 @@ class PlanListTable extends \WP_List_Table {
 			'delete' => '<a href="' . esc_url( $delete_url ) . '" style="color:#d63638;" onclick="return confirm(\'' . esc_js( __( 'Delete this plan and all its license types?', 'wp-license-manager' ) ) . '\');">' . esc_html__( 'Delete', 'wp-license-manager' ) . '</a>',
 		);
 
-		return '<strong><a href="' . esc_url( $edit_url ) . '">' . esc_html( $item->name ) . '</a></strong>' . $this->row_actions( $actions );
+		$kind = $item->is_addon() ? ' <span class="description">(' . esc_html__( 'add-ons', 'wp-license-manager' ) . ')</span>' : '';
+		return '<strong><a href="' . esc_url( $edit_url ) . '">' . esc_html( $item->name ) . '</a></strong>' . $kind . $this->row_actions( $actions );
 	}
 
 	/** Load plans into the table. */
@@ -188,6 +189,7 @@ class PlanListTable extends \WP_List_Table {
 		$packages   = $plan ? $plan->packages : array();
 		$generators = $this->generator_repo->get_all();
 		$profile    = $plan ? $this->profiles->get( $plan->profile ) : null;
+		$addon      = null !== $plan && $plan->is_addon();
 		?>
 		<div class="wrap">
 			<h1><?php echo esc_html( $id > 0 ? __( 'Edit Plan', 'wp-license-manager' ) : __( 'Add Plan', 'wp-license-manager' ) ); ?></h1>
@@ -222,6 +224,13 @@ class PlanListTable extends \WP_List_Table {
 							<p class="description"><?php esc_html_e( 'A plan that sells modules and limits gives each licence type the modules it grants and the users, seats and phones it adds. A purchase writes them onto the customer\'s licence; a renewal extends them. Changing this affects future purchases only.', 'wp-license-manager' ); ?></p>
 						</td>
 					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Add-ons', 'wp-license-manager' ); ?></th>
+						<td>
+							<label><input type="checkbox" name="plan_addon" id="wplm_plan_addon" value="1" <?php checked( $addon ); ?>> <?php esc_html_e( 'This plan sells add-ons to an existing licence', 'wp-license-manager' ); ?></label>
+							<p class="description"><?php esc_html_e( 'The customer picks one of their licences on the product page and the add-on is added to it: no new key. A recurring add-on is paid in full now, ends with the plan\'s paid period and is then billed with the plan; a lifetime add-on is for life; a one-time (fixed term) add-on lasts its "Valid for (days)". Monthly licences are offered monthly add-ons, yearly licences yearly ones, and lifetime licences lifetime and one-time ones. Needs a licence type with modules and limits. Save the plan to see the modules only add-ons may grant.', 'wp-license-manager' ); ?></p>
+						</td>
+					</tr>
 				</table>
 
 				<h2><?php esc_html_e( 'License Types', 'wp-license-manager' ); ?></h2>
@@ -230,12 +239,12 @@ class PlanListTable extends \WP_List_Table {
 				<div id="wplm-packages">
 					<?php
 					if ( empty( $packages ) ) {
-						$this->render_package_row( null, '__INDEX__', $generators, false, $profile );
-						$this->render_package_row( $this->blank_package(), 0, $generators, true, $profile );
+						$this->render_package_row( null, '__INDEX__', $generators, false, $profile, $addon );
+						$this->render_package_row( $this->blank_package(), 0, $generators, true, $profile, $addon );
 					} else {
-						$this->render_package_row( null, '__INDEX__', $generators, false, $profile );
+						$this->render_package_row( null, '__INDEX__', $generators, false, $profile, $addon );
 						foreach ( $packages as $i => $pkg ) {
-							$this->render_package_row( $pkg, $i, $generators, true, $profile );
+							$this->render_package_row( $pkg, $i, $generators, true, $profile, $addon );
 						}
 					}
 					?>
@@ -270,18 +279,32 @@ class PlanListTable extends \WP_List_Table {
 			// Show only the fields that apply to each row's billing type and to the plan's licence profile.
 			// A hidden field is also disabled, so it is not submitted (the server normalises it either way).
 			var select = document.getElementById('wplm_plan_profile');
+			var addonBox = document.getElementById('wplm_plan_addon');
 			function toggle(el, on){
 				el.hidden = !on;
 				el.querySelectorAll('input, select, textarea').forEach(function(i){ i.disabled = !on; });
 			}
+			// A field shows only when every rule it carries holds: its billing type, and (add-on plans)
+			// not being one of the fields an add-on cannot use (generator, computers, grace, sign-up fee,
+			// trial, length).
+			function shows(el, type, addon){
+				var c = el.classList;
+				if ( c.contains('wplm-recurring-only') && 'recurring' !== type ) { return false; }
+				if ( c.contains('wplm-onetime-only') && 'onetime' !== type ) { return false; }
+				if ( el.hasAttribute('data-wplm-standalone-only') && addon ) { return false; }
+				return true;
+			}
 			function applyRow(row){
 				var code = select.value;
+				var addon = !!(addonBox && addonBox.checked);
 				var typeEl = row.querySelector('.wplm-pkg-type');
 				var type = typeEl ? typeEl.value : 'recurring';
-				row.querySelectorAll('.wplm-recurring-only').forEach(function(el){ toggle(el, 'recurring' === type); });
-				row.querySelectorAll('.wplm-onetime-only').forEach(function(el){ toggle(el, 'onetime' === type); });
-				row.querySelectorAll('.wplm-classic-only').forEach(function(el){ el.hidden = '' !== code; });
 				row.querySelectorAll('[data-wplm-profile]').forEach(function(el){ toggle(el, el.getAttribute('data-wplm-profile') === code); });
+				row.querySelectorAll('.wplm-recurring-only, .wplm-onetime-only, [data-wplm-standalone-only]').forEach(function(el){
+					var fieldset = el.closest('[data-wplm-profile]');
+					toggle(el, shows(el, type, addon) && !(fieldset && fieldset.hidden));
+				});
+				row.querySelectorAll('.wplm-classic-only').forEach(function(el){ el.hidden = '' !== code || addon; });
 			}
 			function applyAll(){
 				wrap.querySelectorAll('.wplm-package-row').forEach(applyRow);
@@ -293,6 +316,7 @@ class PlanListTable extends \WP_List_Table {
 				}
 			});
 			select.addEventListener('change', applyAll);
+			if ( addonBox ) { addonBox.addEventListener('change', applyAll); }
 			document.getElementById('wplm-add-package').addEventListener('click', applyAll);
 			applyAll();
 		})();
@@ -313,18 +337,25 @@ class PlanListTable extends \WP_List_Table {
 	 * @param array                     $generators Generator models for the select.
 	 * @param bool                      $visible    Whether this is a real row or the hidden template.
 	 * @param Profile|null              $plan_profile The licence profile the plan sells, if any.
+	 * @param bool                      $addon_plan   Whether the plan sells add-ons to an existing licence.
 	 * @return void
 	 */
-	private function render_package_row( $pkg, $index, array $generators, bool $visible, ?Profile $plan_profile = null ): void {
+	private function render_package_row( $pkg, $index, array $generators, bool $visible, ?Profile $plan_profile = null, bool $addon_plan = false ): void {
 		$p       = $pkg ?: \WPLM\Models\Package::from_row( array() );
 		$f       = 'packages[' . $index . ']';
 		$classic = null === $plan_profile ? '' : ' hidden';
 		// Fields that do not apply to the row's type start hidden and disabled; the inline script keeps
 		// them in step when the type changes. Disabled inputs are not posted.
-		$recurring   = $p->is_recurring();
-		$onetime     = \WPLM\Models\Package::TYPE_ONETIME === $p->billing_type;
-		$rec_attr    = $recurring ? '' : ' hidden';
-		$rec_off     = $recurring ? '' : ' disabled';
+		$recurring = $p->is_recurring();
+		$onetime   = \WPLM\Models\Package::TYPE_ONETIME === $p->billing_type;
+		$rec_attr  = $recurring ? '' : ' hidden';
+		$rec_off   = $recurring ? '' : ' disabled';
+		// Recurring fields an add-on cannot use (sign-up fee, trial, length).
+		$recs_attr = $recurring && ! $addon_plan ? '' : ' hidden';
+		$recs_off  = $recurring && ! $addon_plan ? '' : ' disabled';
+		// Fields only a plan that issues its own key uses (generator, computers).
+		$std_attr    = $addon_plan ? ' hidden' : '';
+		$std_off     = $addon_plan ? ' disabled' : '';
 		$one_attr    = $onetime ? '' : ' hidden';
 		$one_off     = $onetime ? '' : ' disabled';
 		$default_max = max( 1, (int) get_option( 'wplm_default_max_activations', 1 ) );
@@ -367,28 +398,28 @@ class PlanListTable extends \WP_List_Table {
 				</p>
 			</div>
 			<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-top:8px;">
-				<p style="flex:1 1 120px;" class="wplm-recurring-only"<?php echo esc_attr( $rec_attr ); ?>>
+				<p style="flex:1 1 120px;" data-wplm-standalone-only class="wplm-recurring-only"<?php echo esc_attr( $recs_attr ); ?>>
 					<label><?php esc_html_e( 'Sign-up fee', 'wp-license-manager' ); ?><br>
-					<input type="text" class="widefat" name="<?php echo esc_attr( $f ); ?>[signup_fee]" value="<?php echo esc_attr( (string) $p->signup_fee ); ?>"<?php echo esc_attr( $rec_off ); ?>></label>
+					<input type="text" class="widefat" name="<?php echo esc_attr( $f ); ?>[signup_fee]" value="<?php echo esc_attr( (string) $p->signup_fee ); ?>"<?php echo esc_attr( $recs_off ); ?>></label>
 				</p>
-				<p style="flex:1 1 110px;" class="wplm-recurring-only"<?php echo esc_attr( $rec_attr ); ?>>
+				<p style="flex:1 1 110px;" data-wplm-standalone-only class="wplm-recurring-only"<?php echo esc_attr( $recs_attr ); ?>>
 					<label><?php esc_html_e( 'Trial days', 'wp-license-manager' ); ?><br>
-					<input type="number" min="0" class="widefat" name="<?php echo esc_attr( $f ); ?>[trial_days]" value="<?php echo esc_attr( (string) $p->trial_days ); ?>"<?php echo esc_attr( $rec_off ); ?>></label>
+					<input type="number" min="0" class="widefat" name="<?php echo esc_attr( $f ); ?>[trial_days]" value="<?php echo esc_attr( (string) $p->trial_days ); ?>"<?php echo esc_attr( $recs_off ); ?>></label>
 				</p>
-				<p style="flex:1 1 110px;" class="wplm-recurring-only"<?php echo esc_attr( $rec_attr ); ?>>
+				<p style="flex:1 1 110px;" data-wplm-standalone-only class="wplm-recurring-only"<?php echo esc_attr( $recs_attr ); ?>>
 					<label title="<?php esc_attr_e( 'How many periods the subscription runs before it ends. 0 = until cancelled.', 'wp-license-manager' ); ?>"><?php esc_html_e( 'Length (cycles)', 'wp-license-manager' ); ?><br>
-					<input type="number" min="0" class="widefat" name="<?php echo esc_attr( $f ); ?>[length_cycles]" value="<?php echo esc_attr( (string) $p->length_cycles ); ?>"<?php echo esc_attr( $rec_off ); ?>></label>
+					<input type="number" min="0" class="widefat" name="<?php echo esc_attr( $f ); ?>[length_cycles]" value="<?php echo esc_attr( (string) $p->length_cycles ); ?>"<?php echo esc_attr( $recs_off ); ?>></label>
 				</p>
-				<p style="flex:1 1 160px;">
+				<p style="flex:1 1 160px;" data-wplm-standalone-only<?php echo esc_attr( $std_attr ); ?>>
 					<label><?php esc_html_e( 'Generator', 'wp-license-manager' ); ?><br>
-					<select class="widefat" name="<?php echo esc_attr( $f ); ?>[generator_id]">
+					<select class="widefat" name="<?php echo esc_attr( $f ); ?>[generator_id]"<?php echo esc_attr( $std_off ); ?>>
 						<option value=""><?php esc_html_e( '— Plugin default —', 'wp-license-manager' ); ?></option>
 						<?php foreach ( $generators as $g ) : ?>
 							<option value="<?php echo esc_attr( (string) $g->id ); ?>" <?php selected( $g->id, (int) $p->generator_id ); ?>><?php echo esc_html( $g->name . ' (#' . $g->id . ')' ); ?></option>
 						<?php endforeach; ?>
 					</select></label>
 				</p>
-				<p style="flex:1 1 140px;">
+				<p style="flex:1 1 140px;" data-wplm-standalone-only<?php echo esc_attr( $std_attr ); ?>>
 					<?php
 					$max_help = sprintf(
 						/* translators: %d: default number of computers (Settings) */
@@ -397,7 +428,7 @@ class PlanListTable extends \WP_List_Table {
 					);
 					?>
 					<label title="<?php echo esc_attr( $max_help ); ?>"><?php esc_html_e( 'Computers per licence key', 'wp-license-manager' ); ?><br>
-					<input type="number" min="1" class="widefat wplm-pkg-max" name="<?php echo esc_attr( $f ); ?>[max_activations]" placeholder="<?php echo esc_attr( (string) $default_max ); ?>" value="<?php echo esc_attr( null !== $p->max_activations ? (string) $p->max_activations : '' ); ?>" aria-describedby="wplm-max-help-<?php echo esc_attr( (string) $index ); ?>"></label>
+					<input type="number" min="1" class="widefat wplm-pkg-max" name="<?php echo esc_attr( $f ); ?>[max_activations]" placeholder="<?php echo esc_attr( (string) $default_max ); ?>" value="<?php echo esc_attr( null !== $p->max_activations ? (string) $p->max_activations : '' ); ?>"<?php echo esc_attr( $std_off ); ?> aria-describedby="wplm-max-help-<?php echo esc_attr( (string) $index ); ?>"></label>
 					<span class="description" id="wplm-max-help-<?php echo esc_attr( (string) $index ); ?>" style="display:block;font-size:12px;"><?php echo esc_html( $max_help ); ?></span>
 				</p>
 				<p style="flex:1 1 120px;" class="wplm-classic-only"<?php echo esc_attr( $classic ); ?>>
@@ -424,7 +455,12 @@ class PlanListTable extends \WP_List_Table {
 				}
 				// Codes the profile keeps off licence types are not offered — unless this row already grants
 				// one, which stays visible so a re-save does not silently drop it.
-				$offered = $profile->template_module_codes();
+				// A saved add-on plan offers every module: an add-on is added to one customer's licence, never
+				// sold as a licence of its own, so the codes kept off licence types (for example paid updates)
+				// are sold here; the product's own rules decide on what terms. Elsewhere those codes are not
+				// offered — unless this row already grants one, which stays visible so a re-save does not
+				// silently drop it.
+				$offered = $addon_plan ? $profile->module_codes : $profile->template_module_codes();
 				$modules = array_values(
 					array_filter(
 						$profile->module_codes,

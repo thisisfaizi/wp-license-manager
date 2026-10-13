@@ -143,4 +143,40 @@ class MyAccountLicencesTest extends TestCase {
 		$this->assertStringNotContainsString( 'Never', $html );
 		$this->assertStringContainsString( 'view=' . $bound['license']->id, $html );
 	}
+
+	private function list_html( int $customer ): string {
+		wp_set_current_user( $customer );
+		ob_start();
+		$this->account()->render_list( $customer );
+		return (string) ob_get_clean();
+	}
+
+	/** 1.2.6: an entitlement licence links to the add-on product, preselecting itself. */
+	public function test_the_list_offers_add_modules_or_users_when_an_addon_product_exists(): void {
+		$bound = $this->owned();
+		$this->assertStringNotContainsString( 'Add modules or users', $this->list_html( $bound['customer'] ), 'No add-on product yet.' );
+
+		$plan    = $this->create_plan(
+			array(
+				array(
+					'name'         => 'FBR lifetime',
+					'billing_type' => 'lifetime',
+					'price'        => 100,
+					'entitlements' => array( array( 'kind' => 'module', 'code' => 'fbr' ) ),
+				),
+			),
+			array(
+				'profile' => 'acme-office',
+				'kind'    => 'addon',
+			)
+		);
+		$product = $this->create_plan_product( $plan['plan_id'] );
+
+		$html = $this->list_html( $bound['customer'] );
+		$this->assertStringContainsString( 'Add modules or users', $html );
+		$this->assertStringContainsString( esc_url( add_query_arg( 'wplm_license', $bound['license']->id, get_permalink( $product->get_id() ) ) ), $html );
+
+		$this->set_row( 'licenses', $bound['license']->id, array( 'status' => 4 ) );
+		$this->assertStringNotContainsString( 'Add modules or users', $this->list_html( $bound['customer'] ), 'Not on a suspended licence.' );
+	}
 }

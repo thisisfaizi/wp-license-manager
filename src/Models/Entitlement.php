@@ -29,8 +29,10 @@ class Entitlement {
 	public ?string $paid_through = null;
 	public string $source        = 'manual';
 	public ?int $subscription_id = null;
-	public string $created_at    = '';
-	public string $updated_at    = '';
+	/** The order that added this line to an existing licence (add-on purchases), or null. */
+	public ?int $order_id     = null;
+	public string $created_at = '';
+	public string $updated_at = '';
 
 	/** Whether this line never lapses. */
 	public function is_lifetime(): bool {
@@ -53,6 +55,7 @@ class Entitlement {
 		$e->paid_through    = isset( $row['paid_through'] ) && '' !== $row['paid_through'] ? (string) $row['paid_through'] : null;
 		$e->source          = (string) ( $row['source'] ?? 'manual' );
 		$e->subscription_id = isset( $row['subscription_id'] ) && '' !== $row['subscription_id'] ? (int) $row['subscription_id'] : null;
+		$e->order_id        = isset( $row['order_id'] ) && '' !== $row['order_id'] ? (int) $row['order_id'] : null;
 		$e->created_at      = (string) ( $row['created_at'] ?? '' );
 		$e->updated_at      = (string) ( $row['updated_at'] ?? '' );
 		return $e;
@@ -69,6 +72,7 @@ class Entitlement {
 			'paid_through'    => $this->paid_through,
 			'source'          => $this->source,
 			'subscription_id' => $this->subscription_id,
+			'order_id'        => $this->order_id,
 			'created_at'      => $this->created_at,
 			'updated_at'      => $this->updated_at,
 		);

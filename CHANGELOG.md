@@ -6,6 +6,91 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.2.6] — 2026-10-13
+
+### Added
+- **Add-ons for an existing licence.** A plan can now sell add-ons — a module, extra users/seats/phones,
+  or a dated pack — that are **added to a licence the customer already has. No new key is issued.**
+  - **Plan editor:** tick **"This plan sells add-ons to an existing licence"**. It needs a licence profile;
+    a classic (no-profile) add-on plan is refused on save.
+  - **Fields hidden on add-on types:** Generator, Computers per licence key, Grace, Sign-up fee, Trial days
+    and Length. **The save resets them**, whether or not they were posted.
+  - **What add-on plans offer and warn about:** a saved add-on plan offers every module code, including
+    `template_excluded_codes`. It never shows the "no licence type grants Base" warning. It warns when an
+    add-on type does grant the base module.
+  - **Product page:** a logged-in customer picks one of their licences ("Add to licence: licence ending
+    ABCD"). Only the add-on types that fit the chosen licence are shown. `?wplm_license=<id>` preselects a
+    licence.
+  - **Who can buy:** logged-out visitors see "Log in to add this to your licence." Customers with no
+    licence that can take the add-on are told so. For both, the product is not purchasable.
+  - **Checks are repeated** on add to cart, in `woocommerce_check_cart_items` (an error stops the checkout),
+    and at fulfilment. At fulfilment the licence must belong to the order's customer.
+- **Which add-ons fit which licence.** An add-on type must match how the licence's base module is billed:
+  - **Recurring licence:** recurring add-ons with the same period and interval. Monthly licences see
+    monthly add-ons; yearly licences see yearly ones. The subscription must be active, in trial or on hold.
+  - **Lifetime licence:** lifetime and one-time (fixed term) add-ons.
+  - **Fixed-term licence** (dated, no subscription): no add-ons.
+- **Other refusals:**
+  - a licence of another profile;
+  - a licence that is suspended, revoked, expired or terminated (active and inactive licences are
+    accepted — a licence is *inactive* until its first computer);
+  - no base module, or a read-only one (grace is accepted);
+  - an add-on whose modules the licence already has for the same term;
+  - a module whose requirement is not met (`Profile::$requires`);
+  - more than one of an add-on that grants only modules.
+- **What fulfilment writes.** Each add-on line is written with `source = 'addon'` and the `order_id` that
+  bought it. Template limit quantities are multiplied by the item quantity.
+  - **Recurring:** the customer pays the full price now. The line's paid-through date is the plan's own
+    paid-through date. The line joins the plan's subscription: it gets `subscription_id`, the subscription
+    gets an item (`line_total` = price × quantity), and `recurring_total` is **re-derived as the sum of the
+    items, never incremented**. Renewals extend the add-on with the plan
+    (`EntitlementService::extend_subscription_lines()`), and the renewal invoice bills both.
+  - **Lifetime:** the line has no date.
+  - **One-time with days:** the line is paid through `today + days − 1`. **A second pack of the same
+    module stacks**, by the renewal rule. It continues from the end of the latest dated line of that module
+    that no subscription pays for (an earlier pack, or one added by hand) if that line is still inside
+    grace; after grace it starts today. Limit lines do not stack.
+- **How fulfilment marks the order.** The order item is marked `_wplm_entitlement_ids`, plus
+  `_wplm_addon_subscription_item_id` when the add-on is recurring. It never gets `_wplm_license_ids` or
+  `_wplm_subscription_id`: refunds, tunnel provisioning and the order screen read those as "a key was
+  issued here". Fulfilment fires **`do_action( 'wplm_order_addons_applied', int $order_id, array $applied )`**
+  (one `array{license, lines, item_id}` per add-on line), and **never `wplm_order_licenses_issued`**. A
+  failure leaves an order note and the order retryable, as with a licence.
+- **Subscriptions edited by hand stay correct.** Some subscriptions have no items, or an amount someone
+  edited by hand. Before an add-on joins or leaves one, WPLM adds an item marked "adjustment" that covers
+  the difference, so the edited amount is kept.
+- **The completed-order email.** An add-on order says what was added: **"Added to your licence ending
+  ABCD: FBR (paid through …)."** The lines are read by order id, because the order object WooCommerce
+  hands the email predates fulfilment. An order with no new licence attaches no setup sheet. An order that
+  issues a new licence and also adds to an existing one says both.
+- **A full refund takes back exactly what the add-on order added:** its lines and its subscription item,
+  and then the total is re-derived. **The licence is never suspended or revoked** for an add-on refund,
+  and the plan's subscription is not cancelled. Running the refund twice removes nothing more.
+- **Removing an add-on line in admin also removes its billing.** This works on any path, through
+  `wplm_entitlement_deleted`. Once the last line an add-on purchase wrote is gone, its subscription item
+  is removed and the total is re-derived. The licence screen shows each line's source, order and
+  subscription.
+- **My Account → Licenses** shows an **"Add modules or users"** button on each active or inactive
+  entitlement licence when a published product sells add-ons for its profile. The button links to that
+  product with `?wplm_license=<id>`.
+- **`Profile::$requires`** (`array<string, string[]>`, default `array()`): module code ⇒ modules of which
+  the licence (or the same add-on) must have at least one that is not read-only.
+- **Filter `apply_filters( 'wplm_addon_eligibility', true|WP_Error $result, License $license, Package
+  $package, Profile $profile, array $summary, ?Subscription $subscription )`.**
+  - WPLM's own verdict is passed in, refusals included, so a product can reword them.
+  - Return a `WP_Error` to refuse; its message is shown to the customer.
+  - Returning `true` cannot lift WPLM's refusal.
+  - Profile, licence-status and ownership refusals are decided before the filter runs.
+- `EntitlementService::add_lines()` (all lines validated before any is written).
+- `EntitlementRepository::get_by_order()`.
+- `SubscriptionRepository::get_items()`, `add_item()`, `update_item()` and `delete_item()`.
+- `Plan::$kind` / `Plan::is_addon()`, and `Entitlement::$order_id`.
+
+### Changed
+- **Database 1.2.2.** `wplm_plans.kind` (`standalone` | `addon`, default `standalone`) and
+  `wplm_entitlements.order_id` (indexed) are added by dbDelta on the next admin, REST or cron request.
+  Existing plans read as `standalone`; existing lines have no order.
+
 ## [1.2.5] — 2026-10-13
 
 ### Changed

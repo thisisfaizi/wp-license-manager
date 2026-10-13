@@ -207,7 +207,13 @@ class EntitlementPanel {
 			<form id="wplm-line-extend-<?php echo esc_attr( (string) $line->id ); ?>" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 				<?php $this->hidden( $license, 'line_extend', array( 'line_id' => $line->id ) ); ?>
 			</form>
-			<form id="wplm-line-delete-<?php echo esc_attr( (string) $line->id ); ?>" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" onsubmit="return confirm('<?php echo esc_js( __( 'Remove this line? Each computer loses what it grants at its next check-in. Its records are never deleted.', 'wp-license-manager' ) ); ?>');">
+			<?php
+			$confirm = __( 'Remove this line? Each computer loses what it grants at its next check-in. Its records are never deleted.', 'wp-license-manager' );
+			if ( 'addon' === $line->source && null !== $line->subscription_id ) {
+				$confirm .= ' ' . __( 'This add-on is billed with the subscription: removing the last line it added also removes it from the subscription\'s amount.', 'wp-license-manager' );
+			}
+			?>
+			<form id="wplm-line-delete-<?php echo esc_attr( (string) $line->id ); ?>" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" onsubmit="return confirm('<?php echo esc_js( $confirm ); ?>');">
 				<?php $this->hidden( $license, 'line_delete', array( 'line_id' => $line->id ) ); ?>
 			</form>
 		<?php endforeach; ?>
@@ -228,10 +234,18 @@ class EntitlementPanel {
 				<?php
 				$form   = 'wplm-line-' . $line->id;
 				$state  = EntitlementService::module_state( $line->paid_through, $today, $grace );
-				$source = $line->source;
+				$source = array( esc_html( $this->source_label( $line->source ) ) );
+				if ( null !== $line->order_id ) {
+					$order_url = function_exists( 'wc_get_order' ) && wc_get_order( $line->order_id ) ? wc_get_order( $line->order_id )->get_edit_order_url() : '';
+					/* translators: %d: order id */
+					$order_text = esc_html( sprintf( __( 'order #%d', 'wp-license-manager' ), $line->order_id ) );
+					$source[]   = '' !== $order_url ? '<a href="' . esc_url( $order_url ) . '">' . $order_text . '</a>' : $order_text;
+				}
 				if ( null !== $line->subscription_id ) {
-					/* translators: %d: subscription id */
-					$source .= ' · ' . sprintf( __( 'subscription #%d', 'wp-license-manager' ), $line->subscription_id );
+					$source[] = '<a href="' . esc_url( admin_url( 'admin.php?page=wplm-subscriptions&action=edit&id=' . (int) $line->subscription_id ) ) . '">' . esc_html(
+						/* translators: %d: subscription id */
+						sprintf( __( 'subscription #%d', 'wp-license-manager' ), $line->subscription_id )
+					) . '</a>';
 				}
 				?>
 				<tr>
@@ -255,7 +269,7 @@ class EntitlementPanel {
 						</span>
 					</td>
 					<td><span class="wplm-badge is-<?php echo esc_attr( $state ); ?>"><?php echo esc_html( $this->state_label( $state ) ); ?></span></td>
-					<td><?php echo esc_html( $source ); ?></td>
+					<td><?php echo implode( ' · ', $source ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- each part escaped above. ?></td>
 					<td>
 						<span class="wplm-inline">
 							<?php if ( null !== $line->paid_through ) : ?>
@@ -495,6 +509,16 @@ class EntitlementPanel {
 			default:
 				return $by ? ltrim( $by, ' —' ) : '';
 		}
+	}
+
+	/** Label for where a line came from. */
+	private function source_label( string $source ): string {
+		$labels = array(
+			'plan'   => __( 'plan', 'wp-license-manager' ),
+			'addon'  => __( 'add-on', 'wp-license-manager' ),
+			'manual' => __( 'manual', 'wp-license-manager' ),
+		);
+		return $labels[ $source ] ?? $source;
 	}
 
 	/** Label for a module state. */

@@ -264,7 +264,19 @@ final class Plugin {
 				$c->make( Repositories\MachineRepository::class ),
 				$c->make( Licensing\CheckInService::class ),
 				$c->make( Services\EntitlementService::class ),
-				$c->make( Licensing\ProfileRegistry::class )
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Services\AddonService::class )
+			)
+		);
+		$this->container->bind(
+			Services\AddonService::class,
+			fn( $c ) => new Services\AddonService(
+				$c->make( Services\EntitlementService::class ),
+				$c->make( Repositories\EntitlementRepository::class ),
+				$c->make( Repositories\LicenseRepository::class ),
+				$c->make( Services\PlanService::class ),
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Repositories\SubscriptionRepository::class )
 			)
 		);
 		$this->container->bind(
@@ -436,6 +448,9 @@ final class Plugin {
 		// loads secrets lazily, so the site stays up and the owner is told what to fix.
 		add_action( 'admin_notices', array( $this, 'notice_missing_secrets' ) );
 
+		// Removing an add-on line also removes its billing from the subscription, whoever removes it.
+		$this->container->make( Services\AddonService::class )->register();
+
 		// Licence profiles come from add-ons; a deactivated one silently stops its licences' tokens.
 		( new Admin\UnregisteredProfileNotice( $this->container->make( Licensing\ProfileRegistry::class ) ) )->register();
 
@@ -504,7 +519,9 @@ final class Plugin {
 
 		// The keys ride in WooCommerce's own completed-order email.
 		( new Integrations\WooCommerce\OrderEmailKeys(
-			$this->container->make( Repositories\LicenseRepository::class )
+			$this->container->make( Repositories\LicenseRepository::class ),
+			$this->container->make( Repositories\EntitlementRepository::class ),
+			$this->container->make( Licensing\ProfileRegistry::class )
 		) )->register();
 
 		// Subscription lifecycle emails (created / renewed / payment-failed / cancelled).
@@ -519,7 +536,8 @@ final class Plugin {
 			$this->container->make( Services\LicenseService::class ),
 			$this->container->make( Services\Subscriptions\SubscriptionService::class ),
 			$this->container->make( Services\EntitlementService::class ),
-			$this->container->make( Licensing\ProfileRegistry::class )
+			$this->container->make( Licensing\ProfileRegistry::class ),
+			$this->container->make( Services\AddonService::class )
 		) )->register();
 
 		// Customer self-service renewal: create order → pay → license extended on completed.
