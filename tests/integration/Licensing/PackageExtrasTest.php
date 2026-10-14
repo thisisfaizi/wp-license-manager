@@ -2447,6 +2447,45 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( '#' . $factory->id, $this->notes( $order ) );
 	}
 
+	public function test_a_line_retried_beside_another_lines_unrecorded_addons_leaves_them_to_that_line(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		wp_set_current_user( $base['customer'] );
+		foreach ( array( array( 'module:factory' => '1' ), array( 'user' => '2' ) ) as $extras ) {
+			$_POST['wplm_extras']            = $extras;
+			$_POST['wplm_target_license_id'] = (string) $base['license_id'];
+			$this->assertTrue( apply_filters( 'woocommerce_add_to_cart_validation', true, $product->get_id(), 1 ) );
+			$this->assertNotFalse( WC()->cart->add_to_cart( $product->get_id(), 1 ) );
+			unset( $_POST['wplm_extras'], $_POST['wplm_target_license_id'] );
+		}
+		WC()->cart->calculate_totals();
+		$order = new \WC_Order();
+		$order->set_customer_id( $base['customer'] );
+		WC()->checkout()->create_order_line_items( $order, WC()->cart );
+		$order->set_payment_method( 'bacs' );
+		$order->calculate_totals();
+		$order->save();
+		WC()->cart->empty_cart();
+		// The first line fails; the second is written, then the request dies before it is recorded.
+		$this->break_next = true;
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+		$items = array_values( wc_get_order( $order->get_id() )->get_items() );
+		$this->assertNull( $this->line( $base['license_id'], 'factory', 'addon' ) );
+		$users = $this->addon_lines( $base['license_id'], 'users' );
+		$this->assertCount( 1, $users );
+		$this->lose_the_stamp( $items[1] );
+
+		$this->complete_again( $order );
+
+		$order = wc_get_order( $order->get_id() );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'factory' ), 'The first line is written as usual.' );
+		$this->assertSame( array( $users[0]->id ), array_map( static fn( $l ) => $l->id, $this->addon_lines( $base['license_id'], 'users' ) ), 'The second line\'s users kept, once.' );
+		$this->assertSame( wp_json_encode( array( $users[0]->id ) ), (string) \WC_Order_Factory::get_order_item( $items[1]->get_id() )->get_meta( '_wplm_entitlement_ids' ), 'Adopted by their own line.' );
+		$this->assertSame( '1', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertStringNotContainsString( 'cut off part-way', $this->notes( $order ), 'Nobody is told to remove lines that are paid for.' );
+	}
+
 	public function test_refunding_the_order_that_opened_an_unbilled_addons_subscription_does_not_strand_another_order_sold_against_it(): void {
 		$this->add_seat_plan_offer();
 		$product          = $this->addon_product();
@@ -2886,7 +2925,8 @@ class PackageExtrasTest extends TestCase {
 
 		wp_set_current_user( $base['customer'] );
 		$this->assertFalse( $this->validate( $yearly, $product ), 'Its retry will open the add-ons subscription monthly.' );
-		$this->assertStringContainsString( 'not completed yet', $this->first_error() );
+		$this->assertStringContainsString( 'order #' . $first['order']->get_order_number() . ' are still being added', $this->first_error() );
+		$this->assertStringContainsString( 'or contact us', $this->first_error(), 'A completed order cannot be cancelled by the customer.' );
 
 		delete_option( 'wplm_addons_lock_' . $base['license_id'] );
 		$this->complete_again( $first['order'] );

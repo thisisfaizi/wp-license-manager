@@ -207,10 +207,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   **adopted** by the retry, never taken back: when they are exactly what the line adds they are
   recorded on it, any subscription item the attempt did not get to is attached, a pending add-ons
   subscription starts, and nothing is checked or written again — so a retry made while the add-ons
-  renewal is overdue or paused can no longer remove add-ons the customer has and pays for. Lines from
-  an attempt cut off part-way through writing are left as they are and the line is refused with a note
-  naming them, for the owner. Every path: new licence with extras, extras for an existing licence,
-  stored add-ons (`AddonService::adopt_unstamped()`).
+  renewal is overdue or paused can no longer remove add-ons the customer has and pays for. Leftovers
+  another line of the order (still to be recorded, same licence) wrote are left to that line, which
+  adopts them in its turn. Lines from an attempt cut off part-way through writing are left as they are
+  and the line is refused with a note naming them, for the owner. Every path: new licence with extras,
+  extras for an existing licence, stored add-ons (`AddonService::adopt_unstamped()`).
 - **An add-ons subscription's first period starts when its add-ons are written**, not when it was
   opened: a pending one that bills nothing yet gets next payment = now + 1 cycle before its lines are
   dated (`AddonService::open_addons_period()`), so a late retry, or another order joining it, is never
@@ -237,7 +238,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   (pending payment, on hold — a bank transfer awaiting the shop — processing, or completed and awaiting
   a retry; `AddonService::unfulfilled_addons_cycle()`). The product page offers that cycle
   (`cycle_by_license`, `AddonService::offered_cycle()`), and add to cart and checkout refuse the other
-  one, naming the order: "choose the same, or cancel that order first". The order being paid for now
+  one, naming the order: "choose the same, or cancel that order first" (for a completed order still
+  awaiting its add-ons: "choose the same, or contact us"). The fallback form's note under a fixed cycle
+  now says so too. The order being paid for now
   (`order_awaiting_payment`, the order-pay page) does not count. Before, both orders were accepted and
   the second was paid for and could never be added.
 - **One request at a time adds to a licence.** Adding add-ons or extras to an existing licence now

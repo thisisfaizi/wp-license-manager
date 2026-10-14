@@ -326,7 +326,7 @@ class PlanCheckout {
 			);
 		}
 		if ( null !== $forced ) {
-			echo '<br><small>' . esc_html__( 'Billed with the add-ons this licence already pays for.', 'wp-license-manager' ) . '</small>';
+			echo '<br><small>' . esc_html__( 'Billed the way this licence\'s other monthly / yearly add-ons are, or will be once an order not completed yet is.', 'wp-license-manager' ) . '</small>';
 		}
 		echo '</p>';
 	}
@@ -1333,15 +1333,14 @@ class PlanCheckout {
 			// With none yet, an order not completed may be about to open it on the other cycle.
 			$pending = null !== $chosen['cycle'] && null === $forced ? $this->addons()->unfulfilled_addons_cycle( $license, self::awaiting_payment() ) : null;
 			if ( null !== $pending && $pending['cycle'] !== $chosen['cycle'] ) {
+				$message = 'completed' === $pending['order']->get_status()
+					/* translators: 1: order number, 2: licence label (licence ending ABCD), 3: billing schedule (every month) */
+					? __( 'The monthly / yearly add-ons of your order #%1$s are still being added to your %2$s, billed %3$s. One licence\'s monthly / yearly add-ons are billed one way: choose the same, or contact us.', 'wp-license-manager' )
+					/* translators: 1: order number, 2: licence label (licence ending ABCD), 3: billing schedule (every month) */
+					: __( 'Your order #%1$s, not completed yet, adds monthly / yearly add-ons to your %2$s billed %3$s. One licence\'s monthly / yearly add-ons are billed one way: choose the same, or cancel that order first.', 'wp-license-manager' );
 				return new \WP_Error(
 					'wplm_extras_cycle_pending',
-					sprintf(
-						/* translators: 1: order number, 2: licence label (licence ending ABCD), 3: billing schedule (every month) */
-						__( 'Your order #%1$s, not completed yet, adds monthly / yearly add-ons to your %2$s billed %3$s. One licence\'s monthly / yearly add-ons are billed one way: choose the same, or cancel that order first.', 'wp-license-manager' ),
-						$pending['order']->get_order_number(),
-						AddonService::licence_label( $license ),
-						AddonService::schedule( 1, $pending['cycle'] )
-					)
+					sprintf( $message, $pending['order']->get_order_number(), AddonService::licence_label( $license ), AddonService::schedule( 1, $pending['cycle'] ) )
 				);
 			}
 		}

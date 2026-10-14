@@ -794,8 +794,11 @@ class AddonService {
 	 * written), they are **adopted** — recorded on the line, any subscription item the attempt did not get
 	 * to attached to the subscription the lines are on, a pending add-ons subscription started — and
 	 * nothing is checked or written again: they were checked before they were written, and checking them
-	 * now would only find them already there. Anything else (an attempt cut off part-way through writing
-	 * its lines) changes nothing and refuses the line, naming the lines, for the owner to sort out by hand.
+	 * now would only find them already there. When they are not, and another line of the order still to
+	 * be recorded adds to the same licence, they are that line's: nothing is adopted here, this line is
+	 * written as usual, and that line adopts them in its turn. Anything else (an attempt cut off
+	 * part-way through writing its lines) changes nothing and refuses the line, naming the lines, for the
+	 * owner to sort out by hand.
 	 *
 	 * @param \WC_Order              $order     The order.
 	 * @param \WC_Order_Item_Product $item      Its line.
@@ -804,7 +807,8 @@ class AddonService {
 	 *                                          takes them (only called when something was left over).
 	 * @param string                 $items_key `_wplm_addon_subscription_item_ids` (JSON list) or
 	 *                                          `_wplm_addon_subscription_item_id` (one id).
-	 * @return Entitlement[]|null The lines, now recorded on the line; null when nothing was left over.
+	 * @return Entitlement[]|null The lines, now recorded on the line; null when nothing was left over for
+	 *                            this line.
 	 * @throws \RuntimeException When what was left over is not exactly this line's add-ons.
 	 */
 	private function adopt_unstamped( \WC_Order $order, $item, License $license, callable $units, string $items_key ): ?array {
@@ -830,12 +834,29 @@ class AddonService {
 				$lines[] = $line;
 			}
 		}
-		$refuse = function () use ( $order, $license, $left ): \RuntimeException {
+		// Another line of the order still to be recorded for this licence may have written them: it
+		// adopts them in its turn, and this line is written as usual beside them.
+		$theirs = false;
+		foreach ( $order->get_items() as $other ) {
+			if ( ! $other instanceof \WC_Order_Item_Product || $other->get_id() === $item->get_id()
+				|| '' !== (string) $other->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $other->get_meta( '_wplm_addon_reverted' ) ) {
+				continue;
+			}
+			$issued = json_decode( (string) $other->get_meta( '_wplm_license_ids' ), true );
+			if ( (int) $other->get_meta( '_wplm_addon_license_id' ) === (int) $license->id
+				|| ( is_array( $issued ) && in_array( (int) $license->id, array_map( 'intval', $issued ), true ) ) ) {
+				$theirs = true;
+			}
+		}
+		$refuse = function () use ( $order, $license, $left, $theirs ): ?\RuntimeException {
+			if ( $theirs ) {
+				return null;
+			}
 			\WPLM\Support\Logger::error( sprintf( 'AddonService: order %d left add-on lines %s on licence %d unrecorded, and they are not exactly what its line adds; nothing was changed.', $order->get_id(), implode( ', ', $left ), $license->id ) );
 			return new \RuntimeException(
 				sprintf(
 					/* translators: 1: line ids, 2: licence label */
-					__( 'an earlier attempt was cut off part-way: it left add-on lines #%1$s on %2$s without recording them. Nothing was changed and nothing was added. Check those lines on the licence screen (remove them, or note them on this order line by hand), then set the order to Completed again', 'wp-license-manager' ),
+					__( 'an earlier attempt was cut off part-way: it left add-on lines #%1$s on %2$s without recording them, and they are not all this line adds. Nothing was changed and nothing was added; the customer keeps those lines. To finish, remove those lines on the licence screen and set the order to Completed again: the whole line is then added', 'wp-license-manager' ),
 					implode( ', #', $left ),
 					self::licence_label( $license )
 				)
@@ -853,25 +874,25 @@ class AddonService {
 				$qty  = Entitlement::KIND_LIMIT === $kind ? (int) ( $expected['qty'] ?? 0 ) : 0;
 				if ( null === $line || $kind !== $line->kind || (string) ( $expected['code'] ?? '' ) !== $line->code
 					|| ( Entitlement::KIND_LIMIT === $kind && $qty !== (int) $line->qty ) ) {
-					throw $refuse();
+					return self::refused( $refuse() );
 				}
 				$by_row[ $u ][] = $line;
 				++$next;
 			}
 		}
 		if ( count( $lines ) !== $next || count( $left ) !== $next ) {
-			throw $refuse();
+			return self::refused( $refuse() );
 		}
 
 		// Each unit billed on a subscription has its item there; one the attempt did not get to is
-		// attached now, to the subscription its lines are on.
-		$sub_items = array();
-		$addons    = array();
+		// attached, to the subscription its lines are on — once everything has been checked.
+		$plan   = array(); // Unit => [subscription, existing item id or null, line ids].
+		$addons = array();
 		foreach ( $units as $u => $unit ) {
 			$unit_lines = $by_row[ $u ] ?? array();
 			$sub_ids    = array_unique( array_map( static fn( Entitlement $l ) => (int) $l->subscription_id, $unit_lines ) );
 			if ( count( $sub_ids ) > 1 ) {
-				throw $refuse();
+				return self::refused( $refuse() );
 			}
 			$sub_id = (int) reset( $sub_ids );
 			if ( $sub_id <= 0 ) {
@@ -879,7 +900,7 @@ class AddonService {
 			}
 			$sub = $this->subscriptions->find_by_id( $sub_id );
 			if ( null === $sub ) {
-				throw $refuse();
+				return self::refused( $refuse() );
 			}
 			$ids = array_map( static fn( Entitlement $l ) => (int) $l->id, $unit_lines );
 			sort( $ids );
@@ -891,16 +912,22 @@ class AddonService {
 					continue;
 				}
 				if ( $billed !== $ids || (int) ( $sub_item->meta['order_item_id'] ?? 0 ) !== (int) $item->get_id() ) {
-					throw $refuse(); // Billed as something else: not this line's to adopt.
+					return self::refused( $refuse() ); // Billed for another line: not this line's to adopt.
 				}
 				$found = (int) $sub_item->id;
 			}
-			$meta = (array) ( $unit['meta'] ?? array() );
+			$plan[ $u ] = array( $sub, $found, $ids );
+			if ( $sub->is_addons_only() ) {
+				$addons[ $sub_id ] = true;
+			}
+		}
+		$sub_items = array();
+		foreach ( $plan as $u => list( $sub, $found, $ids ) ) {
+			$meta = (array) ( $units[ $u ]['meta'] ?? array() );
 			if ( $sub->is_addons_only() ) {
 				$meta['addons_only'] = true;
-				$addons[ $sub_id ]   = true;
 			}
-			$sub_items[] = $found ?? $this->attach( $sub, $order, $item, max( 1, (int) $unit['qty'] ), (float) $unit['line_total'], $meta, $license, $ids );
+			$sub_items[] = $found ?? $this->attach( $sub, $order, $item, max( 1, (int) $units[ $u ]['qty'] ), (float) $units[ $u ]['line_total'], $meta, $license, $ids );
 		}
 
 		if ( array() !== $sub_items ) {
@@ -923,6 +950,21 @@ class AddonService {
 			)
 		);
 		return $lines;
+	}
+
+	/**
+	 * {@see adopt_unstamped()}'s way out when the leftovers are not this line's: throw the refusal, or —
+	 * when another line of the order still to be recorded may own them — adopt nothing (null).
+	 *
+	 * @param \RuntimeException|null $refusal The refusal, or null.
+	 * @return null
+	 * @throws \RuntimeException The refusal.
+	 */
+	private static function refused( ?\RuntimeException $refusal ) {
+		if ( null !== $refusal ) {
+			throw $refusal;
+		}
+		return null;
 	}
 
 	/**
