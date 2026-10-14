@@ -204,7 +204,8 @@ class RenewalProcessor {
 		$interval = $this->scheduler->period_to_interval( $sub->billing_interval, $sub->billing_period );
 
 		$next = null;
-		if ( null !== $sub->license_id ) {
+		// An add-ons-only subscription extends only its own lines, never the licence (1.3.0).
+		if ( null !== $sub->license_id && ! $sub->is_addons_only() ) {
 			$next = $this->license_service->extend_term( $sub->license_id, $interval, $now );
 		}
 		if ( null === $next ) {

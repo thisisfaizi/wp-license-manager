@@ -115,7 +115,36 @@ class PackageExtrasTest extends TestCase {
 		$offers[]      = $this->module_offer( 'factory', 'Factory', 1500 * $factor );
 		$offers[]      = $this->module_offer( 'subcontract', 'Subcontracting', 800 * $factor );
 		$offers[]      = $this->module_offer( 'distribution', 'Distribution', 2000 * $factor );
-		$offers[]      = $this->module_offer( 'fbr', 'FBR', 1000 * $factor ) + array( 'requires' => array( array( 'distribution', 'pos' ) ) );
+		if ( 'lifetime' === $ctx['billing'] ) {
+			// No lifetime price: paid monthly or yearly on an add-ons subscription (v2).
+			$offers[] = array(
+				'id'         => 'module:fbr',
+				'label'      => 'FBR',
+				'group'      => 'module',
+				'unit_price' => null,
+				'recurring'  => array(
+					'month' => 1000,
+					'year'  => 10000,
+				),
+				'max_qty'    => 1,
+				'lines'      => array( array( 'kind' => 'module', 'code' => 'fbr', 'qty' => 1 ) ),
+				'requires'   => array( array( 'distribution', 'pos' ) ),
+			);
+			$offers[] = array(
+				'id'         => 'module:pos',
+				'label'      => 'Point of Sale',
+				'group'      => 'module',
+				'unit_price' => null,
+				'recurring'  => array(
+					'month' => null,
+					'year'  => 8000,
+				),
+				'max_qty'    => 1,
+				'lines'      => array( array( 'kind' => 'module', 'code' => 'pos', 'qty' => 1 ) ),
+			);
+		} else {
+			$offers[] = $this->module_offer( 'fbr', 'FBR', 1000 * $factor ) + array( 'requires' => array( array( 'distribution', 'pos' ) ) );
+		}
 		$offers[]      = array(
 			'id'         => 'user',
 			'label'      => 'Extra user',
@@ -603,6 +632,7 @@ class PackageExtrasTest extends TestCase {
 		$snapshot = json_decode( (string) $item->get_meta( '_wplm_extras' ), true );
 		$this->assertSame( 'month', $snapshot['billing'] );
 		$this->assertSame( 'new', $snapshot['flow'] );
+		$this->assertNull( $snapshot['cycle'], 'No recurring add-ons on a monthly licence type.' );
 		$this->assertSame( 4, $snapshot['price_list_version'] );
 		$this->assertSame( 'new', $snapshot['ctx_flow'] );
 		$this->assertSame(
@@ -625,6 +655,7 @@ class PackageExtrasTest extends TestCase {
 					),
 				),
 				'term_days'  => null,
+				'cycle'      => null,
 			),
 			$snapshot['items'][1]
 		);
@@ -1649,5 +1680,155 @@ class PackageExtrasTest extends TestCase {
 
 		$this->assertTrue( $purchasable );
 		$this->assertCount( 1, $this->calls, 'The offers for the licence are computed once, not again for the blocked list.' );
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// v2: recurring add-ons on a lifetime licence
+	// ---------------------------------------------------------------------------------------------
+
+	private function lifetime_ctx(): array {
+		return $this->make( PackageExtrasService::class )->context_for_package( $this->make( PlanService::class )->get( $this->plan['plan_id'] ), $this->package( 'Lifetime' ) );
+	}
+
+	public function test_recurring_offers_are_accepted_only_on_lifetime_and_never_with_a_unit_price(): void {
+		$service = $this->make( PackageExtrasService::class );
+		add_filter(
+			'wplm_package_extras',
+			static function ( $offers ) {
+				$base     = array(
+					'max_qty' => 1,
+					'lines'   => array( array( 'kind' => 'module', 'code' => 'assets' ) ),
+				);
+				$offers[] = array(
+					'id'         => 'both-prices',
+					'unit_price' => 100,
+					'recurring'  => array( 'month' => 10 ),
+				) + $base;
+				$offers[] = array(
+					'id'         => 'no-cycle-price',
+					'unit_price' => null,
+					'recurring'  => array(
+						'month' => null,
+						'year'  => null,
+					),
+				) + $base;
+				$offers[] = array(
+					'id'         => 'negative-cycle',
+					'unit_price' => null,
+					'recurring'  => array( 'month' => -5 ),
+				) + $base;
+				$offers[] = array(
+					'id'         => 'recurring-term',
+					'unit_price' => null,
+					'recurring'  => array( 'year' => 50 ),
+					'term_days'  => 365,
+				) + $base;
+				return $offers;
+			},
+			20
+		);
+
+		$lifetime = array_column( $service->offers( $this->lifetime_ctx() ), null, 'id' );
+		$this->assertSame(
+			array(
+				'month' => 1000.0,
+				'year'  => 10000.0,
+			),
+			$lifetime['module:fbr']['recurring']
+		);
+		$this->assertNull( $lifetime['module:fbr']['unit_price'] );
+		$this->assertNull( $lifetime['module:factory']['recurring'], 'A lifetime-priced offer carries recurring null.' );
+		foreach ( array( 'both-prices', 'no-cycle-price', 'negative-cycle', 'recurring-term' ) as $bad ) {
+			$this->assertArrayNotHasKey( $bad, $lifetime );
+		}
+
+		// A recurring offer in a monthly context is rejected.
+		add_filter(
+			'wplm_package_extras',
+			static function ( $offers, $ctx ) {
+				if ( 'month' === $ctx['billing'] ) {
+					$offers[] = array(
+						'id'         => 'module:assets',
+						'unit_price' => null,
+						'recurring'  => array( 'month' => 100 ),
+						'max_qty'    => 1,
+						'lines'      => array( array( 'kind' => 'module', 'code' => 'assets' ) ),
+					);
+				}
+				return $offers;
+			},
+			30,
+			2
+		);
+		$monthly = $service->context_for_package( $this->make( PlanService::class )->get( $this->plan['plan_id'] ), $this->package( 'Monthly' ) );
+		$this->assertNotContains( 'module:assets', array_column( $service->offers( $monthly ), 'id' ) );
+		$this->assertFalse( $this->validate( array( 'wplm_package_id' => (string) $this->package( 'Monthly' )->id, 'wplm_extras' => array( 'module:assets' => '1' ) ) ) );
+	}
+
+	public function test_todays_price_is_lifetime_base_and_extras_plus_one_cycle_of_each_recurring_extra(): void {
+		$customer = $this->create_customer();
+		wp_set_current_user( $customer );
+		foreach ( array( 'month' => 146000.0, 'year' => 155000.0 ) as $cycle => $price ) {
+			WC()->cart->empty_cart();
+			$_POST = array(
+				'wplm_package_id'   => (string) $this->package( 'Lifetime' )->id,
+				'wplm_extras'       => array(
+					'module:factory' => '1',
+					'module:fbr'     => '1',
+				),
+				'wplm_extras_cycle' => $cycle,
+			);
+			$this->assertTrue( apply_filters( 'woocommerce_add_to_cart_validation', true, $this->product->get_id(), 1 ), $this->first_error() );
+			$key = WC()->cart->add_to_cart( $this->product->get_id(), 1 );
+			$_POST = array();
+			WC()->cart->calculate_totals();
+			$line = WC()->cart->get_cart()[ $key ];
+			$this->assertSame( $cycle, $line['wplm_extras_cycle'], 'The cart keeps the cycle.' );
+			$this->assertSame( $price, (float) $line['data']->get_price(), "100000 + Factory 45000 + FBR one {$cycle}." );
+		}
+	}
+
+	public function test_the_cycle_defaults_to_monthly_unless_a_ticked_extra_is_yearly_only_and_an_unpriced_cycle_is_refused(): void {
+		$service = $this->make( PackageExtrasService::class );
+		$ctx     = $this->lifetime_ctx();
+
+		$this->assertSame( 'month', $service->choose( $ctx, array( 'module:fbr' => 1 ) )['cycle'] );
+		$both = $service->choose(
+			$ctx,
+			array(
+				'module:fbr' => 1,
+				'module:pos' => 1,
+			)
+		);
+		$this->assertSame( 'year', $both['cycle'], 'Point of Sale is yearly only.' );
+		$this->assertSame( 18000.0, $both['total'] );
+
+		$refused = $service->choose( $ctx, array( 'module:pos' => 1 ), 'month' );
+		$this->assertWPError( $refused );
+		$this->assertSame( 'Point of Sale cannot be paid monthly. Choose the other option.', $refused->get_error_message() );
+	}
+
+	public function test_the_snapshot_records_the_cycle_on_the_line_and_each_item(): void {
+		$bought = $this->buy_through_cart(
+			$this->product,
+			array(
+				'wplm_package_id'   => (string) $this->package( 'Lifetime' )->id,
+				'wplm_extras'       => array(
+					'module:factory' => '1',
+					'module:fbr'     => '1',
+				),
+				'wplm_extras_cycle' => 'year',
+			),
+			$this->create_customer(),
+			false
+		);
+		$snap   = json_decode( (string) $bought['item']->get_meta( '_wplm_extras' ), true );
+
+		$this->assertSame( 'year', $snap['cycle'] );
+		$items = array_column( $snap['items'], null, 'id' );
+		$this->assertNull( $items['module:factory']['cycle'] );
+		$this->assertSame( 'year', $items['module:fbr']['cycle'] );
+		$this->assertEquals( 10000, $items['module:fbr']['unit_price'], 'The cycle price charged.' );
+		$this->assertEquals( 155000, $bought['order']->get_total() );
 	}
 }

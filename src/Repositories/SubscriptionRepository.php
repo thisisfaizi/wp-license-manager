@@ -119,6 +119,41 @@ class SubscriptionRepository {
 		return array_map( array( Subscription::class, 'from_row' ), $rows );
 	}
 
+	/**
+	 * The open add-ons-only subscription of a lifetime licence (the newest that is active, in trial,
+	 * pending, on hold or pending cancellation), or null.
+	 *
+	 * @param int $license_id Licence id.
+	 * @return Subscription|null
+	 */
+	public function find_addons_for_license( int $license_id ): ?Subscription {
+		global $wpdb;
+		$table = $wpdb->prefix . 'wplm_subscriptions';
+		$row   = $wpdb->get_row(
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+			$wpdb->prepare( "SELECT * FROM `{$table}` WHERE addons_license_id = %d AND status IN ('active','trial','pending','on-hold','pending-cancel') ORDER BY id DESC LIMIT 1", $license_id ),
+			ARRAY_A
+		);
+		return is_array( $row ) ? Subscription::from_row( $row ) : null;
+	}
+
+	/**
+	 * Every add-ons-only subscription of a licence, newest first (any status).
+	 *
+	 * @param int $license_id Licence id.
+	 * @return Subscription[]
+	 */
+	public function get_addons_for_license( int $license_id ): array {
+		global $wpdb;
+		$table = $wpdb->prefix . 'wplm_subscriptions';
+		$rows  = $wpdb->get_results(
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+			$wpdb->prepare( "SELECT * FROM `{$table}` WHERE addons_license_id = %d ORDER BY id DESC", $license_id ),
+			ARRAY_A
+		);
+		return is_array( $rows ) ? array_map( array( Subscription::class, 'from_row' ), $rows ) : array();
+	}
+
 	// -------------------------------------------------------------------------
 	// Mutations
 	// -------------------------------------------------------------------------

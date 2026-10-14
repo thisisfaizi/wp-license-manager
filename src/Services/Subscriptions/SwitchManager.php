@@ -214,6 +214,7 @@ class SwitchManager {
 		// Immediately update the license seat limit if max_activations changed.
 		if (
 			null !== $sub->license_id &&
+			! $sub->is_addons_only() &&
 			isset( $new_plan['max_activations'] ) &&
 			(int) $new_plan['max_activations'] > 0
 		) {

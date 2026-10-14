@@ -424,11 +424,14 @@ class AddonService {
 		if ( null === $key ) {
 			return null;
 		}
-		$sub  = $billing['subscription'];
-		$held = array();
+		$sub    = $billing['subscription'];
+		$addons = 'lifetime' === $key ? $this->addons_subscription( $license ) : null;
+		$held   = array();
 		foreach ( $lines as $line ) {
 			if ( Entitlement::KIND_MODULE === $line->kind
-				&& ( null === $line->paid_through || ( null !== $sub && $line->subscription_id === $sub->id ) ) ) {
+				&& ( null === $line->paid_through
+					|| ( null !== $sub && $line->subscription_id === $sub->id )
+					|| ( null !== $addons && $line->subscription_id === $addons->id ) ) ) {
 				$held[] = $line->code;
 			}
 		}
@@ -455,10 +458,58 @@ class AddonService {
 		$profile = $this->profiles->get( $license->profile );
 		$billing = null !== $profile ? $this->billing( $license, $profile, $this->entitlements->lines( $license->id ) ) : array( 'type' => 'none' );
 		$sub     = 'recurring' === $billing['type'] ? $billing['subscription'] : null;
+		$addons  = $this->addons_subscription( $license );
 		return array(
 			'target_subscription_id' => null !== $sub ? (int) $sub->id : null,
 			'target_paid_through'    => null !== $sub ? $billing['paid_through'] : null,
+			'addons_subscription_id' => null !== $addons ? (int) $addons->id : null,
+			'addons_paid_through'    => null !== $addons ? $this->addons_paid_through( $addons ) : null,
 		);
+	}
+
+	/**
+	 * The open add-ons-only subscription of a licence: recurring add-ons on a lifetime licence (v2).
+	 *
+	 * @param License $license The licence.
+	 * @return Subscription|null
+	 */
+	public function addons_subscription( License $license ): ?Subscription {
+		return $this->subscriptions->find_addons_for_license( $license->id );
+	}
+
+	/**
+	 * The cycle new recurring add-ons of a licence are forced to: its add-ons subscription's, or null
+	 * (none yet: the customer chooses).
+	 *
+	 * @param License $license The licence.
+	 * @return string|null `month` or `year`.
+	 */
+	public function addons_cycle( License $license ): ?string {
+		$sub = $this->addons_subscription( $license );
+		if ( null === $sub || 1 !== (int) $sub->billing_interval || ! in_array( $sub->billing_period, PackageExtrasService::CYCLES, true ) ) {
+			return null;
+		}
+		return $sub->billing_period;
+	}
+
+	/**
+	 * The day an add-ons subscription is paid through: its lines' latest, else the day before its next
+	 * payment.
+	 *
+	 * @param Subscription $sub The add-ons subscription.
+	 * @return string|null Y-m-d.
+	 */
+	public function addons_paid_through( Subscription $sub ): ?string {
+		$through = null;
+		foreach ( $this->lines->get_by_subscription( $sub->id ) as $line ) {
+			if ( null !== $line->paid_through && ( null === $through || strcmp( $line->paid_through, $through ) > 0 ) ) {
+				$through = $line->paid_through;
+			}
+		}
+		if ( null === $through && null !== $sub->next_payment ) {
+			$through = EntitlementService::paid_through_for( $sub->next_payment );
+		}
+		return $through;
 	}
 
 	/**
@@ -772,6 +823,9 @@ class AddonService {
 		}
 		$units = array();
 		foreach ( $items as $extra ) {
+			if ( null !== ( $extra['cycle'] ?? null ) ) {
+				throw new \RuntimeException( 'recurring add-ons on a lifetime licence need their add-ons subscription' );
+			}
 			$units[] = array(
 				'lines'      => (array) $extra['lines'],
 				'qty'        => max( 1, (int) $extra['qty'] ),

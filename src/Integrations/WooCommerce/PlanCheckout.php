@@ -256,9 +256,11 @@ class PlanCheckout {
 	 * @param array<int, array[]>  $by_license  Existing licence: offers per licence id.
 	 * @param array<int, float>    $base_prices New purchase: what each package costs now (fee included).
 	 * @param int                  $selected    The package or licence selected when the page opens.
+	 * @param array<int, string|null> $cycles  Existing licence: licence id => the cycle its recurring
+	 *                                         extras are forced to (its add-ons subscription's), or null.
 	 * @return void
 	 */
-	private function render_extras_form( Plan $plan, string $flow, array $by_package, array $by_license, array $base_prices, int $selected ): void {
+	private function render_extras_form( Plan $plan, string $flow, array $by_package, array $by_license, array $base_prices, int $selected, array $cycles = array() ): void {
 		$data = array(
 			'plan'              => $plan,
 			'flow'              => $flow,
@@ -266,6 +268,7 @@ class PlanCheckout {
 			'offers_by_license' => $by_license,
 			'base_prices'       => $base_prices,
 			'currency'          => PackageExtrasService::currency(),
+			'cycle_by_license'  => $cycles,
 		);
 		if ( has_action( 'wplm_package_extras_form' ) ) {
 			/**
@@ -273,12 +276,72 @@ class PlanCheckout {
 			 * `wplm_extras[<offer id>] = <quantity>`; prices are rebuilt on the server whatever it posts.
 			 *
 			 * @param array $data plan, flow (new|existing), offers_by_package, offers_by_license,
-			 *                    base_prices (package id => first payment), currency.
+			 *                    base_prices (package id => first payment), currency, cycle_by_license
+			 *                    (licence id => forced 'month'|'year', or null: the customer chooses).
+			 *                    On a lifetime licence or licence type an offer may carry `recurring`
+			 *                    (month/year prices, unit_price null): its cycle posts as
+			 *                    `wplm_extras_cycle` (month|year).
 			 */
 			do_action( 'wplm_package_extras_form', $data );
 			return;
 		}
 		$this->render_extras_fallback( $data, $selected );
+	}
+
+	/**
+	 * The fallback's Monthly / Yearly choice for a group with recurring offers (a lifetime licence or
+	 * licence type). A forced cycle (the licence's add-ons subscription) is shown as the only option.
+	 *
+	 * @param array[]     $offers The group's offers.
+	 * @param int         $key    Package or licence id.
+	 * @param string|null $forced The forced cycle.
+	 * @return void
+	 */
+	private function render_cycle_choice( array $offers, int $key, ?string $forced ): void {
+		$recurring = array_values( array_filter( $offers, static fn( $o ) => null !== ( $o['recurring'] ?? null ) ) );
+		if ( array() === $recurring ) {
+			return;
+		}
+		$labels  = array(
+			'month' => __( 'Monthly', 'wp-license-manager' ),
+			'year'  => __( 'Yearly', 'wp-license-manager' ),
+		);
+		$cycles  = null !== $forced ? array( $forced ) : PackageExtrasService::CYCLES;
+		$default = $forced ?? PackageExtrasService::default_cycle( $recurring, null );
+		echo '<p style="margin:0 0 8px;">' . esc_html__( 'Pay the monthly / yearly add-ons:', 'wp-license-manager' ) . ' ';
+		foreach ( $cycles as $cycle ) {
+			$input = 'wplm-extras-cycle-' . $key . '-' . $cycle;
+			printf(
+				'<label for="%1$s" style="margin-right:12px;"><input type="radio" id="%1$s" name="wplm_extras_cycle" value="%2$s" %3$s> %4$s</label>',
+				esc_attr( $input ),
+				esc_attr( $cycle ),
+				checked( $default, $cycle, false ),
+				esc_html( $labels[ $cycle ] )
+			);
+		}
+		if ( null !== $forced ) {
+			echo '<br><small>' . esc_html__( 'Billed with the add-ons this licence already pays for.', 'wp-license-manager' ) . '</small>';
+		}
+		echo '</p>';
+	}
+
+	/**
+	 * "1,000 / month · 10,000 / year" for a recurring offer.
+	 *
+	 * @param array $recurring month / year prices.
+	 * @return string HTML.
+	 */
+	private static function cycle_price_label( array $recurring ): string {
+		$parts = array();
+		foreach ( array(
+			'month' => __( '/ month', 'wp-license-manager' ),
+			'year'  => __( '/ year', 'wp-license-manager' ),
+		) as $cycle => $per ) {
+			if ( null !== ( $recurring[ $cycle ] ?? null ) ) {
+				$parts[] = ( function_exists( 'wc_price' ) ? wc_price( $recurring[ $cycle ] ) : number_format_i18n( $recurring[ $cycle ], 2 ) ) . ' ' . esc_html( $per );
+			}
+		}
+		return implode( ' · ', $parts );
 	}
 
 	/**
@@ -306,10 +369,13 @@ class PlanCheckout {
 				$on ? '' : ' disabled'
 			);
 			echo '<legend style="font-weight:600;">' . esc_html__( 'Add-ons', 'wp-license-manager' ) . '</legend>';
+			$this->render_cycle_choice( $offers, (int) $key, $existing ? ( $data['cycle_by_license'][ (int) $key ] ?? null ) : null );
 			foreach ( $offers as $offer ) {
 				$input = 'wplm-extra-' . (int) $key . '-' . sanitize_html_class( str_replace( ':', '-', $offer['id'] ) );
 				$name  = 'wplm_extras[' . $offer['id'] . ']';
-				$price = function_exists( 'wc_price' ) ? wc_price( $offer['unit_price'] ) : number_format_i18n( $offer['unit_price'], 2 );
+				$price = null !== ( $offer['recurring'] ?? null )
+					? self::cycle_price_label( $offer['recurring'] )
+					: ( function_exists( 'wc_price' ) ? wc_price( $offer['unit_price'] ) : number_format_i18n( $offer['unit_price'], 2 ) );
 				echo '<p style="margin:0 0 8px;">';
 				if ( 1 === (int) $offer['max_qty'] ) {
 					printf(
@@ -475,12 +541,14 @@ class PlanCheckout {
 		echo '</div>';
 
 		$by_license = array();
+		$cycles     = array();
 		foreach ( $targets as $id => $target ) {
 			if ( ! empty( $target['extras'] ) ) {
 				$by_license[ (int) $id ] = $target['extras'];
+				$cycles[ (int) $id ]     = $this->addons()->addons_cycle( $target['license'] );
 			}
 		}
-		$this->render_extras_form( $plan, PackageExtrasService::FLOW_EXISTING, array(), $by_license, array(), $selected );
+		$this->render_extras_form( $plan, PackageExtrasService::FLOW_EXISTING, array(), $by_license, array(), $selected, $cycles );
 		?>
 		<script>
 		(function(){
@@ -756,6 +824,7 @@ class PlanCheckout {
 			$line  = array(
 				'data'                  => $product,
 				'wplm_extras'           => $choice,
+				'wplm_extras_cycle'     => self::posted_cycle(),
 				// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
 				'wplm_addon_license_id' => isset( $_POST['wplm_target_license_id'] ) ? absint( wp_unslash( $_POST['wplm_target_license_id'] ) ) : 0,
 			);
@@ -781,9 +850,10 @@ class PlanCheckout {
 		if ( array() !== $choice ) {
 			$built = $this->extras_for_cart_item(
 				array(
-					'data'            => $product,
-					'wplm_package_id' => $package_id,
-					'wplm_extras'     => $choice,
+					'data'              => $product,
+					'wplm_package_id'   => $package_id,
+					'wplm_extras'       => $choice,
+					'wplm_extras_cycle' => self::posted_cycle(),
 				)
 			);
 			if ( is_wp_error( $built ) ) {
@@ -892,6 +962,13 @@ class PlanCheckout {
 		}
 		if ( array() !== $extras ) {
 			$data['wplm_extras'] = $extras;
+			// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
+			$cycle = isset( $_POST['wplm_extras_cycle'] ) ? self::posted_cycle() : ( $data['wplm_extras_cycle'] ?? null );
+			if ( in_array( $cycle, PackageExtrasService::CYCLES, true ) ) {
+				$data['wplm_extras_cycle'] = $cycle;
+			} else {
+				unset( $data['wplm_extras_cycle'] );
+			}
 			$data['wplm_unique'] = 'extras-' . microtime();
 		}
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
@@ -921,6 +998,9 @@ class PlanCheckout {
 		}
 		if ( isset( $session['wplm_extras'] ) && is_array( $session['wplm_extras'] ) ) {
 			$item['wplm_extras'] = PackageExtrasService::parse_choice( $session['wplm_extras'] );
+		}
+		if ( isset( $session['wplm_extras_cycle'] ) && in_array( $session['wplm_extras_cycle'], PackageExtrasService::CYCLES, true ) ) {
+			$item['wplm_extras_cycle'] = $session['wplm_extras_cycle'];
 		}
 		return $item;
 	}
@@ -1152,7 +1232,11 @@ class PlanCheckout {
 			return new \WP_Error( 'wplm_extras_none', __( 'Add-ons cannot be added to this licence type.', 'wp-license-manager' ) );
 		}
 
-		$chosen = $this->extras()->choose( $ctx, $choice );
+		// Recurring extras on a lifetime licence: one cycle per line, forced to the cycle of the add-ons
+		// subscription the licence already has.
+		$cycle  = in_array( $cart_item['wplm_extras_cycle'] ?? null, PackageExtrasService::CYCLES, true ) ? $cart_item['wplm_extras_cycle'] : null;
+		$forced = null !== $license ? $this->addons()->addons_cycle( $license ) : null;
+		$chosen = $this->extras()->choose( $ctx, $choice, $forced ?? $cycle );
 		if ( is_wp_error( $chosen ) ) {
 			return $chosen;
 		}
@@ -1168,6 +1252,7 @@ class PlanCheckout {
 			'items'   => $chosen['items'],
 			'total'   => $chosen['total'],
 			'price'   => round( $base + $chosen['total'], PackageExtrasService::decimals() ),
+			'cycle'   => $chosen['cycle'],
 			'package' => $package,
 			'license' => $license,
 		);
@@ -1305,6 +1390,17 @@ class PlanCheckout {
 		}
 		$product = $product_id ? wc_get_product( $product_id ) : null;
 		return $product instanceof \WC_Product && null !== $this->plan_for_product( $product ) ? 1 : $quantity;
+	}
+
+	/**
+	 * The posted `wplm_extras_cycle` (`month` or `year`), or null.
+	 *
+	 * @return string|null
+	 */
+	private static function posted_cycle(): ?string {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
+		$raw = isset( $_POST['wplm_extras_cycle'] ) ? sanitize_key( wp_unslash( $_POST['wplm_extras_cycle'] ) ) : '';
+		return in_array( $raw, PackageExtrasService::CYCLES, true ) ? $raw : null;
 	}
 
 	/**

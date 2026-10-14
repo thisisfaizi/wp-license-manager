@@ -92,21 +92,22 @@ class SubscriptionService {
 		}
 
 		$data = array(
-			'user_id'          => (int) $args['user_id'],
-			'billing_interval' => (int) $args['billing_interval'],
-			'billing_period'   => (string) $args['billing_period'],
-			'recurring_total'  => (float) $args['recurring_total'],
-			'currency'         => (string) $args['currency'],
-			'status'           => $status,
-			'next_payment'     => $next_payment,
-			'parent_order_id'  => isset( $args['parent_order_id'] ) ? (int) $args['parent_order_id'] : null,
-			'license_id'       => isset( $args['license_id'] ) ? (int) $args['license_id'] : null,
-			'signup_fee'       => isset( $args['signup_fee'] ) ? (float) $args['signup_fee'] : 0.0,
-			'trial_end'        => $args['trial_end'] ?? null,
-			'payment_method'   => $args['payment_method'] ?? null,
-			'payment_token_id' => isset( $args['payment_token_id'] ) ? (int) $args['payment_token_id'] : null,
-			'end_date'         => $args['end_date'] ?? null,
-			'failed_attempts'  => 0,
+			'user_id'           => (int) $args['user_id'],
+			'billing_interval'  => (int) $args['billing_interval'],
+			'billing_period'    => (string) $args['billing_period'],
+			'recurring_total'   => (float) $args['recurring_total'],
+			'currency'          => (string) $args['currency'],
+			'status'            => $status,
+			'next_payment'      => $next_payment,
+			'parent_order_id'   => isset( $args['parent_order_id'] ) ? (int) $args['parent_order_id'] : null,
+			'license_id'        => isset( $args['license_id'] ) ? (int) $args['license_id'] : null,
+			'addons_license_id' => isset( $args['addons_license_id'] ) ? (int) $args['addons_license_id'] : null,
+			'signup_fee'        => isset( $args['signup_fee'] ) ? (float) $args['signup_fee'] : 0.0,
+			'trial_end'         => $args['trial_end'] ?? null,
+			'payment_method'    => $args['payment_method'] ?? null,
+			'payment_token_id'  => isset( $args['payment_token_id'] ) ? (int) $args['payment_token_id'] : null,
+			'end_date'          => $args['end_date'] ?? null,
+			'failed_attempts'   => 0,
 		);
 
 		$id = $this->sub_repo->create( $data );
@@ -195,6 +196,12 @@ class SubscriptionService {
 	 * @return bool
 	 */
 	public function bind_license( int $sub_id, int $license_id ): bool {
+		$sub = $this->sub_repo->find_by_id( $sub_id );
+		if ( null !== $sub && $sub->is_addons_only() ) {
+			// An add-ons-only subscription must never be bound: its status would reach the licence.
+			\WPLM\Support\Logger::error( 'SubscriptionService: refused to bind add-ons-only subscription ' . $sub_id . ' to licence ' . $license_id . '.' );
+			return false;
+		}
 		return $this->sub_repo->update( $sub_id, array( 'license_id' => $license_id ) );
 	}
 
@@ -311,7 +318,9 @@ class SubscriptionService {
 		// Sync the licence. Billing never locks a licence by changing its status: access ends
 		// because the paid term (expires_at + grace) runs out, and only an owner action
 		// (suspend, revoke, terminate, refund) changes status. Audit F3/F4.
-		if ( null !== $sub->license_id ) {
+		// An add-ons-only subscription never touches its licence, whatever its status: only its own
+		// lines lapse, by their paid-through day and grace (1.3.0).
+		if ( null !== $sub->license_id && ! $sub->is_addons_only() ) {
 			$license = $this->license_service->get_by_id( $sub->license_id );
 
 			if ( null !== $license ) {

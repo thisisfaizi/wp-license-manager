@@ -47,6 +47,9 @@ class PackageExtrasService {
 	/** Display groups an offer may name. */
 	public const GROUPS = array( 'module', 'quantity', 'term' );
 
+	/** The cycles a recurring extra on a lifetime licence may be billed on. */
+	public const CYCLES = array( 'month', 'year' );
+
 	/** @var ProfileRegistry */
 	private ProfileRegistry $profiles;
 
@@ -160,9 +163,22 @@ class PackageExtrasService {
 			if ( '' === $id || ! preg_match( '/^[a-z0-9:_-]+$/', $id ) || isset( $seen[ $id ] ) ) {
 				continue;
 			}
-			$price = $offer['unit_price'] ?? null;
-			if ( ! is_numeric( $price ) || ! is_finite( (float) $price ) || (float) $price < 0 ) {
-				continue;
+			// A recurring offer (v2): on a lifetime licence only, priced per cycle, never with a unit price.
+			$recurring = null;
+			if ( isset( $offer['recurring'] ) ) {
+				if ( 'lifetime' !== ( $ctx['billing'] ?? '' ) || null !== ( $offer['unit_price'] ?? null ) ) {
+					continue;
+				}
+				$recurring = self::cycle_prices( $offer['recurring'], $decimals );
+				if ( null === $recurring ) {
+					continue;
+				}
+				$price = null;
+			} else {
+				$price = $offer['unit_price'] ?? null;
+				if ( ! is_numeric( $price ) || ! is_finite( (float) $price ) || (float) $price < 0 ) {
+					continue;
+				}
 			}
 			$max = isset( $offer['max_qty'] ) && is_numeric( $offer['max_qty'] ) ? (int) $offer['max_qty'] : 0;
 			if ( $max < 1 ) {
@@ -177,6 +193,9 @@ class PackageExtrasService {
 				continue; // A term with no days would be sold for life.
 			}
 			if ( null !== $days ) {
+				if ( null !== $recurring ) {
+					continue; // A dated pack is paid once, never per cycle.
+				}
 				$group = 'term';
 			}
 
@@ -209,7 +228,8 @@ class PackageExtrasService {
 				'id'          => $id,
 				'label'       => $label,
 				'group'       => $group,
-				'unit_price'  => round( (float) $price, $decimals ),
+				'unit_price'  => null !== $recurring ? null : round( (float) $price, $decimals ),
+				'recurring'   => $recurring,
 				'max_qty'     => $max,
 				'lines'       => $lines,
 				'requires'    => $this->requires( $profile, $offer['requires'] ?? array() ),
@@ -218,6 +238,53 @@ class PackageExtrasService {
 			);
 		}
 		return $out;
+	}
+
+	/**
+	 * A recurring offer's prices: `month` and `year`, each a finite price of 0 or more (rounded) or null
+	 * (not offered), at least one set. Null when the shape is wrong.
+	 *
+	 * @param mixed $raw      The offer's `recurring`.
+	 * @param int   $decimals Shop decimals.
+	 * @return array{month: float|null, year: float|null}|null
+	 */
+	private static function cycle_prices( $raw, int $decimals ): ?array {
+		if ( ! is_array( $raw ) ) {
+			return null;
+		}
+		$out = array();
+		foreach ( self::CYCLES as $cycle ) {
+			$value = $raw[ $cycle ] ?? null;
+			if ( null === $value || '' === $value ) {
+				$out[ $cycle ] = null;
+				continue;
+			}
+			if ( ! is_numeric( $value ) || ! is_finite( (float) $value ) || (float) $value < 0 ) {
+				return null;
+			}
+			$out[ $cycle ] = round( (float) $value, $decimals );
+		}
+		return null === $out['month'] && null === $out['year'] ? null : $out;
+	}
+
+	/**
+	 * The cycle a line's recurring extras are billed on: the forced one, else the posted one, else
+	 * monthly when every ticked recurring extra has a monthly price, else yearly.
+	 *
+	 * @param array[]     $offers The ticked recurring offers.
+	 * @param string|null $posted `wplm_extras_cycle`.
+	 * @return string
+	 */
+	public static function default_cycle( array $offers, ?string $posted ): string {
+		if ( in_array( $posted, self::CYCLES, true ) ) {
+			return $posted;
+		}
+		foreach ( $offers as $offer ) {
+			if ( null === ( $offer['recurring']['month'] ?? null ) ) {
+				return 'year';
+			}
+		}
+		return 'month';
 	}
 
 	/**
@@ -322,11 +389,16 @@ class PackageExtrasService {
 	 * the offer's maximum, and a module whose requirement is not met — the profile's `requires` and the
 	 * offer's own, against the modules held plus the modules ticked.
 	 *
+	 * A recurring offer (lifetime licence) is priced for one cycle, the same for every recurring offer of
+	 * the line: `$cycle` when given (the posted `wplm_extras_cycle`, or the cycle an existing add-ons
+	 * subscription forces), else {@see default_cycle()}. One with no price for that cycle is refused.
+	 *
 	 * @param array              $ctx    The context.
 	 * @param array<string, int> $choice Offer id => quantity ({@see parse_choice()}).
-	 * @return array{items: array[], total: float}|\WP_Error
+	 * @param string|null        $cycle  `month` or `year` for recurring offers.
+	 * @return array{items: array[], total: float, cycle: string|null}|\WP_Error
 	 */
-	public function choose( array $ctx, array $choice ) {
+	public function choose( array $ctx, array $choice, ?string $cycle = null ) {
 		$held   = array();
 		$offers = array();
 		foreach ( $this->sanitize( $ctx, $held ) as $offer ) {
@@ -334,6 +406,14 @@ class PackageExtrasService {
 		}
 		$profile  = $ctx['profile'];
 		$decimals = self::decimals();
+
+		$ticked_recurring = array();
+		foreach ( $choice as $id => $qty ) {
+			if ( (int) $qty > 0 && isset( $offers[ (string) $id ] ) && null !== $offers[ (string) $id ]['recurring'] ) {
+				$ticked_recurring[] = $offers[ (string) $id ];
+			}
+		}
+		$line_cycle = array() !== $ticked_recurring ? self::default_cycle( $ticked_recurring, $cycle ) : null;
 
 		$items  = array();
 		$ticked = array();
@@ -370,16 +450,32 @@ class PackageExtrasService {
 					$ticked[] = $line['code'];
 				}
 			}
-			$amount  = round( $offer['unit_price'] * $qty, $decimals );
+			$unit = $offer['unit_price'];
+			if ( null !== $offer['recurring'] ) {
+				$unit = $offer['recurring'][ $line_cycle ] ?? null;
+				if ( null === $unit ) {
+					return new \WP_Error(
+						'wplm_extras_cycle',
+						sprintf(
+							/* translators: 1: add-on name, 2: "monthly" or "yearly" */
+							__( '%1$s cannot be paid %2$s. Choose the other option.', 'wp-license-manager' ),
+							$offer['label'],
+							'year' === $line_cycle ? __( 'yearly', 'wp-license-manager' ) : __( 'monthly', 'wp-license-manager' )
+						)
+					);
+				}
+			}
+			$amount  = round( $unit * $qty, $decimals );
 			$total  += $amount;
 			$items[] = array(
 				'id'         => $id,
 				'label'      => $offer['label'],
 				'qty'        => $qty,
-				'unit_price' => $offer['unit_price'],
+				'unit_price' => $unit,
 				'amount'     => $amount,
 				'lines'      => $lines,
 				'term_days'  => $offer['term_days'],
+				'cycle'      => null !== $offer['recurring'] ? $line_cycle : null,
 			);
 		}
 
@@ -423,6 +519,7 @@ class PackageExtrasService {
 		return array(
 			'items' => $items,
 			'total' => round( $total, $decimals ),
+			'cycle' => $line_cycle,
 		);
 	}
 
@@ -435,7 +532,11 @@ class PackageExtrasService {
 	 * `wplm_package_extras_snapshot( array $snapshot, array $ctx )` may add keys (a price list version);
 	 * unknown keys are kept, WPLM's own always win.
 	 *
-	 * WPLM's own keys besides `billing`, `flow` and `items` (passed in `$sale`):
+	 * `cycle` is the cycle the line's recurring extras (lifetime licence) are billed on, else null; each
+	 * item carries its own `cycle` too (null for lifetime and term items) and its `unit_price` is the
+	 * price charged for that cycle.
+	 *
+	 * WPLM's own keys besides `billing`, `flow`, `cycle` and `items` (passed in `$sale`):
 	 * - new purchase: `base_price` and `base_signup_fee`, what the licence type cost at the sale (the
 	 *   subscription is created at that price, whatever the package costs by the time it is fulfilled);
 	 * - existing licence: `target_subscription_id` and `target_paid_through`, the subscription and
@@ -447,10 +548,15 @@ class PackageExtrasService {
 	 * @return array
 	 */
 	public function snapshot( array $ctx, array $items, array $sale = array() ): array {
+		$cycle = null;
+		foreach ( $items as $item ) {
+			$cycle = $cycle ?? ( $item['cycle'] ?? null );
+		}
 		$own = array_merge(
 			array(
 				'billing' => (string) $ctx['billing'],
 				'flow'    => (string) $ctx['flow'],
+				'cycle'   => $cycle,
 				'items'   => array_values( $items ),
 			),
 			$sale
@@ -506,6 +612,11 @@ class PackageExtrasService {
 			if ( array() === $lines ) {
 				throw new \RuntimeException( 'an add-on bought on this line grants nothing' );
 			}
+			$cycle = $item['cycle'] ?? null;
+			if ( null !== $cycle && ( ! in_array( $cycle, self::CYCLES, true ) || 'lifetime' !== $billing || null !== $days || $cycle !== ( $snapshot['cycle'] ?? null ) ) ) {
+				throw new \RuntimeException( 'an add-on bought on this line has a billing cycle it cannot have' );
+			}
+			$item['cycle']     = $cycle;
 			$item['qty']       = $qty;
 			$item['amount']    = (float) $amount;
 			$item['term_days'] = $days;

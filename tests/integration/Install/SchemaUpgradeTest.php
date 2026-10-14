@@ -157,7 +157,7 @@ class SchemaUpgradeTest extends TestCase {
 		Plugin::get_instance()->maybe_upgrade_db();
 
 		$this->assertSame( '', $wpdb->last_error );
-		$this->assertSame( '1.2.2', get_option( 'wplm_db_version' ) );
+		$this->assertSame( WPLM_DB_VERSION, get_option( 'wplm_db_version' ) );
 		$this->assertTrue( $this->has_column( 'plans', 'kind' ) );
 		$this->assertTrue( $this->has_column( 'entitlements', 'order_id' ) );
 		$this->assertNotEmpty( $wpdb->get_results( "SHOW INDEX FROM {$p}entitlements WHERE Key_name = 'order_id'" ), 'The order lookup is indexed.' );
