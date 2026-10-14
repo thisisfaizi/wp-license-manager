@@ -19,7 +19,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     any stored ones untouched. The editor warns when nothing is hooked into `wplm_dynamic_package`.
     The old `plan_addon` checkbox value is still accepted.
   - **Plans list:** such a plan shows "(built at purchase)" and "Built at purchase" in place of its
-    licence types.
+    licence types. The product **Licensing** tab lists it as "Name (built at purchase)".
   - No database change: `wplm_plans.kind` stores `dynamic`.
 - **Hooks for a plugin that builds packages:**
   - `do_action( 'wplm_dynamic_package_form', Plan $plan, WC_Product $product )` prints the form on the

@@ -254,6 +254,19 @@ class DynamicPackageTest extends TestCase {
 		$this->assertSame( Plan::KIND_ADDON, $this->make( PlanService::class )->get( $legacy['plan_id'] )->kind, 'The pre-1.2.7 checkbox still makes an add-on plan.' );
 	}
 
+	public function test_the_product_licensing_tab_offers_the_plan(): void {
+		if ( ! function_exists( 'woocommerce_wp_select' ) ) {
+			require_once WC_ABSPATH . 'includes/admin/wc-meta-box-functions.php';
+		}
+		$post            = get_post( $this->product->get_id() );
+		$GLOBALS['post'] = $post;
+		ob_start();
+		( new \WPLM\Integrations\WooCommerce\ProductPanel() )->render_license_panel();
+		$html = ob_get_clean();
+		unset( $GLOBALS['post'] );
+		$this->assertMatchesRegularExpression( '/<option value="' . $this->plan_id . '"[^>]*>Acme — Build your own \(built at purchase\)</', $html );
+	}
+
 	// ---------------------------------------------------------------------------------------------
 	// The product page
 	// ---------------------------------------------------------------------------------------------
