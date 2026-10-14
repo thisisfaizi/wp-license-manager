@@ -110,6 +110,20 @@ class SwitchManager {
 			);
 		}
 
+		// An add-ons-only subscription (a lifetime licence's monthly / yearly add-ons) has no plan to
+		// switch: a switch would add a plan charge to it, or turn its add-ons into plan lines it no
+		// longer bills but still renews.
+		if ( $sub->is_addons_only() ) {
+			return new \WP_Error(
+				'wplm_switch_addons_only',
+				sprintf(
+					/* translators: %d: subscription ID */
+					__( 'Subscription %d bills only add-ons of a lifetime licence: it has no plan to switch.', 'wp-license-manager' ),
+					$subscription_id
+				)
+			);
+		}
+
 		if ( ! in_array( $sub->status, array( 'active', 'on-hold' ), true ) ) {
 			return new \WP_Error(
 				'invalid_subscription_status',

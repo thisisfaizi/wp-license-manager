@@ -2756,4 +2756,30 @@ class PackageExtrasTest extends TestCase {
 		wp_set_current_user( $base['customer'] );
 		$this->assertTrue( wc_get_product( $draft->get_id() )->is_purchasable(), 'Published: for sale, priced by its plan.' );
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Review fixes (2026-10-15): an add-ons-only subscription has no plan to switch
+	// ---------------------------------------------------------------------------------------------
+
+	public function test_an_addons_only_subscription_cannot_be_switched(): void {
+		$bought = $this->lifetime_with_fbr( 'month' );
+		$items  = $this->items( $bought['addons'] );
+
+		$result = $this->make( SwitchManager::class )->switch_plan(
+			$bought['addons'],
+			array(
+				'product_id'       => $this->product->get_id(),
+				'recurring_total'  => 5000,
+				'billing_interval' => 1,
+				'billing_period'   => 'month',
+				'modules'          => array( 'fbr' ),
+			)
+		);
+
+		$this->assertWPError( $result );
+		$this->assertSame( 'wplm_switch_addons_only', $result->get_error_code() );
+		$this->assertSame( 1000.0, $this->total( $bought['addons'] ), 'No plan charge added.' );
+		$this->assertEquals( $items, $this->items( $bought['addons'] ) );
+		$this->assertSame( 'addon', $this->line( $bought['license_id'], 'fbr' )->source, 'FBR stays an add-on it bills.' );
+	}
 }

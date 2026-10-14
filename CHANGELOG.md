@@ -244,6 +244,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 - **The database upgrade runs on the first request of any kind** (`init`), not only admin, REST and
   cron; opening an add-ons subscription runs it first if it has still not run. A storefront order
   completed right after the update no longer fails to open its add-ons subscription.
+- **An add-ons-only subscription cannot be switched** (`wplm_switch_addons_only`, from PHP, REST or
+  `wplm_switch_subscription()`): a switch added a plan charge to it, or turned its add-ons into plan
+  lines it no longer billed but still renewed.
 
 ### Deploy
 - **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added
