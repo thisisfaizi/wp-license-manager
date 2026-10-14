@@ -562,7 +562,7 @@ class PlanCheckout {
 		foreach ( $targets as $id => $target ) {
 			if ( ! empty( $target['extras'] ) ) {
 				$by_license[ (int) $id ] = $target['extras'];
-				$cycles[ (int) $id ]     = $this->addons()->addons_cycle( $target['license'] );
+				$cycles[ (int) $id ]     = $this->addons()->offered_cycle( $target['license'], self::awaiting_payment() );
 			}
 		}
 		$this->render_extras_form( $plan, PackageExtrasService::FLOW_EXISTING, array(), $by_license, array(), $selected, $cycles );
@@ -1330,6 +1330,20 @@ class PlanCheckout {
 			if ( null !== $problem ) {
 				return $problem;
 			}
+			// With none yet, an order not completed may be about to open it on the other cycle.
+			$pending = null !== $chosen['cycle'] && null === $forced ? $this->addons()->unfulfilled_addons_cycle( $license, self::awaiting_payment() ) : null;
+			if ( null !== $pending && $pending['cycle'] !== $chosen['cycle'] ) {
+				return new \WP_Error(
+					'wplm_extras_cycle_pending',
+					sprintf(
+						/* translators: 1: order number, 2: licence label (licence ending ABCD), 3: billing schedule (every month) */
+						__( 'Your order #%1$s, not completed yet, adds monthly / yearly add-ons to your %2$s billed %3$s. One licence\'s monthly / yearly add-ons are billed one way: choose the same, or cancel that order first.', 'wp-license-manager' ),
+						$pending['order']->get_order_number(),
+						AddonService::licence_label( $license ),
+						AddonService::schedule( 1, $pending['cycle'] )
+					)
+				);
+			}
 		}
 		$base = null !== $package ? $this->first_payment_amount( $package ) : 0.0;
 		return array(
@@ -1341,6 +1355,21 @@ class PlanCheckout {
 			'package' => $package,
 			'license' => $license,
 		);
+	}
+
+	/**
+	 * The order the customer is paying for now (WooCommerce's `order_awaiting_payment`, or the order-pay
+	 * page's), which is the cart's own order, not another one.
+	 *
+	 * @return int Order id, 0 for none.
+	 */
+	private static function awaiting_payment(): int {
+		$id = function_exists( 'WC' ) && null !== WC()->session ? absint( WC()->session->get( 'order_awaiting_payment' ) ) : 0;
+		if ( 0 === $id && function_exists( 'is_wc_endpoint_url' ) && is_wc_endpoint_url( 'order-pay' ) ) {
+			global $wp;
+			$id = absint( $wp->query_vars['order-pay'] ?? 0 );
+		}
+		return $id;
 	}
 
 	/**

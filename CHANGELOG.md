@@ -232,6 +232,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   add-ons subscription: its modules can be bought again and a new purchase chooses its own cycle.
 - **One cycle per licence in a cart.** Two cart lines adding monthly and yearly add-ons to the same
   licence are refused at add to cart and at checkout: the second could be charged but never added.
+- **One cycle per licence across orders, too.** A lifetime licence with no add-ons subscription yet
+  takes the cycle of an order of its owner whose monthly / yearly add-ons are still to be written
+  (pending payment, on hold — a bank transfer awaiting the shop — processing, or completed and awaiting
+  a retry; `AddonService::unfulfilled_addons_cycle()`). The product page offers that cycle
+  (`cycle_by_license`, `AddonService::offered_cycle()`), and add to cart and checkout refuse the other
+  one, naming the order: "choose the same, or cancel that order first". The order being paid for now
+  (`order_awaiting_payment`, the order-pay page) does not count. Before, both orders were accepted and
+  the second was paid for and could never be added.
 - **One request at a time adds to a licence.** Adding add-ons or extras to an existing licence now
   checks and writes under a per-licence lock (option `wplm_addons_lock_{licence id}`, taken over after
   5 minutes), so two orders completed at once cannot both pass the "already has" check or both open

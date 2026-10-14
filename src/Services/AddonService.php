@@ -581,6 +581,72 @@ class AddonService {
 	}
 
 	/**
+	 * An order of the licence's owner, paid or not yet, whose monthly / yearly add-ons for the licence
+	 * are still to be written: pending payment, on hold (a bank transfer awaiting the shop), processing,
+	 * or completed with its add-ons not added (awaiting a retry). Its add-ons open — or join — the
+	 * licence's one add-ons subscription when it is completed, on its cycle, so until then that cycle
+	 * is the licence's: an order on the other cycle could be paid for and never added.
+	 *
+	 * @param License $license    The lifetime licence.
+	 * @param int     $skip_order An order not to count (the one being paid for now), 0 for none.
+	 * @return array{order: \WC_Order, cycle: string}|null The oldest such order and its cycle.
+	 */
+	public function unfulfilled_addons_cycle( License $license, int $skip_order = 0 ): ?array {
+		if ( ! function_exists( 'wc_get_orders' ) || (int) $license->user_id <= 0 ) {
+			return null;
+		}
+		$orders = wc_get_orders(
+			array(
+				'customer_id' => (int) $license->user_id,
+				'status'      => array( 'pending', 'on-hold', 'processing', 'completed' ),
+				'type'        => 'shop_order',
+				'limit'       => -1,
+				'orderby'     => 'date',
+				'order'       => 'ASC',
+			)
+		);
+		foreach ( $orders as $order ) {
+			if ( ! $order instanceof \WC_Order || $order->get_id() === $skip_order
+				|| ( 'completed' === $order->get_status() && '1' === (string) $order->get_meta( '_wplm_plan_fulfilled' ) ) ) {
+				continue;
+			}
+			foreach ( $order->get_items() as $item ) {
+				if ( ! $item instanceof \WC_Order_Item_Product || (int) $item->get_meta( '_wplm_addon_license_id' ) !== (int) $license->id
+					|| '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $item->get_meta( '_wplm_addon_reverted' ) ) {
+					continue;
+				}
+				$snapshot = json_decode( (string) $item->get_meta( '_wplm_extras' ), true );
+				$cycle    = is_array( $snapshot ) ? ( $snapshot['cycle'] ?? null ) : null;
+				if ( in_array( $cycle, PackageExtrasService::CYCLES, true ) ) {
+					return array(
+						'order' => $order,
+						'cycle' => $cycle,
+					);
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * The cycle the product page offers a licence's new monthly / yearly add-ons on, when it is not the
+	 * customer's to choose: its add-ons subscription's ({@see addons_cycle()}), else that of an order
+	 * whose add-ons are still to be written ({@see unfulfilled_addons_cycle()}).
+	 *
+	 * @param License $license    The licence.
+	 * @param int     $skip_order An order not to count, 0 for none.
+	 * @return string|null `month` or `year`; null when the customer chooses.
+	 */
+	public function offered_cycle( License $license, int $skip_order = 0 ): ?string {
+		$cycle = $this->addons_cycle( $license );
+		if ( null === $cycle ) {
+			$pending = $this->unfulfilled_addons_cycle( $license, $skip_order );
+			$cycle   = null !== $pending ? $pending['cycle'] : null;
+		}
+		return $cycle;
+	}
+
+	/**
 	 * Why new recurring add-ons cannot join a lifetime licence's add-ons subscription right now, or
 	 * null when they can (or it has none: one is opened). Checked before payment — on the product
 	 * page, at add to cart and at checkout — and again at fulfilment, so a customer is never charged for

@@ -2803,6 +2803,100 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( 'billed every month', $this->first_error() );
 	}
 
+	public function test_an_order_not_completed_yet_holds_the_licences_addons_cycle_for_the_next_order(): void {
+		$this->add_seat_plan_offer();
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		// A bank transfer: placed, waiting for the shop to confirm it. No add-ons subscription yet.
+		$first = $this->buy_through_cart(
+			$product,
+			array(
+				'wplm_extras'            => array( 'module:fbr' => '1' ),
+				'wplm_extras_cycle'      => 'month',
+				'wplm_target_license_id' => (string) $base['license_id'],
+			),
+			$base['customer'],
+			false
+		);
+		wc_get_order( $first['order']->get_id() )->update_status( 'on-hold' );
+		$this->assertNull( $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] ) );
+
+		$seen = array();
+		add_action(
+			'wplm_package_extras_form',
+			static function ( $data ) use ( &$seen ) {
+				$seen[] = $data;
+			}
+		);
+		wp_set_current_user( $base['customer'] );
+		$this->render( $product );
+		$this->assertSame( array( $base['license_id'] => 'month' ), $seen[0]['cycle_by_license'], 'The product page offers the cycle that order bills.' );
+
+		$yearly = array(
+			'wplm_extras'            => array( 'seat-plan' => '1' ),
+			'wplm_extras_cycle'      => 'year',
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		$this->assertFalse( $this->validate( $yearly, $product ), 'Yearly would be paid for and never added once the monthly order opens the add-ons subscription.' );
+		$this->assertStringContainsString( 'order #' . $first['order']->get_order_number() . ', not completed yet', $this->first_error() );
+		$this->assertStringContainsString( 'billed every month', $this->first_error() );
+		$this->assertTrue( $this->validate( array( 'wplm_extras_cycle' => 'month' ) + $yearly, $product ), 'The same cycle is fine.' );
+
+		// Placed after the yearly line went into the cart: the checkout stops.
+		WC()->cart->add_to_cart( $product->get_id(), 1, 0, array(), array( 'wplm_extras' => array( 'seat-plan' => 1 ), 'wplm_extras_cycle' => 'year', 'wplm_addon_license_id' => $base['license_id'] ) );
+		wc_clear_notices();
+		$this->checkout()->check_cart_extras();
+		$this->assertStringContainsString( 'not completed yet', $this->first_error() );
+
+		// The order being paid for now is the cart's own, not another.
+		WC()->session->set( 'order_awaiting_payment', $first['order']->get_id() );
+		wc_clear_notices();
+		$this->checkout()->check_cart_extras();
+		$this->assertSame( '', $this->first_error() );
+		WC()->session->set( 'order_awaiting_payment', null );
+		WC()->cart->empty_cart();
+
+		// Once that order is cancelled, the customer chooses again.
+		wc_get_order( $first['order']->get_id() )->update_status( 'cancelled' );
+		$this->assertTrue( $this->validate( $yearly, $product ) );
+	}
+
+	public function test_a_completed_order_whose_addons_wait_for_a_retry_still_holds_the_cycle(): void {
+		$this->add_seat_plan_offer();
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$yearly  = array(
+			'wplm_extras'            => array( 'seat-plan' => '1' ),
+			'wplm_extras_cycle'      => 'year',
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		// Completed while another request held the licence: nothing added, no add-ons subscription.
+		add_option( 'wplm_addons_lock_' . $base['license_id'], (string) time(), '', 'no' );
+		$first = $this->buy_through_cart(
+			$product,
+			array(
+				'wplm_extras'            => array( 'module:fbr' => '1' ),
+				'wplm_extras_cycle'      => 'month',
+				'wplm_target_license_id' => (string) $base['license_id'],
+			),
+			$base['customer']
+		);
+		$this->assertSame( '', (string) wc_get_order( $first['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertNull( $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] ) );
+
+		wp_set_current_user( $base['customer'] );
+		$this->assertFalse( $this->validate( $yearly, $product ), 'Its retry will open the add-ons subscription monthly.' );
+		$this->assertStringContainsString( 'not completed yet', $this->first_error() );
+
+		delete_option( 'wplm_addons_lock_' . $base['license_id'] );
+		$this->complete_again( $first['order'] );
+		$this->assertSame( 'month', $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] )->billing_period );
+		$second = $this->buy_through_cart( $product, $yearly, $base['customer'] );
+		$this->assertSame( 300.0, (float) $second['order']->get_total(), 'Forced to the add-ons subscription\'s cycle.' );
+		$this->assertSame( '1', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ), 'And so added.' );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'seats' ) );
+	}
+
 	// ---------------------------------------------------------------------------------------------
 	// Review fixes (2026-10-15): one request at a time adds to a licence
 	// ---------------------------------------------------------------------------------------------
