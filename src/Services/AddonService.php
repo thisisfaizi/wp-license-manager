@@ -689,17 +689,59 @@ class AddonService {
 	}
 
 	/**
-	 * Before an order line's add-ons are written again (a retry), take back what an interrupted earlier
-	 * attempt left behind: this order's add-on lines on the licence that no line of the order is stamped
-	 * with (`_wplm_entitlement_ids`), and with them their subscription items. A crash between writing the
-	 * lines and stamping the line would otherwise write — and bill — them a second time. An add-ons
-	 * subscription emptied this way is kept for the retry.
+	 * Before a line's package extras are written (a retry), recognise what an interrupted earlier attempt
+	 * wrote but never recorded ({@see adopt_unstamped()}).
 	 *
-	 * @param \WC_Order $order   The order.
-	 * @param License   $license The licence its line adds to.
-	 * @return int Lines taken back.
+	 * @param \WC_Order              $order   The order.
+	 * @param \WC_Order_Item_Product $item    Its extras line.
+	 * @param License                $license The licence the extras are on.
+	 * @param string                 $json    The line's `_wplm_extras` snapshot.
+	 * @return Entitlement[]|null The lines, now recorded on the line; null when nothing was left over.
+	 * @throws \RuntimeException When what was left over is not exactly this line's add-ons.
 	 */
-	public function discard_unstamped( \WC_Order $order, License $license ): int {
+	public function adopt_unstamped_extras( \WC_Order $order, $item, License $license, string $json ): ?array {
+		return $this->adopt_unstamped(
+			$order,
+			$item,
+			$license,
+			function () use ( $license, $json ): array {
+				$profile = $this->profiles->get( $license->profile );
+				if ( null === $profile ) {
+					throw new \RuntimeException( 'the licence has no licence profile' );
+				}
+				// Read as it was sold: only its lines matter here, and they were checked when written.
+				$raw = json_decode( $json, true );
+				$raw = is_array( $raw ) && is_string( $raw['billing'] ?? null ) ? $raw['billing'] : null;
+				return $this->extras_units( $this->extras()->read_snapshot( $json, $raw, $profile )['items'] );
+			},
+			'_wplm_addon_subscription_item_ids'
+		);
+	}
+
+	/**
+	 * Before an order line's add-ons are written (a retry), recognise what an interrupted earlier attempt
+	 * already wrote but never recorded: this order's add-on lines on the licence that no line of the order
+	 * is stamped with (`_wplm_entitlement_ids`) — a crash between writing them and stamping the line.
+	 *
+	 * They are never taken back: the customer has them, and their subscription bills them. When they are
+	 * exactly the lines this order line writes (same kinds, codes and quantities, in the order they are
+	 * written), they are **adopted** — recorded on the line, any subscription item the attempt did not get
+	 * to attached to the subscription the lines are on, a pending add-ons subscription started — and
+	 * nothing is checked or written again: they were checked before they were written, and checking them
+	 * now would only find them already there. Anything else (an attempt cut off part-way through writing
+	 * its lines) changes nothing and refuses the line, naming the lines, for the owner to sort out by hand.
+	 *
+	 * @param \WC_Order              $order     The order.
+	 * @param \WC_Order_Item_Product $item      Its line.
+	 * @param License                $license   The licence the line adds to.
+	 * @param callable               $units     Returns the units the line writes, as {@see write_units()}
+	 *                                          takes them (only called when something was left over).
+	 * @param string                 $items_key `_wplm_addon_subscription_item_ids` (JSON list) or
+	 *                                          `_wplm_addon_subscription_item_id` (one id).
+	 * @return Entitlement[]|null The lines, now recorded on the line; null when nothing was left over.
+	 * @throws \RuntimeException When what was left over is not exactly this line's add-ons.
+	 */
+	private function adopt_unstamped( \WC_Order $order, $item, License $license, callable $units, string $items_key ): ?array {
 		$stamped = array();
 		foreach ( $order->get_items() as $other ) {
 			if ( ! $other instanceof \WC_Order_Item_Product ) {
@@ -710,20 +752,111 @@ class AddonService {
 				$stamped = array_merge( $stamped, array_map( 'intval', $ids ) );
 			}
 		}
-		$left = array_diff( $this->order_line_ids( $order->get_id(), $license->id ), $stamped );
+		$left = array_values( array_diff( $this->order_line_ids( $order->get_id(), $license->id ), $stamped ) );
 		if ( array() === $left ) {
-			return 0;
+			return null;
 		}
-		$this->keep_empty_addons = true;
-		try {
-			foreach ( $left as $id ) {
-				$this->entitlements->delete_line( (int) $id );
+		sort( $left );
+		$lines = array();
+		foreach ( $left as $id ) {
+			$line = $this->lines->find_by_id( (int) $id );
+			if ( null !== $line ) {
+				$lines[] = $line;
 			}
-		} finally {
-			$this->keep_empty_addons = false;
 		}
-		\WPLM\Support\Logger::error( sprintf( 'AddonService: order %d left %d unrecorded add-on line(s) on licence %d (an interrupted fulfilment); removed before writing them again.', $order->get_id(), count( $left ), $license->id ) );
-		return count( $left );
+		$refuse = function () use ( $order, $license, $left ): \RuntimeException {
+			\WPLM\Support\Logger::error( sprintf( 'AddonService: order %d left add-on lines %s on licence %d unrecorded, and they are not exactly what its line adds; nothing was changed.', $order->get_id(), implode( ', ', $left ), $license->id ) );
+			return new \RuntimeException(
+				sprintf(
+					/* translators: 1: line ids, 2: licence label */
+					__( 'an earlier attempt was cut off part-way: it left add-on lines #%1$s on %2$s without recording them. Nothing was changed and nothing was added. Check those lines on the licence screen (remove them, or note them on this order line by hand), then set the order to Completed again', 'wp-license-manager' ),
+					implode( ', #', $left ),
+					self::licence_label( $license )
+				)
+			);
+		};
+
+		// The units' lines, in the order the earlier attempt wrote them.
+		$units  = $units();
+		$by_row = array();
+		$next   = 0;
+		foreach ( $units as $u => $unit ) {
+			foreach ( (array) $unit['lines'] as $expected ) {
+				$line = $lines[ $next ] ?? null;
+				$kind = (string) ( $expected['kind'] ?? '' );
+				$qty  = Entitlement::KIND_LIMIT === $kind ? (int) ( $expected['qty'] ?? 0 ) : 0;
+				if ( null === $line || $kind !== $line->kind || (string) ( $expected['code'] ?? '' ) !== $line->code
+					|| ( Entitlement::KIND_LIMIT === $kind && $qty !== (int) $line->qty ) ) {
+					throw $refuse();
+				}
+				$by_row[ $u ][] = $line;
+				++$next;
+			}
+		}
+		if ( count( $lines ) !== $next || count( $left ) !== $next ) {
+			throw $refuse();
+		}
+
+		// Each unit billed on a subscription has its item there; one the attempt did not get to is
+		// attached now, to the subscription its lines are on.
+		$sub_items = array();
+		$addons    = array();
+		foreach ( $units as $u => $unit ) {
+			$unit_lines = $by_row[ $u ] ?? array();
+			$sub_ids    = array_unique( array_map( static fn( Entitlement $l ) => (int) $l->subscription_id, $unit_lines ) );
+			if ( count( $sub_ids ) > 1 ) {
+				throw $refuse();
+			}
+			$sub_id = (int) reset( $sub_ids );
+			if ( $sub_id <= 0 ) {
+				continue; // For life, or a dated pack: never on a subscription.
+			}
+			$sub = $this->subscriptions->find_by_id( $sub_id );
+			if ( null === $sub ) {
+				throw $refuse();
+			}
+			$ids = array_map( static fn( Entitlement $l ) => (int) $l->id, $unit_lines );
+			sort( $ids );
+			$found = null;
+			foreach ( $this->subscriptions->get_items( $sub_id ) as $sub_item ) {
+				$billed = array_map( 'intval', (array) ( $sub_item->meta['entitlement_ids'] ?? array() ) );
+				sort( $billed );
+				if ( empty( $sub_item->meta['addon'] ) || array() === array_intersect( $billed, $ids ) ) {
+					continue;
+				}
+				if ( $billed !== $ids || (int) ( $sub_item->meta['order_item_id'] ?? 0 ) !== (int) $item->get_id() ) {
+					throw $refuse(); // Billed as something else: not this line's to adopt.
+				}
+				$found = (int) $sub_item->id;
+			}
+			$meta = (array) ( $unit['meta'] ?? array() );
+			if ( $sub->is_addons_only() ) {
+				$meta['addons_only'] = true;
+				$addons[ $sub_id ]   = true;
+			}
+			$sub_items[] = $found ?? $this->attach( $sub, $order, $item, max( 1, (int) $unit['qty'] ), (float) $unit['line_total'], $meta, $license, $ids );
+		}
+
+		if ( array() !== $sub_items ) {
+			$item->update_meta_data( $items_key, '_wplm_addon_subscription_item_id' === $items_key ? $sub_items[0] : wp_json_encode( $sub_items ) );
+		}
+		$item->update_meta_data( '_wplm_entitlement_ids', wp_json_encode( $left ) );
+		$item->save_meta_data();
+		foreach ( array_keys( $addons ) as $sub_id ) {
+			$this->activate_addons_subscription( (int) $sub_id );
+		}
+
+		$profile = $this->profiles->get( $license->profile );
+		\WPLM\Support\Logger::error( sprintf( 'AddonService: order %d had written add-on lines %s on licence %d without recording them (an interrupted fulfilment); recorded now, nothing written twice.', $order->get_id(), implode( ', ', $left ), $license->id ) );
+		$order->add_order_note(
+			sprintf(
+				/* translators: 1: what was added, 2: licence label */
+				__( 'WPLM: %1$s had already been added to %2$s by an earlier attempt that was cut off before it was recorded. It is recorded now; nothing was added or billed twice.', 'wp-license-manager' ),
+				null !== $profile ? self::describe_lines( $lines, $profile, false ) : __( 'The add-ons', 'wp-license-manager' ),
+				self::licence_label( $license )
+			)
+		);
+		return $lines;
 	}
 
 	/**
@@ -942,7 +1075,11 @@ class AddonService {
 	 * @throws \RuntimeException When they cannot be added.
 	 */
 	private function apply_extras_to_licence_locked( \WC_Order $order, $item, License $license, Plan $plan, string $json, ?int $now ): array {
-		$this->discard_unstamped( $order, $license );
+		// Written by an earlier attempt that was cut off before recording them: recorded, never redone.
+		$adopted = $this->adopt_unstamped_extras( $order, $item, $license, $json );
+		if ( null !== $adopted ) {
+			return $adopted;
+		}
 		$ctx = $this->extras_context( $plan, $license, $now );
 		if ( null === $ctx ) {
 			throw new \RuntimeException( 'that licence cannot take add-ons priced like these' );
@@ -1100,17 +1237,7 @@ class AddonService {
 	 * @throws \RuntimeException When the add-on cannot be added.
 	 */
 	private function apply_locked( \WC_Order $order, $item, Package $package, License $license, ?int $now ): array {
-		$this->discard_unstamped( $order, $license );
-		$ok = $this->check_for_user( (int) $order->get_customer_id(), $license, $package, (int) $item->get_quantity(), $now );
-		if ( is_wp_error( $ok ) ) {
-			throw new \RuntimeException( $ok->get_error_message() );
-		}
-
-		$profile = $this->profiles->get( $license->profile );
-		$qty     = max( 1, (int) $item->get_quantity() );
-		$billing = $this->billing( $license, $profile, $this->entitlements->lines( $license->id ) );
-		$sub     = 'recurring' === $billing['type'] ? $billing['subscription'] : null;
-
+		$qty   = max( 1, (int) $item->get_quantity() );
 		$lines = array();
 		foreach ( $package->entitlements as $template ) {
 			$kind    = (string) ( $template['kind'] ?? '' );
@@ -1120,6 +1247,35 @@ class AddonService {
 				'qty'  => Entitlement::KIND_LIMIT === $kind ? (int) ( $template['qty'] ?? 0 ) * $qty : 0,
 			);
 		}
+
+		// Written by an earlier attempt that was cut off before recording them: recorded, never redone.
+		$adopted = $this->adopt_unstamped(
+			$order,
+			$item,
+			$license,
+			static fn(): array => array(
+				array(
+					'lines'      => $lines,
+					'qty'        => $qty,
+					'line_total' => round( $package->price * $qty, 4 ),
+					'meta'       => array( 'package_id' => $package->id ),
+				),
+			),
+			'_wplm_addon_subscription_item_id'
+		);
+		if ( null !== $adopted ) {
+			return $adopted;
+		}
+
+		$ok = $this->check_for_user( (int) $order->get_customer_id(), $license, $package, (int) $item->get_quantity(), $now );
+		if ( is_wp_error( $ok ) ) {
+			throw new \RuntimeException( $ok->get_error_message() );
+		}
+
+		$profile = $this->profiles->get( $license->profile );
+		$billing = $this->billing( $license, $profile, $this->entitlements->lines( $license->id ) );
+		$sub     = 'recurring' === $billing['type'] ? $billing['subscription'] : null;
+
 		if ( array() === $lines ) {
 			throw new \RuntimeException( 'the add-on grants nothing' );
 		}
@@ -1191,19 +1347,9 @@ class AddonService {
 		if ( null === $profile ) {
 			throw new \RuntimeException( 'the licence has no licence profile' );
 		}
-		$units = array();
-		foreach ( $items as $extra ) {
-			$unit = array(
-				'lines'      => (array) $extra['lines'],
-				'qty'        => max( 1, (int) $extra['qty'] ),
-				'line_total' => round( (float) $extra['amount'], 4 ),
-				'term_days'  => null !== ( $extra['term_days'] ?? null ) ? (int) $extra['term_days'] : null,
-				'meta'       => array(
-					'package_id' => 0,
-					'extra_id'   => (string) ( $extra['id'] ?? '' ),
-					'label'      => (string) ( $extra['label'] ?? '' ),
-				),
-			);
+		$units = $this->extras_units( $items );
+		foreach ( array_values( $items ) as $u => $extra ) {
+			$unit = $units[ $u ];
 			if ( null !== ( $extra['cycle'] ?? null ) ) {
 				if ( null === $addons_sub || $extra['cycle'] !== $addons_sub->billing_period ) {
 					throw new \RuntimeException( 'recurring add-ons on a lifetime licence need an add-ons subscription billed the same way' );
@@ -1212,7 +1358,7 @@ class AddonService {
 				$unit['through']             = $addons_through;
 				$unit['meta']['addons_only'] = true;
 			}
-			$units[] = $unit;
+			$units[ $u ] = $unit;
 		}
 		if ( array() === $units ) {
 			throw new \RuntimeException( 'no add-ons were bought on this line' );
@@ -1243,6 +1389,30 @@ class AddonService {
 		);
 
 		return $written['lines'];
+	}
+
+	/**
+	 * The units {@see write_units()} writes for checked snapshot items, before any joins a subscription.
+	 *
+	 * @param array[] $items Checked snapshot items ({@see PackageExtrasService::read_snapshot()}).
+	 * @return array[]
+	 */
+	private function extras_units( array $items ): array {
+		$units = array();
+		foreach ( array_values( $items ) as $extra ) {
+			$units[] = array(
+				'lines'      => (array) $extra['lines'],
+				'qty'        => max( 1, (int) $extra['qty'] ),
+				'line_total' => round( (float) $extra['amount'], 4 ),
+				'term_days'  => null !== ( $extra['term_days'] ?? null ) ? (int) $extra['term_days'] : null,
+				'meta'       => array(
+					'package_id' => 0,
+					'extra_id'   => (string) ( $extra['id'] ?? '' ),
+					'label'      => (string) ( $extra['label'] ?? '' ),
+				),
+			);
+		}
+		return $units;
 	}
 
 	/**

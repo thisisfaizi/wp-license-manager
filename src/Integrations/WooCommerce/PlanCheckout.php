@@ -1840,8 +1840,10 @@ class PlanCheckout {
 				throw new \RuntimeException( 'the licence issued for this line no longer exists' );
 			}
 			$snapshot = $this->extras_snapshot_for( $pkg, $json );
-			// What an interrupted earlier attempt wrote but never recorded is taken back first.
-			$this->addons()->discard_unstamped( $order, $license );
+			// Written by an earlier attempt that was cut off before recording them: recorded, never redone.
+			if ( null !== $this->addons()->adopt_unstamped_extras( $order, $item, $license, $json ) ) {
+				return;
+			}
 
 			// Recurring add-ons on a lifetime licence (v2): one add-ons-only subscription, created once
 			// (a retry reuses it through `_wplm_addons_subscription_id` while it can still bill them), its

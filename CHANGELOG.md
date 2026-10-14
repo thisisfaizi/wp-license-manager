@@ -203,9 +203,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 - **A retried fulfilment never writes or bills add-ons twice.** An order line is stamped
   (`_wplm_entitlement_ids`) right after its add-ons are written, before the add-ons subscription is
   started or any hook runs; a listener that fails on that status change is logged and no longer fails
-  the line. Add-on lines an interrupted attempt wrote but never stamped (a fatal or a timeout) are taken
-  back before the retry writes them again (`AddonService::discard_unstamped()`), on every path: new
-  licence with extras, extras for an existing licence, stored add-ons.
+  the line. Add-on lines an interrupted attempt wrote but never stamped (a fatal or a timeout) are
+  **adopted** by the retry, never taken back: when they are exactly what the line adds they are
+  recorded on it, any subscription item the attempt did not get to is attached, a pending add-ons
+  subscription starts, and nothing is checked or written again — so a retry made while the add-ons
+  renewal is overdue or paused can no longer remove add-ons the customer has and pays for. Lines from
+  an attempt cut off part-way through writing are left as they are and the line is refused with a note
+  naming them, for the owner. Every path: new licence with extras, extras for an existing licence,
+  stored add-ons (`AddonService::adopt_unstamped()`).
 - **An add-ons subscription's first period starts when its add-ons are written**, not when it was
   opened: a pending one that bills nothing yet gets next payment = now + 1 cycle before its lines are
   dated (`AddonService::open_addons_period()`), so a late retry, or another order joining it, is never
