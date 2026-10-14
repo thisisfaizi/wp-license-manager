@@ -311,7 +311,7 @@ class EntitlementService {
 	 * Add a line to a profile licence.
 	 *
 	 * @param int   $license_id Licence id.
-	 * @param array $line       kind, code, qty (limits), paid_through (Y-m-d|null), source, subscription_id.
+	 * @param array $line       kind, code, qty (limits), paid_through (Y-m-d|null), source, subscription_id, order_id.
 	 * @return Entitlement
 	 * @throws \InvalidArgumentException When the licence has no profile or the line is invalid.
 	 */
@@ -330,6 +330,32 @@ class EntitlementService {
 		 */
 		do_action( 'wplm_entitlement_saved', $created, 'added' );
 
+		return $created;
+	}
+
+	/**
+	 * Add several lines to one licence, all or nothing: every line is validated before any is written.
+	 *
+	 * @param int     $license_id Licence id.
+	 * @param array[] $lines      Lines as for {@see add_line()}.
+	 * @return Entitlement[] The lines as stored, in the order given.
+	 * @throws \InvalidArgumentException When the licence has no profile or any line is invalid.
+	 */
+	public function add_lines( int $license_id, array $lines ): array {
+		$profile = $this->profile_of( $license_id );
+		$rows    = array();
+		foreach ( $lines as $line ) {
+			$rows[] = $this->normalize( $profile, (array) $line );
+		}
+
+		$created = array();
+		foreach ( $rows as $row ) {
+			$row['license_id'] = $license_id;
+			$line              = $this->repo->find_by_id( $this->repo->create( $row ) );
+			/** This action is documented in EntitlementService::add_line(). */
+			do_action( 'wplm_entitlement_saved', $line, 'added' );
+			$created[] = $line;
+		}
 		return $created;
 	}
 
@@ -470,7 +496,7 @@ class EntitlementService {
 	 *
 	 * @param Profile $profile Profile to check codes against.
 	 * @param array   $line    Raw line.
-	 * @return array{kind: string, code: string, qty: int, paid_through: string|null, source: string, subscription_id: int|null}
+	 * @return array{kind: string, code: string, qty: int, paid_through: string|null, source: string, subscription_id: int|null, order_id: int|null}
 	 * @throws \InvalidArgumentException On any invalid field.
 	 */
 	private function normalize( Profile $profile, array $line ): array {
@@ -510,6 +536,7 @@ class EntitlementService {
 		}
 
 		$subscription_id = isset( $line['subscription_id'] ) && (int) $line['subscription_id'] > 0 ? (int) $line['subscription_id'] : null;
+		$order_id        = isset( $line['order_id'] ) && (int) $line['order_id'] > 0 ? (int) $line['order_id'] : null;
 
 		return array(
 			'kind'            => $kind,
@@ -518,6 +545,7 @@ class EntitlementService {
 			'paid_through'    => $paid_through,
 			'source'          => $source,
 			'subscription_id' => $subscription_id,
+			'order_id'        => $order_id,
 		);
 	}
 }

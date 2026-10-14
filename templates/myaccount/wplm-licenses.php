@@ -5,12 +5,14 @@
  * @var \WPLM\Models\License[] $licenses
  * @var array<int, array<string, array{label: string, until: string|null, state: string}>> $modules
  *      Per licence id: an entitlement licence's modules (empty for a classic licence).
+ * @var array<int, string> $addon_urls Per licence id: where to buy add-ons for it (absent when none).
  * @package WPLM
  */
 
 defined( 'ABSPATH' ) || exit;
 
-$modules = isset( $modules ) && is_array( $modules ) ? $modules : array();
+$modules    = isset( $modules ) && is_array( $modules ) ? $modules : array();
+$addon_urls = isset( $addon_urls ) && is_array( $addon_urls ) ? $addon_urls : array();
 ?>
 
 <h2><?php esc_html_e( 'My Licenses', 'wp-license-manager' ); ?></h2>
@@ -72,6 +74,11 @@ $modules = isset( $modules ) && is_array( $modules ) ? $modules : array();
 				<?php if ( in_array( $license->status, array( 1, 2 ), true ) ) : ?>
 					<a href="<?php echo esc_url( add_query_arg( 'view', $license->id, wc_get_account_endpoint_url( 'wplm-licenses' ) ) ); ?>" class="button">
 						<?php esc_html_e( 'View Devices', 'wp-license-manager' ); ?>
+					</a>
+				<?php endif; ?>
+				<?php if ( isset( $addon_urls[ $license->id ] ) ) : ?>
+					<a href="<?php echo esc_url( $addon_urls[ $license->id ] ); ?>" class="button wplm-add-to-licence">
+						<?php esc_html_e( 'Add modules or users', 'wp-license-manager' ); ?>
 					</a>
 				<?php endif; ?>
 			</td>

@@ -8,6 +8,7 @@
 namespace WPLM\Repositories;
 
 use WPLM\Models\Subscription;
+use WPLM\Models\SubscriptionItem;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -181,6 +182,87 @@ class SubscriptionRepository {
 	 */
 	public function update_status( int $id, string $status ): bool {
 		return $this->update( $id, array( 'status' => $status ) );
+	}
+
+	// -------------------------------------------------------------------------
+	// Items (what one cycle bills)
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Every item of a subscription, oldest first.
+	 *
+	 * @param int $subscription_id Subscription id.
+	 * @return SubscriptionItem[]
+	 */
+	public function get_items( int $subscription_id ): array {
+		global $wpdb;
+		$table = $wpdb->prefix . 'wplm_subscription_items';
+		$rows  = $wpdb->get_results(
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+			$wpdb->prepare( "SELECT id, subscription_id, product_id, variation_id, quantity, line_total, meta FROM `{$table}` WHERE subscription_id = %d ORDER BY id ASC", $subscription_id ),
+			ARRAY_A
+		);
+		return is_array( $rows ) ? array_map( array( SubscriptionItem::class, 'from_row' ), $rows ) : array();
+	}
+
+	/**
+	 * Add an item to a subscription.
+	 *
+	 * @param int   $subscription_id Subscription id.
+	 * @param array $data            product_id, variation_id, quantity, line_total (the whole line), meta (array).
+	 * @return int Item id.
+	 * @throws \RuntimeException On DB error.
+	 */
+	public function add_item( int $subscription_id, array $data ): int {
+		global $wpdb;
+		$ok = $wpdb->insert(
+			$wpdb->prefix . 'wplm_subscription_items',
+			array(
+				'subscription_id' => $subscription_id,
+				'product_id'      => (int) ( $data['product_id'] ?? 0 ),
+				'variation_id'    => isset( $data['variation_id'] ) ? (int) $data['variation_id'] : null,
+				'quantity'        => (int) ( $data['quantity'] ?? 1 ),
+				'line_total'      => (float) ( $data['line_total'] ?? 0.0 ),
+				'meta'            => wp_json_encode( (array) ( $data['meta'] ?? array() ) ),
+			)
+		);
+		if ( false === $ok ) {
+			throw new \RuntimeException( 'WPLM SubscriptionRepository: item INSERT failed — ' . $wpdb->last_error );
+		}
+		return (int) $wpdb->insert_id;
+	}
+
+	/**
+	 * Change an item's total and/or meta.
+	 *
+	 * @param int   $item_id Item id.
+	 * @param array $data    line_total and/or meta (array).
+	 * @return bool
+	 */
+	public function update_item( int $item_id, array $data ): bool {
+		global $wpdb;
+		$update = array();
+		if ( array_key_exists( 'line_total', $data ) ) {
+			$update['line_total'] = (float) $data['line_total'];
+		}
+		if ( array_key_exists( 'meta', $data ) ) {
+			$update['meta'] = wp_json_encode( (array) $data['meta'] );
+		}
+		if ( array() === $update ) {
+			return false;
+		}
+		return false !== $wpdb->update( $wpdb->prefix . 'wplm_subscription_items', $update, array( 'id' => $item_id ) );
+	}
+
+	/**
+	 * Remove an item.
+	 *
+	 * @param int $item_id Item id.
+	 * @return bool True when a row was removed.
+	 */
+	public function delete_item( int $item_id ): bool {
+		global $wpdb;
+		return (int) $wpdb->delete( $wpdb->prefix . 'wplm_subscription_items', array( 'id' => $item_id ), array( '%d' ) ) > 0;
 	}
 
 	// -------------------------------------------------------------------------

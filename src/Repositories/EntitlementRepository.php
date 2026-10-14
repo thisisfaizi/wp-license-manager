@@ -18,7 +18,7 @@ defined( 'ABSPATH' ) || exit;
 class EntitlementRepository {
 
 	/** Columns selected on every read. */
-	private const COLUMNS = 'id, license_id, kind, code, qty, paid_through, source, subscription_id, created_at, updated_at';
+	private const COLUMNS = 'id, license_id, kind, code, qty, paid_through, source, subscription_id, order_id, created_at, updated_at';
 
 	/** @return string Fully-qualified table name. */
 	private function table(): string {
@@ -72,6 +72,24 @@ class EntitlementRepository {
 		$rows  = $wpdb->get_results(
 			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table and column list are constants.
 			$wpdb->prepare( "SELECT {$cols} FROM `{$table}` WHERE subscription_id = %d ORDER BY id ASC", $subscription_id ),
+			ARRAY_A
+		);
+		return is_array( $rows ) ? array_map( array( Entitlement::class, 'from_row' ), $rows ) : array();
+	}
+
+	/**
+	 * Every line an order added (add-on purchases).
+	 *
+	 * @param int $order_id WooCommerce order id.
+	 * @return Entitlement[]
+	 */
+	public function get_by_order( int $order_id ): array {
+		global $wpdb;
+		$table = $this->table();
+		$cols  = self::COLUMNS;
+		$rows  = $wpdb->get_results(
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table and column list are constants.
+			$wpdb->prepare( "SELECT {$cols} FROM `{$table}` WHERE order_id = %d ORDER BY id ASC", $order_id ),
 			ARRAY_A
 		);
 		return is_array( $rows ) ? array_map( array( Entitlement::class, 'from_row' ), $rows ) : array();

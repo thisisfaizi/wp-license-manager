@@ -9,7 +9,10 @@ namespace WPLM\Integrations\WooCommerce;
 
 defined( 'ABSPATH' ) || exit;
 
+use WPLM\Licensing\ProfileRegistry;
+use WPLM\Repositories\EntitlementRepository;
 use WPLM\Repositories\LicenseRepository;
+use WPLM\Services\AddonService;
 use WPLM\Support\Logger;
 use WPLM\Support\SetupPdf;
 
@@ -21,17 +24,30 @@ use WPLM\Support\SetupPdf;
  *
  * It renders only for the customer's *completed* order email: the processing email is sent before a
  * licence exists, and the admin copies have no business carrying keys.
+ *
+ * An order that bought add-ons for an existing licence issues no key: its email says what was added
+ * to which licence ("Added to your licence ending ABCD: …") and attaches nothing.
  */
 class OrderEmailKeys {
 
 	/** @var LicenseRepository */
 	private LicenseRepository $licenses;
 
+	/** @var EntitlementRepository|null */
+	private ?EntitlementRepository $lines;
+
+	/** @var ProfileRegistry|null */
+	private ?ProfileRegistry $profiles;
+
 	/**
-	 * @param LicenseRepository $licenses Reads the licences issued for an order.
+	 * @param LicenseRepository          $licenses Reads the licences issued for an order.
+	 * @param EntitlementRepository|null $lines    Reads the add-on lines an order added.
+	 * @param ProfileRegistry|null       $profiles Names what those lines grant.
 	 */
-	public function __construct( LicenseRepository $licenses ) {
+	public function __construct( LicenseRepository $licenses, ?EntitlementRepository $lines = null, ?ProfileRegistry $profiles = null ) {
 		$this->licenses = $licenses;
+		$this->lines    = $lines;
+		$this->profiles = $profiles;
 	}
 
 	/** Register the email hooks. */
@@ -160,6 +176,7 @@ class OrderEmailKeys {
 
 		$keys = $this->keys_for( $order );
 		if ( empty( $keys ) ) {
+			$this->render_addons( $order, (bool) $plain_text );
 			return;
 		}
 
@@ -170,12 +187,65 @@ class OrderEmailKeys {
 
 		if ( $plain_text ) {
 			echo "\n\n" . esc_html( strtoupper( $heading ) ) . "\n" . esc_html( $body ) . "\n\n";
-			return;
+		} else {
+			echo '<div style="margin:24px 0;padding:16px;border:1px solid #e0e0e0;border-radius:4px;">';
+			echo '<h2 style="margin:0 0 12px;font-size:16px;">' . esc_html( $heading ) . '</h2>';
+			echo '<p style="margin:0;">' . esc_html( $body ) . '</p>';
+			echo '</div>';
 		}
 
+		// One order can issue a new licence and add to an existing one.
+		$this->render_addons( $order, (bool) $plain_text );
+	}
+
+	/**
+	 * Say what an add-on order added, per licence. Read from the lines by order id: the order object
+	 * WooCommerce hands the email was loaded before fulfilment, so its items do not yet show the lines.
+	 *
+	 * @param \WC_Order $order      The order.
+	 * @param bool      $plain_text Whether the email is plain text.
+	 * @return void
+	 */
+	private function render_addons( \WC_Order $order, bool $plain_text ): void {
+		if ( null === $this->lines || null === $this->profiles ) {
+			return;
+		}
+		$by_licence = array();
+		foreach ( $this->lines->get_by_order( $order->get_id() ) as $line ) {
+			if ( 'addon' === $line->source ) {
+				$by_licence[ $line->license_id ][] = $line;
+			}
+		}
+		$sentences = array();
+		foreach ( $by_licence as $license_id => $lines ) {
+			$license = $this->licenses->find_by_id( (int) $license_id );
+			$profile = null !== $license ? $this->profiles->get( $license->profile ) : null;
+			if ( null === $profile ) {
+				continue;
+			}
+			$sentences[] = sprintf(
+				/* translators: 1: "licence ending ABCD", 2: what was added */
+				__( 'Added to your %1$s: %2$s.', 'wp-license-manager' ),
+				AddonService::licence_label( $license ),
+				AddonService::describe_lines( $lines, $profile )
+			);
+		}
+		if ( array() === $sentences ) {
+			return;
+		}
+		$heading = __( 'Added to your licence', 'wp-license-manager' );
+		$after   = __( 'Your licence key stays the same. Each computer picks up the change the next time it checks in.', 'wp-license-manager' );
+
+		if ( $plain_text ) {
+			echo "\n\n" . esc_html( strtoupper( $heading ) ) . "\n" . esc_html( implode( "\n", $sentences ) ) . "\n" . esc_html( $after ) . "\n\n";
+			return;
+		}
 		echo '<div style="margin:24px 0;padding:16px;border:1px solid #e0e0e0;border-radius:4px;">';
 		echo '<h2 style="margin:0 0 12px;font-size:16px;">' . esc_html( $heading ) . '</h2>';
-		echo '<p style="margin:0;">' . esc_html( $body ) . '</p>';
+		foreach ( $sentences as $sentence ) {
+			echo '<p style="margin:0 0 8px;">' . esc_html( $sentence ) . '</p>';
+		}
+		echo '<p style="margin:0;">' . esc_html( $after ) . '</p>';
 		echo '</div>';
 	}
 

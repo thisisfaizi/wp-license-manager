@@ -15,6 +15,7 @@ use WPLM\Licensing\ProfileRegistry;
 use WPLM\Models\License;
 use WPLM\Repositories\LicenseRepository;
 use WPLM\Repositories\MachineRepository;
+use WPLM\Services\AddonService;
 use WPLM\Services\EntitlementService;
 
 /**
@@ -43,12 +44,16 @@ class MyAccountLicences {
 	/** @var ProfileRegistry */
 	private ProfileRegistry $profiles;
 
-	public function __construct( LicenseRepository $licenses, MachineRepository $machines, CheckInService $check_in, EntitlementService $entitlements, ProfileRegistry $profiles ) {
+	/** @var AddonService|null */
+	private ?AddonService $addons;
+
+	public function __construct( LicenseRepository $licenses, MachineRepository $machines, CheckInService $check_in, EntitlementService $entitlements, ProfileRegistry $profiles, ?AddonService $addons = null ) {
 		$this->licenses     = $licenses;
 		$this->machines     = $machines;
 		$this->check_in     = $check_in;
 		$this->entitlements = $entitlements;
 		$this->profiles     = $profiles;
+		$this->addons       = $addons;
 	}
 
 	/** Hook the Move button's handler. */
@@ -131,15 +136,22 @@ class MyAccountLicences {
 		$licenses = $result['items'] ?? array();
 		$today    = wp_date( 'Y-m-d' );
 		$summary  = array();
+		$addons   = array();
 		foreach ( $licenses as $license ) {
 			$summary[ $license->id ] = $this->modules( $license, $today );
+			// Where to buy modules or users for this licence (the add-on product, preselecting it).
+			$url = null !== $this->addons ? $this->addons->product_url_for( $license ) : '';
+			if ( '' !== $url ) {
+				$addons[ $license->id ] = $url;
+			}
 		}
 
 		wc_get_template(
 			'myaccount/wplm-licenses.php',
 			array(
-				'licenses' => $licenses,
-				'modules'  => $summary,
+				'licenses'   => $licenses,
+				'modules'    => $summary,
+				'addon_urls' => $addons,
 			),
 			'',
 			WPLM_PLUGIN_DIR . 'templates/'

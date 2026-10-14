@@ -79,23 +79,46 @@ class PlanService {
 	/**
 	 * Create a plan.
 	 *
-	 * @param array $data name, description, status, profile (licence profile code or null).
+	 * @param array $data name, description, status, profile (licence profile code or null), kind
+	 *                    (standalone|addon; an add-on plan must sell a profile).
 	 * @return int New plan id.
-	 * @throws \InvalidArgumentException When name is empty or the profile is unknown.
+	 * @throws \InvalidArgumentException When name is empty, the profile is unknown, or an add-on plan has no profile.
 	 */
 	public function create_plan( array $data ): int {
 		$name = trim( (string) ( $data['name'] ?? '' ) );
 		if ( '' === $name ) {
 			throw new \InvalidArgumentException( 'WPLM PlanService: plan name is required.' );
 		}
+		$profile = $this->checked_profile( $data['profile'] ?? null );
+		$kind    = $this->checked_kind( $data['kind'] ?? null, $profile );
 		return $this->plan_repo->create(
 			array(
 				'name'        => $name,
 				'description' => isset( $data['description'] ) ? (string) $data['description'] : null,
-				'profile'     => $this->checked_profile( $data['profile'] ?? null ),
+				'profile'     => $profile,
+				'kind'        => $kind,
 				'status'      => isset( $data['status'] ) ? (int) $data['status'] : 1,
 			)
 		);
+	}
+
+	/**
+	 * Validate a plan kind against the profile it will sell.
+	 *
+	 * @param mixed       $kind    Raw kind; anything but 'addon' is standalone.
+	 * @param string|null $profile The plan's profile code.
+	 * @return string
+	 * @throws \InvalidArgumentException When an add-on plan has no profile: an add-on adds lines to an
+	 *                                   entitlement licence, and a classic licence has none.
+	 */
+	private function checked_kind( $kind, ?string $profile ): string {
+		if ( Plan::KIND_ADDON !== $kind ) {
+			return Plan::KIND_STANDALONE;
+		}
+		if ( null === $profile ) {
+			throw new \InvalidArgumentException( 'An add-on plan must sell a licence type with modules and limits.' );
+		}
+		return Plan::KIND_ADDON;
 	}
 
 	/**
@@ -118,6 +141,12 @@ class PlanService {
 		}
 		if ( array_key_exists( 'profile', $data ) ) {
 			$update['profile'] = $this->checked_profile( $data['profile'] );
+		}
+		if ( array_key_exists( 'kind', $data ) || array_key_exists( 'profile', $data ) ) {
+			$current        = $this->plan_repo->find_by_id( $id, false );
+			$kind           = array_key_exists( 'kind', $data ) ? $data['kind'] : ( null !== $current ? $current->kind : null );
+			$profile        = array_key_exists( 'profile', $update ) ? $update['profile'] : ( null !== $current ? $current->profile : null );
+			$update['kind'] = $this->checked_kind( $kind, $profile );
 		}
 		return empty( $update ) ? false : $this->plan_repo->update( $id, $update );
 	}
@@ -172,9 +201,10 @@ class PlanService {
 		$kept_ids     = array();
 		$order        = 0;
 
-		$rows = array();
+		$addon = null !== $plan && $plan->is_addon();
+		$rows  = array();
 		foreach ( $packages as $pkg ) {
-			$data        = $this->normalize_package( $pkg, $plan_id, $order );
+			$data        = $this->normalize_package( $pkg, $plan_id, $order, $addon );
 			$incoming_id = (int) ( $pkg['id'] ?? 0 );
 			$is_existing = $incoming_id > 0 && in_array( $incoming_id, $existing_ids, true );
 
@@ -213,9 +243,10 @@ class PlanService {
 	 * @param array $pkg     Raw package fields.
 	 * @param int   $plan_id Owning plan id.
 	 * @param int   $order   Sort order.
+	 * @param bool  $addon   Whether the plan sells add-ons to an existing licence.
 	 * @return array
 	 */
-	private function normalize_package( array $pkg, int $plan_id, int $order ): array {
+	private function normalize_package( array $pkg, int $plan_id, int $order, bool $addon = false ): array {
 		$allowed_periods = array( 'day', 'week', 'month', 'year' );
 		$allowed_types   = array( 'recurring', 'lifetime', 'onetime' );
 		$type            = in_array( $pkg['billing_type'] ?? '', $allowed_types, true ) ? $pkg['billing_type'] : 'recurring';
@@ -233,6 +264,32 @@ class PlanService {
 		// type has a term. Whatever was posted for the other types — or not posted, since the editor
 		// disables the fields it hides — is reset here, so a stored row never carries a field that
 		// cannot apply to it. A one-time row with no days stays null: it grants for life, as before.
+		//
+		// An add-on type adds lines to a licence the customer already has: it issues no key (no generator,
+		// no computers), the licence's profile owns grace, and it is paid in full now and then billed with
+		// the plan it joins (no sign-up fee, trial or length of its own).
+		if ( $addon ) {
+			return array(
+				'plan_id'          => $plan_id,
+				'name'             => trim( (string) ( $pkg['name'] ?? '' ) ),
+				'billing_type'     => $type,
+				'billing_period'   => $recurring ? $period : 'month',
+				'billing_interval' => $recurring ? max( 1, (int) ( $pkg['billing_interval'] ?? 1 ) ) : 1,
+				'price'            => (float) ( $pkg['price'] ?? 0 ),
+				'signup_fee'       => 0.0,
+				'trial_days'       => 0,
+				'length_cycles'    => 0,
+				'generator_id'     => null,
+				'max_activations'  => null,
+				'overage_strategy' => 'deny',
+				'valid_for_days'   => 'onetime' === $type && null !== $days && $days > 0 ? $days : null,
+				'grace_days'       => null,
+				'benefits'         => array_values( (array) $benefits ),
+				'sort_order'       => $order,
+				'status'           => isset( $pkg['status'] ) ? (int) $pkg['status'] : 1,
+			);
+		}
+
 		return array(
 			'plan_id'          => $plan_id,
 			'name'             => trim( (string) ( $pkg['name'] ?? '' ) ),

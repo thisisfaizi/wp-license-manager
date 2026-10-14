@@ -56,6 +56,17 @@ final class Profile {
 	 */
 	public array $template_excluded_codes = array();
 
+	/**
+	 * Modules that an add-on may only be added beside: module code => the module codes of which the
+	 * licence must already have (or the same add-on must grant) at least one. For example
+	 * `array( 'fbr' => array( 'distribution', 'pos' ) )` sells FBR only to a licence with Distribution
+	 * or Point of Sale. Checked when an add-on is bought for an existing licence
+	 * ({@see \WPLM\Services\AddonService::check()}); a module with no entry needs nothing.
+	 *
+	 * @var array<string, string[]>
+	 */
+	public array $requires = array();
+
 	/** @var array<string, string> */
 	private array $labels;
 

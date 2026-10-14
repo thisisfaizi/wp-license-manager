@@ -120,4 +120,54 @@ class SchemaUpgradeTest extends TestCase {
 		$this->assertSame( 1, (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}wplm_entitlements WHERE license_id = " . (int) $classic->id ) );
 		$this->assertSame( WPLM_DB_VERSION, get_option( 'wplm_db_version' ) );
 	}
+
+	/** 1.2.1 → 1.2.2 (WPLM 1.2.6): plans gain a kind, lines gain the order that added them; rows survive. */
+	public function test_a_1_2_1_database_gains_plan_kinds_and_line_orders_and_keeps_its_rows(): void {
+		global $wpdb;
+		$p = $wpdb->prefix . 'wplm_';
+
+		$plan_id             = $this->make( \WPLM\Services\PlanService::class )->create_plan(
+			array(
+				'name'    => 'Pre-1.2.6 plan',
+				'profile' => 'acme-office',
+			)
+		);
+		$licence             = $this->make( LicenseService::class )->create(
+			array(
+				'key_string' => 'PRE-' . wp_generate_password( 12, false ),
+				'profile'    => 'acme-office',
+			)
+		);
+		$this->license_ids[] = $licence->id;
+		$line_id             = $this->make( EntitlementRepository::class )->create(
+			array(
+				'license_id' => $licence->id,
+				'kind'       => 'module',
+				'code'       => 'base',
+			)
+		);
+
+		$wpdb->query( "ALTER TABLE {$p}entitlements DROP INDEX order_id, DROP COLUMN order_id" );
+		$wpdb->query( "ALTER TABLE {$p}plans DROP COLUMN kind" );
+		update_option( 'wplm_db_version', '1.2.1' );
+		$wpdb->query( 'COMMIT' );
+		$this->assertFalse( $this->has_column( 'plans', 'kind' ), 'Precondition: the downgrade took.' );
+		$this->assertFalse( $this->has_column( 'entitlements', 'order_id' ) );
+
+		Plugin::get_instance()->maybe_upgrade_db();
+
+		$this->assertSame( '', $wpdb->last_error );
+		$this->assertSame( '1.2.2', get_option( 'wplm_db_version' ) );
+		$this->assertTrue( $this->has_column( 'plans', 'kind' ) );
+		$this->assertTrue( $this->has_column( 'entitlements', 'order_id' ) );
+		$this->assertNotEmpty( $wpdb->get_results( "SHOW INDEX FROM {$p}entitlements WHERE Key_name = 'order_id'" ), 'The order lookup is indexed.' );
+
+		$plan = $this->make( \WPLM\Services\PlanService::class )->get( $plan_id );
+		$this->assertSame( 'standalone', $plan->kind, 'An existing plan keeps selling its own licence.' );
+		$line = $this->make( EntitlementRepository::class )->find_by_id( $line_id );
+		$this->assertNotNull( $line, 'The line survives.' );
+		$this->assertNull( $line->order_id );
+
+		$wpdb->delete( $p . 'plans', array( 'id' => $plan_id ) );
+	}
 }
