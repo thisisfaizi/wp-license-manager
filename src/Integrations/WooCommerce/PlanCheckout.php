@@ -1701,9 +1701,25 @@ class PlanCheckout {
 				throw new \RuntimeException( 'the licence issued for this line no longer exists' );
 			}
 			$snapshot = $this->extras_snapshot_for( $pkg, $json );
-			$sub_id   = (int) $item->get_meta( '_wplm_subscription_id' );
-			$sub      = $sub_id > 0 ? $this->subscriptions->get( $sub_id ) : null;
-			$through  = null;
+
+			// Recurring add-ons on a lifetime licence (v2): one add-ons-only subscription, created once
+			// (a retry reuses it through `_wplm_addons_subscription_id`), its first period paid now.
+			$addons         = null;
+			$addons_through = null;
+			if ( null !== ( $snapshot['cycle'] ?? null ) ) {
+				$addons_id = (int) $item->get_meta( '_wplm_addons_subscription_id' );
+				$addons    = $addons_id > 0 ? $this->subscriptions->get( $addons_id ) : null;
+				if ( null === $addons ) {
+					$addons = $this->addons()->create_addons_subscription( $license, $order, (string) $snapshot['cycle'] );
+					$item->update_meta_data( '_wplm_addons_subscription_id', $addons->id );
+					$item->save_meta_data();
+				}
+				$addons_through = $this->addons()->addons_paid_through( $addons );
+			}
+
+			$sub_id  = (int) $item->get_meta( '_wplm_subscription_id' );
+			$sub     = $sub_id > 0 ? $this->subscriptions->get( $sub_id ) : null;
+			$through = null;
 			if ( $sub_id > 0 ) {
 				if ( null === $sub ) {
 					throw new \RuntimeException( 'the subscription issued for this line no longer exists' );
@@ -1719,7 +1735,7 @@ class PlanCheckout {
 					throw new \RuntimeException( 'the licence has no paid-through day to align the add-ons with' );
 				}
 			}
-			$this->addons()->apply_extras( $order, $item, $license, $snapshot['items'], $sub, $through );
+			$this->addons()->apply_extras( $order, $item, $license, $snapshot['items'], $sub, $through, null, $addons, $addons_through );
 		} catch ( \Throwable $e ) {
 			++$failed;
 			\WPLM\Support\Logger::error( 'PlanCheckout: add-ons failed for package ' . $pkg->id . ' (order item ' . $item->get_id() . ') — ' . $e->getMessage() );

@@ -421,6 +421,7 @@ class EntitlementPanel {
 			esc_html_e( 'Nothing locks a customer automatically: an unpaid module goes read-only on its own after grace. Suspend is your manual lock; revoke is for fraud and chargebacks.', 'wp-license-manager' );
 			?>
 		</p>
+		<?php $this->render_addons_subscriptions( $license ); ?>
 		<?php if ( 6 === $license->status ) : ?>
 			<p><?php esc_html_e( 'A terminated licence cannot be changed.', 'wp-license-manager' ); ?></p>
 		<?php elseif ( $locked ) : ?>
@@ -447,6 +448,37 @@ class EntitlementPanel {
 			</form>
 		<?php endif; ?>
 		<?php
+	}
+
+	/**
+	 * The add-ons-only subscriptions of a lifetime licence (v2): what they bill and their status, which
+	 * never changes the licence's own.
+	 *
+	 * @param License $license The licence.
+	 * @return void
+	 */
+	private function render_addons_subscriptions( License $license ): void {
+		$subs = \WPLM\Plugin::get_instance()->container()->make( \WPLM\Repositories\SubscriptionRepository::class )->get_addons_for_license( $license->id );
+		if ( array() === $subs ) {
+			return;
+		}
+		echo '<h3 id="wplm-addons-subscriptions">' . esc_html__( 'Add-ons billed monthly or yearly', 'wp-license-manager' ) . '</h3><ul>';
+		foreach ( $subs as $sub ) {
+			echo '<li><a href="' . esc_url( admin_url( 'admin.php?page=wplm-subscriptions&action=edit&id=' . (int) $sub->id ) ) . '">';
+			/* translators: %d: subscription id */
+			echo esc_html( sprintf( __( 'subscription #%d', 'wp-license-manager' ), $sub->id ) ) . '</a> — ';
+			echo esc_html(
+				sprintf(
+					/* translators: 1: status, 2: amount, 3: period */
+					__( '%1$s, %2$s every %3$s', 'wp-license-manager' ),
+					strtolower( $sub->status_label() ),
+					wp_strip_all_tags( function_exists( 'wc_price' ) ? wc_price( $sub->recurring_total, array( 'currency' => $sub->currency ) ) : (string) $sub->recurring_total ),
+					$sub->billing_period
+				)
+			);
+			echo '</li>';
+		}
+		echo '</ul><p class="description">' . esc_html__( 'The licence itself is for life and keeps its status whatever happens to these subscriptions; only the add-ons they pay for lapse after grace.', 'wp-license-manager' ) . '</p>';
 	}
 
 	/** Recent licence events the owner cares about. */

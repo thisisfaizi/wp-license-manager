@@ -170,4 +170,38 @@ class SchemaUpgradeTest extends TestCase {
 
 		$wpdb->delete( $p . 'plans', array( 'id' => $plan_id ) );
 	}
+
+	/** 1.2.2 → 1.3.0: subscriptions gain addons_license_id (add-ons-only subscriptions); rows survive. */
+	public function test_a_1_2_2_database_gains_addons_only_subscriptions_and_keeps_its_rows(): void {
+		global $wpdb;
+		$p = $wpdb->prefix . 'wplm_';
+		$wpdb->query( "ALTER TABLE {$p}subscriptions DROP INDEX addons_license_id, DROP COLUMN addons_license_id" );
+		$wpdb->insert(
+			$p . 'subscriptions',
+			array(
+				'user_id'         => 1,
+				'license_id'      => 42,
+				'status'          => 'active',
+				'recurring_total' => 5000,
+				'created_at'      => gmdate( 'Y-m-d H:i:s' ),
+				'updated_at'      => gmdate( 'Y-m-d H:i:s' ),
+			)
+		);
+		$sub_id = (int) $wpdb->insert_id;
+		update_option( 'wplm_db_version', '1.2.2' );
+		$wpdb->query( 'COMMIT' );
+		$this->assertFalse( $this->has_column( 'subscriptions', 'addons_license_id' ), 'Precondition: the downgrade took.' );
+
+		Plugin::get_instance()->maybe_upgrade_db();
+
+		$this->assertSame( '', $wpdb->last_error );
+		$this->assertSame( '1.3.0', get_option( 'wplm_db_version' ) );
+		$this->assertTrue( $this->has_column( 'subscriptions', 'addons_license_id' ) );
+		$this->assertNotEmpty( $wpdb->get_results( "SHOW INDEX FROM {$p}subscriptions WHERE Key_name = 'addons_license_id'" ) );
+		$sub = $this->make( \WPLM\Repositories\SubscriptionRepository::class )->find_by_id( $sub_id );
+		$this->assertSame( 42, $sub->license_id, 'An existing subscription keeps its licence.' );
+		$this->assertFalse( $sub->is_addons_only() );
+
+		$wpdb->delete( $p . 'subscriptions', array( 'id' => $sub_id ) );
+	}
 }

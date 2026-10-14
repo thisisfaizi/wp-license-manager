@@ -478,6 +478,76 @@ class AddonService {
 	}
 
 	/**
+	 * Create the add-ons-only subscription of a lifetime licence (v2): pending until its first add-on
+	 * is written, billed every 1 `$cycle`, its first period paid now (next payment = now + 1 cycle), and
+	 * linked through `addons_license_id` — never `license_id`, so its status never reaches the licence.
+	 *
+	 * @param License   $license The lifetime licence.
+	 * @param \WC_Order $order   The order that pays its first period.
+	 * @param string    $cycle   `month` or `year`.
+	 * @param int|null  $now     Unix time (tests).
+	 * @return Subscription
+	 */
+	public function create_addons_subscription( License $license, \WC_Order $order, string $cycle, ?int $now = null ): Subscription {
+		if ( ! in_array( $cycle, PackageExtrasService::CYCLES, true ) ) {
+			throw new \RuntimeException( 'unknown add-ons billing cycle' );
+		}
+		$next  = ( new \DateTimeImmutable( '@' . ( $now ?? time() ) ) )->modify( '+1 ' . $cycle )->format( 'Y-m-d H:i:s' );
+		$token = null;
+		if ( class_exists( '\WC_Payment_Tokens' ) ) {
+			$default = \WC_Payment_Tokens::get_customer_default_token( $order->get_customer_id() );
+			$token   = $default ? $default->get_id() : null;
+		}
+		return $this->subscription_service()->create(
+			array(
+				'user_id'           => (int) $order->get_customer_id(),
+				'billing_interval'  => 1,
+				'billing_period'    => $cycle,
+				'recurring_total'   => 0,
+				'currency'          => $order->get_currency() ?: ( function_exists( 'get_woocommerce_currency' ) ? get_woocommerce_currency() : 'USD' ),
+				'next_payment'      => $next,
+				'parent_order_id'   => $order->get_id(),
+				'payment_method'    => $order->get_payment_method(),
+				'payment_token_id'  => $token,
+				'addons_license_id' => $license->id,
+			)
+		);
+	}
+
+	/** The subscription service (from the container: the constructor is unchanged). */
+	private function subscription_service(): \WPLM\Services\Subscriptions\SubscriptionService {
+		return \WPLM\Plugin::get_instance()->container()->make( \WPLM\Services\Subscriptions\SubscriptionService::class );
+	}
+
+	/**
+	 * {@see addons_label()} from anywhere (admin screens, templates).
+	 *
+	 * @param Subscription $sub The subscription.
+	 * @return string
+	 */
+	public static function label_for( Subscription $sub ): string {
+		if ( ! $sub->is_addons_only() ) {
+			return '';
+		}
+		return \WPLM\Plugin::get_instance()->container()->make( self::class )->addons_label( $sub );
+	}
+
+	/**
+	 * "Add-ons for licence ending ABCD": how an add-ons-only subscription is shown.
+	 *
+	 * @param Subscription $sub The subscription.
+	 * @return string Empty when it is not an add-ons-only subscription.
+	 */
+	public function addons_label( Subscription $sub ): string {
+		if ( ! $sub->is_addons_only() ) {
+			return '';
+		}
+		$license = $this->licenses->find_by_id( (int) $sub->addons_license_id );
+		/* translators: %s: "licence ending ABCD" */
+		return null !== $license ? sprintf( __( 'Add-ons for %s', 'wp-license-manager' ), self::licence_label( $license ) ) : __( 'Add-ons for a deleted licence', 'wp-license-manager' );
+	}
+
+	/**
 	 * The cycle new recurring add-ons of a licence are forced to: its add-ons subscription's, or null
 	 * (none yet: the customer chooses).
 	 *
@@ -698,7 +768,16 @@ class AddonService {
 			);
 		}
 		$sold_through = $snapshot['target_paid_through'] ?? null;
-		$written      = $this->apply_extras( $order, $item, $license, $snapshot['items'], $sub, $through, $now );
+
+		// Recurring add-ons on a lifetime licence (v2): join its add-ons subscription, or open one.
+		$addons         = null;
+		$addons_through = null;
+		$cycle          = $snapshot['cycle'] ?? null;
+		if ( null !== $cycle ) {
+			list( $addons, $addons_through ) = $this->addons_target_for( $order, $item, $license, $snapshot, (string) $cycle, $now );
+		}
+
+		$written = $this->apply_extras( $order, $item, $license, $snapshot['items'], $sub, $through, $now, $addons, $addons_through );
 		if ( null !== $sub && null !== $sold_through && $sold_through !== $through ) {
 			$order->add_order_note(
 				sprintf(
@@ -710,6 +789,59 @@ class AddonService {
 			);
 		}
 		return $written;
+	}
+
+	/**
+	 * The add-ons-only subscription an existing lifetime licence's recurring add-ons join, and its
+	 * paid-through day. Its open one when it has one: billed the same cycle, not on hold or overdue,
+	 * and — when the sale recorded one — the same one (a renewal since the sale is noted). Otherwise a
+	 * new one (reused on a retry through `_wplm_addons_subscription_id`).
+	 *
+	 * @return array{0: Subscription, 1: string|null}
+	 * @throws \RuntimeException When the add-ons cannot join.
+	 */
+	private function addons_target_for( \WC_Order $order, $item, License $license, array $snapshot, string $cycle, ?int $now ): array {
+		$mine   = (int) $item->get_meta( '_wplm_addons_subscription_id' );
+		$addons = $mine > 0 ? $this->subscriptions->find_by_id( $mine ) : null;
+		$sold   = $snapshot['addons_subscription_id'] ?? null;
+		if ( null === $addons ) {
+			$addons = $this->addons_subscription( $license );
+			if ( null !== $sold && ( null === $addons || (int) $sold !== $addons->id ) ) {
+				throw new \RuntimeException(
+					/* translators: %d: subscription id */
+					sprintf( __( 'the licence\'s add-ons are no longer billed on subscription #%d, which these add-ons were sold against. Nothing was added', 'wp-license-manager' ), (int) $sold )
+				);
+			}
+		}
+		if ( null === $addons ) {
+			$addons = $this->create_addons_subscription( $license, $order, $cycle, $now );
+			$item->update_meta_data( '_wplm_addons_subscription_id', $addons->id );
+			$item->save_meta_data();
+			return array( $addons, $this->addons_paid_through( $addons ) );
+		}
+		if ( $cycle !== $addons->billing_period || 1 !== (int) $addons->billing_interval ) {
+			throw new \RuntimeException(
+				/* translators: 1: subscription id, 2: cycle */
+				sprintf( __( 'the licence\'s add-ons are billed on subscription #%1$d every %2$s; these were priced otherwise. Nothing was added', 'wp-license-manager' ), $addons->id, $addons->billing_period )
+			);
+		}
+		$through = $this->addons_paid_through( $addons );
+		$today   = wp_date( 'Y-m-d', $now ?? time() );
+		if ( 'pending' !== $addons->status && ( 'on-hold' === $addons->status || null === $through || strcmp( $through, $today ) < 0 ) ) {
+			throw new \RuntimeException( __( 'Pay the licence\'s add-ons renewal first, then add this.', 'wp-license-manager' ) );
+		}
+		$sold_through = $snapshot['addons_paid_through'] ?? null;
+		if ( null !== $sold_through && $sold_through !== $through ) {
+			$order->add_order_note(
+				sprintf(
+					/* translators: 1: paid-through day at the sale, 2: paid-through day now */
+					__( 'WPLM: the licence\'s add-ons renewed after this sale (they were paid through %1$s). These add-ons are aligned with them and cover through %2$s, with no extra charge. Charge the difference by hand if that was not intended.', 'wp-license-manager' ),
+					$sold_through,
+					(string) $through
+				)
+			);
+		}
+		return array( $addons, $through );
 	}
 
 	// -------------------------------------------------------------------------
@@ -810,23 +942,23 @@ class AddonService {
 	 * @param \WC_Order_Item_Product $item         Its line.
 	 * @param License                $license      The licence.
 	 * @param array[]                $items        Checked snapshot items ({@see PackageExtrasService::read_snapshot()}).
-	 * @param Subscription|null      $sub          The subscription recurring extras join, or null.
-	 * @param string|null            $paid_through The plan's paid-through day (with a subscription).
-	 * @param int|null               $now          Unix time (tests).
+	 * @param Subscription|null      $sub            The subscription recurring extras join, or null.
+	 * @param string|null            $paid_through   The plan's paid-through day (with a subscription).
+	 * @param int|null               $now            Unix time (tests).
+	 * @param Subscription|null      $addons_sub     Lifetime licence: the add-ons-only subscription that
+	 *                                               items with a `cycle` join (v2).
+	 * @param string|null            $addons_through Its paid-through day.
 	 * @return Entitlement[] The lines written.
 	 * @throws \RuntimeException When they cannot be written (nothing is left behind).
 	 */
-	public function apply_extras( \WC_Order $order, $item, License $license, array $items, ?Subscription $sub, ?string $paid_through, ?int $now = null ): array {
+	public function apply_extras( \WC_Order $order, $item, License $license, array $items, ?Subscription $sub, ?string $paid_through, ?int $now = null, ?Subscription $addons_sub = null, ?string $addons_through = null ): array {
 		$profile = $this->profiles->get( $license->profile );
 		if ( null === $profile ) {
 			throw new \RuntimeException( 'the licence has no licence profile' );
 		}
 		$units = array();
 		foreach ( $items as $extra ) {
-			if ( null !== ( $extra['cycle'] ?? null ) ) {
-				throw new \RuntimeException( 'recurring add-ons on a lifetime licence need their add-ons subscription' );
-			}
-			$units[] = array(
+			$unit = array(
 				'lines'      => (array) $extra['lines'],
 				'qty'        => max( 1, (int) $extra['qty'] ),
 				'line_total' => round( (float) $extra['amount'], 4 ),
@@ -837,6 +969,15 @@ class AddonService {
 					'label'      => (string) ( $extra['label'] ?? '' ),
 				),
 			);
+			if ( null !== ( $extra['cycle'] ?? null ) ) {
+				if ( null === $addons_sub || $extra['cycle'] !== $addons_sub->billing_period ) {
+					throw new \RuntimeException( 'recurring add-ons on a lifetime licence need an add-ons subscription billed the same way' );
+				}
+				$unit['sub']                 = $addons_sub;
+				$unit['through']             = $addons_through;
+				$unit['meta']['addons_only'] = true;
+			}
+			$units[] = $unit;
 		}
 		if ( array() === $units ) {
 			throw new \RuntimeException( 'no add-ons were bought on this line' );
@@ -844,6 +985,10 @@ class AddonService {
 
 		$written = $this->write_units( $order, $item, $license, $profile, $units, $sub, $paid_through, $now );
 
+		// A new add-ons subscription starts billing once it bills something.
+		if ( null !== $addons_sub && 'pending' === ( $this->subscriptions->find_by_id( $addons_sub->id )->status ?? '' ) ) {
+			$this->subscription_service()->update_status( $addons_sub->id, 'active' );
+		}
 		if ( array() !== $written['sub_items'] ) {
 			$item->update_meta_data( '_wplm_addon_subscription_item_ids', wp_json_encode( $written['sub_items'] ) );
 		}
@@ -893,14 +1038,19 @@ class AddonService {
 		$owner = array(); // Row index => unit index.
 		foreach ( $units as $u => $unit ) {
 			$days = isset( $unit['term_days'] ) && null !== $unit['term_days'] ? (int) $unit['term_days'] : null;
-			$join = null !== $sub && null === $days;
+			// A unit may name its own subscription (a recurring add-on on a lifetime licence joins the
+			// add-ons-only subscription); otherwise the call's.
+			$usub               = array_key_exists( 'sub', $unit ) ? $unit['sub'] : $sub;
+			$uthrough           = array_key_exists( 'through', $unit ) ? $unit['through'] : $paid_through;
+			$join               = null !== $usub && null === $days;
+			$units[ $u ]['sub'] = $join ? $usub : null;
 			foreach ( $unit['lines'] as $line ) {
 				$kind = (string) ( $line['kind'] ?? '' );
 				$code = (string) ( $line['code'] ?? '' );
 				if ( null !== $days ) {
 					$through = $this->one_time_through( $existing, $kind, $code, $today, $profile->grace_days(), $days );
 				} elseif ( $join ) {
-					$through = $paid_through;
+					$through = $uthrough;
 				} else {
 					$through = null;
 				}
@@ -910,7 +1060,7 @@ class AddonService {
 					'qty'             => Entitlement::KIND_LIMIT === $kind ? (int) ( $line['qty'] ?? 0 ) : 0,
 					'paid_through'    => $through,
 					'source'          => 'addon',
-					'subscription_id' => $join ? $sub->id : null,
+					'subscription_id' => $join ? $usub->id : null,
 					'order_id'        => $order->get_id(),
 				);
 				$owner[] = $u;
@@ -928,20 +1078,18 @@ class AddonService {
 			foreach ( $written as $i => $line ) {
 				$by_unit[ $owner[ $i ] ][] = $line->id;
 			}
-			if ( null !== $sub ) {
-				foreach ( $units as $u => $unit ) {
-					if ( isset( $unit['term_days'] ) && null !== $unit['term_days'] ) {
-						continue;
-					}
-					$sub_items[] = $this->attach( $sub, $order, $item, (int) $unit['qty'], (float) $unit['line_total'], (array) ( $unit['meta'] ?? array() ), $license, $by_unit[ $u ] ?? array() );
+			foreach ( $units as $u => $unit ) {
+				if ( null === $unit['sub'] ) {
+					continue;
 				}
+				$sub_items[] = $this->attach( $unit['sub'], $order, $item, (int) $unit['qty'], (float) $unit['line_total'], (array) ( $unit['meta'] ?? array() ), $license, $by_unit[ $u ] ?? array() );
 			}
 		} catch ( \Throwable $e ) {
 			foreach ( array_diff( $this->order_line_ids( $order->get_id(), $license->id ), $before ) as $id ) {
 				$this->entitlements->delete_line( (int) $id );
 			}
 			foreach ( $sub_items as $sub_item ) {
-				$this->detach_item( $sub_item, $sub->id );
+				$this->detach_item( $sub_item );
 			}
 			throw new \RuntimeException( 'the add-on could not be added: ' . $e->getMessage(), 0, $e );
 		}
@@ -1173,6 +1321,12 @@ class AddonService {
 		}
 		$this->subscriptions->delete_item( $sub_item_id );
 		$this->recalculate( $subscription_id );
+
+		// An add-ons-only subscription left with nothing to bill ends (its licence is untouched).
+		if ( null !== $sub && $sub->is_addons_only() && array() === $this->subscriptions->get_items( $subscription_id )
+			&& ! in_array( $sub->status, array( 'cancelled', 'expired' ), true ) ) {
+			$this->subscription_service()->cancel( $subscription_id );
+		}
 	}
 
 	/**

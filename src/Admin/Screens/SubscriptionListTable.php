@@ -175,7 +175,9 @@ class SubscriptionListTable extends \WP_List_Table {
 			),
 		);
 
+		$label = $item instanceof \WPLM\Models\Subscription ? \WPLM\Services\AddonService::label_for( $item ) : '';
 		return '<strong><a href="' . esc_url( $edit_url ) . '">#' . esc_html( (string) $id ) . '</a></strong>'
+			. ( '' !== $label ? '<br><span class="wplm-addons-only">' . esc_html( $label ) . '</span>' : '' )
 			. $this->row_actions( $actions );
 	}
 
@@ -431,7 +433,12 @@ class SubscriptionListTable extends \WP_List_Table {
 							<tr>
 								<th><?php esc_html_e( 'Bound License', 'wp-license-manager' ); ?></th>
 								<td>
-									<?php if ( $sub->license_id ) : ?>
+									<?php if ( $sub->is_addons_only() ) : ?>
+										<a href="<?php echo esc_url( admin_url( 'admin.php?page=wplm-licenses&action=edit&id=' . (int) $sub->addons_license_id ) ); ?>">
+											<?php echo esc_html( \WPLM\Services\AddonService::label_for( $sub ) ); ?>
+										</a>
+										<p class="description"><?php esc_html_e( 'This subscription bills only add-ons of a lifetime licence. Whatever happens to it (on hold, cancelled, expired), the licence keeps its status; only the add-ons it pays for lapse after grace.', 'wp-license-manager' ); ?></p>
+									<?php elseif ( $sub->license_id ) : ?>
 										<a href="<?php echo esc_url( admin_url( 'admin.php?page=wplm-licenses&action=edit&id=' . (int) $sub->license_id ) ); ?>">
 											<?php
 											/* translators: %d: license ID */

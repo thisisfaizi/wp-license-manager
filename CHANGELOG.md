@@ -112,6 +112,53 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     prices add-ons (`wplm_package_extras`). The plans list shows "Add-ons priced by a plugin", and the
     product **Licensing** tab lists it as "Name (add-ons priced by a plugin)".
 
+- **Recurring add-ons on a lifetime licence.** An add-on with no lifetime price can still be sold to a
+  lifetime licence or licence type. The customer pays it monthly or yearly on a subscription that bills
+  **only add-ons**, while the licence itself stays lifetime.
+  - **Offer:** in a lifetime context only, the filter may return
+    `'recurring' => array( 'month' => ?float, 'year' => ?float )` (at least one set) with
+    `'unit_price' => null`. WPLM refuses such an offer in any other context, with a unit price as well,
+    with a negative price, with no price for either cycle, or as a term. Every sanitised offer carries
+    `recurring` (null for an ordinary one).
+  - **Cycle:** `wplm_extras_cycle` (`month` | `year`) is posted and kept in the cart. There is one cycle
+    per cart line. The default is monthly, unless a ticked recurring add-on has no monthly price; then
+    it is yearly. A ticked add-on with no price for the chosen cycle is refused.
+  - **Forced cycle:** a licence that already has an add-ons subscription is forced to that
+    subscription's cycle, whatever is posted. New recurring add-ons join it, aligned with its
+    paid-through day, and are paid in full now.
+  - **Today's price** = lifetime base (new purchase only) + lifetime add-ons + one cycle of each
+    recurring add-on.
+  - **Form data** gains `cycle_by_license` (licence id → the forced `month`/`year`, or null when the
+    customer chooses). The fallback form shows a Monthly / Yearly choice when a recurring offer is
+    listed.
+  - **Snapshot** gains `cycle` on the line and on each item. An item's cycle is null for lifetime and
+    term items. Its `unit_price` is the price charged for that cycle. An existing-licence sale also
+    records `addons_subscription_id` and `addons_paid_through`.
+  - **Fulfilment** creates one add-ons-only subscription, or reuses the licence's open one:
+    - billed every 1 cycle, one item per recurring add-on (`addon`, `addons_only`, `entitlement_ids`);
+    - `recurring_total` is the sum of its items;
+    - the first period is paid now, so its lines are paid through today + 1 cycle;
+    - the lines have `source = addon` and the subscription's id.
+    - It stays pending until its first line is written, and a retry reuses it
+      (`_wplm_addons_subscription_id` on the order line). A changed, on-hold or overdue add-ons
+      subscription fails the line with a note; a renewal since the sale is noted.
+  - **Renewals** of the add-ons subscription charge only its items and extend only its lines.
+  - **Safety:** an add-ons-only subscription is marked by the new column
+    `wplm_subscriptions.addons_license_id` and is **never bound through `license_id`**. Every path that
+    moves a licence because of a subscription checks for it explicitly and leaves the licence alone:
+    - status sync (`SubscriptionService::update_status`, which also covers pause, resume, cancel, REST,
+      My Account and the admin screen);
+    - renewal extension (`RenewalProcessor::apply_payment`);
+    - the seat change on a plan switch;
+    - `bind_license()`, which refuses to bind it.
+    On hold, cancelled, expired, failed or refunded: only its own lines lapse, after their paid-through
+    day plus grace.
+  - **Refunds:** a full refund of the order that bought the licence still suspends or revokes the
+    licence, and now also cancels its add-ons subscription. Removing or refunding the last add-on of an
+    add-ons subscription cancels that subscription; the licence is untouched.
+  - **Labels:** "Add-ons for licence ending ABCD" appears in the admin subscription list and screen and
+    in My Account. The licence's admin panel lists its add-ons subscriptions under its own lifetime
+    status.
 - **Tax.** Extras are part of the same order line as the licence type, so they follow the product's tax
   class and the shop's "prices entered with tax" setting exactly like the base, at checkout and on
   renewal invoices (which bill the subscription's recurring total on the same product).
@@ -148,8 +195,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   product page computes both once per request.
 
 ### Deploy
-- No database change. Deploy this before Super Ledger Licensing 1.4.0, which requires WPLM 1.3.0. Plans
-  built at purchase (1.2.7) and their orders keep working.
+- **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added
+  automatically on the first admin page load after the update, and existing rows are unchanged.
+- Deploy this before Super Ledger Licensing 1.4.0, which requires WPLM 1.3.0. Plans built at purchase
+  (1.2.7) and their orders keep working.
 
 ## [1.2.7] — 2026-10-14
 

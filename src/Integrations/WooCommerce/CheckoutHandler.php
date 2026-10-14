@@ -273,13 +273,17 @@ class CheckoutHandler {
 
 		/** @var \WC_Order_Item_Product $item */
 		foreach ( $order->get_items() as $item ) {
-			// Also cancel any subscription bound to this item.
-			$sub_id = (int) $item->get_meta( '_wplm_subscription_id' );
-			if ( $sub_id > 0 ) {
-				try {
-					$this->subscription_service->cancel( $sub_id, false );
-				} catch ( \Exception $e ) {
-					unset( $e ); // Subscription already cancelled or not found.
+			// Also cancel any subscription bound to this item, and the add-ons-only subscription a
+			// lifetime licence bought with it (v2). Cancelling never changes a licence's status; the
+			// licence below is suspended or revoked only because this order issued it.
+			foreach ( array( '_wplm_subscription_id', '_wplm_addons_subscription_id' ) as $meta_key ) {
+				$sub_id = (int) $item->get_meta( $meta_key );
+				if ( $sub_id > 0 ) {
+					try {
+						$this->subscription_service->cancel( $sub_id, false );
+					} catch ( \Exception $e ) {
+						unset( $e ); // Subscription already cancelled or not found.
+					}
 				}
 			}
 

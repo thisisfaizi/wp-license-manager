@@ -27,7 +27,13 @@ defined( 'ABSPATH' ) || exit;
 	<tbody>
 		<?php foreach ( $subscriptions as $sub ) : ?>
 		<tr>
-			<td><?php echo esc_html( '#' . $sub->id ); ?></td>
+			<td>
+				<?php echo esc_html( '#' . $sub->id ); ?>
+				<?php $wplm_addons_label = \WPLM\Services\AddonService::label_for( $sub ); ?>
+				<?php if ( '' !== $wplm_addons_label ) : ?>
+					<br><small class="wplm-addons-only"><?php echo esc_html( $wplm_addons_label ); ?></small>
+				<?php endif; ?>
+			</td>
 			<td>
 				<span class="wplm-badge">
 					<?php echo esc_html( $sub->status_label() ); ?>
