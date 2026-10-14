@@ -199,6 +199,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   `AddonService::blocked_targets()` accepts the eligible targets the caller already has, and the
   product page computes both once per request.
 
+### Fixed (pre-release review)
+- **A retried fulfilment never writes or bills add-ons twice.** An order line is stamped
+  (`_wplm_entitlement_ids`) right after its add-ons are written, before the add-ons subscription is
+  started or any hook runs; a listener that fails on that status change is logged and no longer fails
+  the line. Add-on lines an interrupted attempt wrote but never stamped (a fatal or a timeout) are taken
+  back before the retry writes them again (`AddonService::discard_unstamped()`), on every path: new
+  licence with extras, extras for an existing licence, stored add-ons.
+- **An add-ons subscription's first period starts when its add-ons are written**, not when it was
+  opened: a pending one that bills nothing yet gets next payment = now + 1 cycle before its lines are
+  dated (`AddonService::open_addons_period()`), so a late retry, or another order joining it, is never
+  granted a period already over and billed again at once.
+- **A cancelled, expired or ending add-ons subscription is never reused** on a retry: a new one is
+  opened (`AddonService::reusable_addons_subscription()`). A write rolled back part-way no longer
+  cancels the add-ons subscription it was about to bill.
+- **A refund cancels an add-ons subscription the order opened but never billed** (pending, no items),
+  whatever kind of line opened it.
+
 ### Deploy
 - **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added
   automatically on the first admin page load after the update, and existing rows are unchanged. Until

@@ -76,6 +76,14 @@ class AddonService {
 	private ?PackageExtrasService $extras;
 
 	/**
+	 * While lines are taken back to retry a write (a rollback, or leftovers of an interrupted one), an
+	 * add-ons-only subscription left with no items is kept: the retry bills it again.
+	 *
+	 * @var bool
+	 */
+	private bool $keep_empty_addons = false;
+
+	/**
 	 * @param EntitlementService        $entitlements  Entitlement lines.
 	 * @param EntitlementRepository     $lines         Line data-access layer.
 	 * @param LicenseRepository         $licenses      Licence data-access layer.
@@ -583,6 +591,103 @@ class AddonService {
 	}
 
 	/**
+	 * An add-ons subscription an order line recorded (`_wplm_addons_subscription_id`), when it may still
+	 * bill that line's add-ons: pending (opened, nothing billed yet), active or in trial. One that was
+	 * cancelled, expired, put on hold or set to cancel since is never reused: it would never renew them.
+	 *
+	 * @param int $id Subscription id (0 = none recorded).
+	 * @return Subscription|null
+	 */
+	public function reusable_addons_subscription( int $id ): ?Subscription {
+		$sub = $id > 0 ? $this->subscriptions->find_by_id( $id ) : null;
+		return null !== $sub && $sub->is_addons_only() && in_array( $sub->status, array( 'pending', 'active', 'trial' ), true ) ? $sub : null;
+	}
+
+	/**
+	 * Start the first period of an add-ons subscription that bills nothing yet (pending, no items) now:
+	 * next payment = now + 1 cycle. It was opened when the order was first fulfilled, which may have been
+	 * long before the add-ons are finally written (a retry, or another order joining it later); its first
+	 * period is the one paid now, so the lines are paid through a full cycle from today and it is not
+	 * due again at once.
+	 *
+	 * @param Subscription $sub The add-ons subscription.
+	 * @param int|null     $now Unix time (tests).
+	 * @return Subscription The subscription as it is now.
+	 */
+	public function open_addons_period( Subscription $sub, ?int $now = null ): Subscription {
+		if ( 'pending' !== $sub->status || array() !== $this->subscriptions->get_items( $sub->id ) ) {
+			return $sub;
+		}
+		$next = ( new \DateTimeImmutable( '@' . ( $now ?? time() ) ) )
+			->modify( '+' . max( 1, (int) $sub->billing_interval ) . ' ' . $sub->billing_period )
+			->format( 'Y-m-d H:i:s' );
+		$this->subscriptions->update( $sub->id, array( 'next_payment' => $next ) );
+		return $this->subscriptions->find_by_id( $sub->id ) ?? $sub;
+	}
+
+	/**
+	 * Before an order line's add-ons are written again (a retry), take back what an interrupted earlier
+	 * attempt left behind: this order's add-on lines on the licence that no line of the order is stamped
+	 * with (`_wplm_entitlement_ids`), and with them their subscription items. A crash between writing the
+	 * lines and stamping the line would otherwise write — and bill — them a second time. An add-ons
+	 * subscription emptied this way is kept for the retry.
+	 *
+	 * @param \WC_Order $order   The order.
+	 * @param License   $license The licence its line adds to.
+	 * @return int Lines taken back.
+	 */
+	public function discard_unstamped( \WC_Order $order, License $license ): int {
+		$stamped = array();
+		foreach ( $order->get_items() as $other ) {
+			if ( ! $other instanceof \WC_Order_Item_Product ) {
+				continue;
+			}
+			$ids = json_decode( (string) $other->get_meta( '_wplm_entitlement_ids' ), true );
+			if ( is_array( $ids ) ) {
+				$stamped = array_merge( $stamped, array_map( 'intval', $ids ) );
+			}
+		}
+		$left = array_diff( $this->order_line_ids( $order->get_id(), $license->id ), $stamped );
+		if ( array() === $left ) {
+			return 0;
+		}
+		$this->keep_empty_addons = true;
+		try {
+			foreach ( $left as $id ) {
+				$this->entitlements->delete_line( (int) $id );
+			}
+		} finally {
+			$this->keep_empty_addons = false;
+		}
+		\WPLM\Support\Logger::error( sprintf( 'AddonService: order %d left %d unrecorded add-on line(s) on licence %d (an interrupted fulfilment); removed before writing them again.', $order->get_id(), count( $left ), $license->id ) );
+		return count( $left );
+	}
+
+	/**
+	 * A pending add-ons subscription starts billing once its add-ons are written. A listener on the
+	 * status change that fails must not undo that: the add-ons are written and recorded, and a
+	 * subscription left pending would never renew them.
+	 *
+	 * @param int $id Subscription id.
+	 * @return void
+	 */
+	private function activate_addons_subscription( int $id ): void {
+		$sub = $this->subscriptions->find_by_id( $id );
+		if ( null === $sub || 'pending' !== $sub->status ) {
+			return;
+		}
+		try {
+			$this->subscription_service()->update_status( $id, 'active' );
+		} catch ( \Throwable $e ) {
+			\WPLM\Support\Logger::error( 'AddonService: starting add-ons subscription ' . $id . ' raised — ' . $e->getMessage() );
+			$fresh = $this->subscriptions->find_by_id( $id );
+			if ( null !== $fresh && 'pending' === $fresh->status ) {
+				$this->subscriptions->update_status( $id, 'active' );
+			}
+		}
+	}
+
+	/**
 	 * The extras key of a licence's billing ({@see billing()}): `month`, `year`, `lifetime` or null.
 	 *
 	 * @param array $billing From {@see billing()}.
@@ -720,6 +825,7 @@ class AddonService {
 	 * @throws \RuntimeException When they cannot be added.
 	 */
 	public function apply_extras_to_licence( \WC_Order $order, $item, License $license, Plan $plan, string $json, ?int $now = null ): array {
+		$this->discard_unstamped( $order, $license );
 		$ctx = $this->extras_context( $plan, $license, $now );
 		if ( null === $ctx ) {
 			throw new \RuntimeException( 'that licence cannot take add-ons priced like these' );
@@ -801,8 +907,7 @@ class AddonService {
 	 * @throws \RuntimeException When the add-ons cannot join.
 	 */
 	private function addons_target_for( \WC_Order $order, $item, License $license, array $snapshot, string $cycle, ?int $now ): array {
-		$mine   = (int) $item->get_meta( '_wplm_addons_subscription_id' );
-		$addons = $mine > 0 ? $this->subscriptions->find_by_id( $mine ) : null;
+		$addons = $this->reusable_addons_subscription( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
 		$sold   = $snapshot['addons_subscription_id'] ?? null;
 		if ( null === $addons ) {
 			$addons = $this->addons_subscription( $license );
@@ -819,6 +924,7 @@ class AddonService {
 			$item->save_meta_data();
 			return array( $addons, $this->addons_paid_through( $addons ) );
 		}
+		$addons = $this->open_addons_period( $addons, $now );
 		if ( $cycle !== $addons->billing_period || 1 !== (int) $addons->billing_interval ) {
 			throw new \RuntimeException(
 				/* translators: 1: subscription id, 2: cycle */
@@ -866,6 +972,7 @@ class AddonService {
 	 * @throws \RuntimeException When the add-on cannot be added.
 	 */
 	public function apply( \WC_Order $order, $item, Package $package, License $license, ?int $now = null ): array {
+		$this->discard_unstamped( $order, $license );
 		$ok = $this->check_for_user( (int) $order->get_customer_id(), $license, $package, (int) $item->get_quantity(), $now );
 		if ( is_wp_error( $ok ) ) {
 			throw new \RuntimeException( $ok->get_error_message() );
@@ -985,15 +1092,18 @@ class AddonService {
 
 		$written = $this->write_units( $order, $item, $license, $profile, $units, $sub, $paid_through, $now );
 
-		// A new add-ons subscription starts billing once it bills something.
-		if ( null !== $addons_sub && 'pending' === ( $this->subscriptions->find_by_id( $addons_sub->id )->status ?? '' ) ) {
-			$this->subscription_service()->update_status( $addons_sub->id, 'active' );
-		}
+		// Recorded before anything else can fail: a retry finds the line done and never writes (or
+		// bills) it again.
 		if ( array() !== $written['sub_items'] ) {
 			$item->update_meta_data( '_wplm_addon_subscription_item_ids', wp_json_encode( $written['sub_items'] ) );
 		}
 		$item->update_meta_data( '_wplm_entitlement_ids', wp_json_encode( $written['ids'] ) );
 		$item->save_meta_data();
+
+		// A new add-ons subscription starts billing once it bills something.
+		if ( null !== $addons_sub ) {
+			$this->activate_addons_subscription( $addons_sub->id );
+		}
 
 		$order->add_order_note(
 			sprintf(
@@ -1085,11 +1195,17 @@ class AddonService {
 				$sub_items[] = $this->attach( $unit['sub'], $order, $item, (int) $unit['qty'], (float) $unit['line_total'], (array) ( $unit['meta'] ?? array() ), $license, $by_unit[ $u ] ?? array() );
 			}
 		} catch ( \Throwable $e ) {
-			foreach ( array_diff( $this->order_line_ids( $order->get_id(), $license->id ), $before ) as $id ) {
-				$this->entitlements->delete_line( (int) $id );
-			}
-			foreach ( $sub_items as $sub_item ) {
-				$this->detach_item( $sub_item );
+			// A subscription opened for these add-ons stays open (pending) for the retry.
+			$this->keep_empty_addons = true;
+			try {
+				foreach ( array_diff( $this->order_line_ids( $order->get_id(), $license->id ), $before ) as $id ) {
+					$this->entitlements->delete_line( (int) $id );
+				}
+				foreach ( $sub_items as $sub_item ) {
+					$this->detach_item( $sub_item );
+				}
+			} finally {
+				$this->keep_empty_addons = false;
 			}
 			throw new \RuntimeException( 'the add-on could not be added: ' . $e->getMessage(), 0, $e );
 		}
@@ -1214,6 +1330,18 @@ class AddonService {
 			}
 		}
 
+		// An add-ons subscription the order opened but never billed (its add-ons were never written)
+		// ends with the order: a later purchase must not join it with its old dates.
+		foreach ( $order->get_items() as $item ) {
+			if ( ! $item instanceof \WC_Order_Item_Product ) {
+				continue;
+			}
+			$opened = $this->subscriptions->find_by_id( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
+			if ( null !== $opened && $opened->is_addons_only() && 'pending' === $opened->status && array() === $this->subscriptions->get_items( $opened->id ) ) {
+				$this->subscription_service()->cancel( $opened->id );
+			}
+		}
+
 		if ( $touched['issued'] ) {
 			$note = 'revoke' === get_option( 'wplm_refund_action', 'suspend' )
 				/* translators: %d: number of lines */
@@ -1323,7 +1451,7 @@ class AddonService {
 		$this->recalculate( $subscription_id );
 
 		// An add-ons-only subscription left with nothing to bill ends (its licence is untouched).
-		if ( null !== $sub && $sub->is_addons_only() && array() === $this->subscriptions->get_items( $subscription_id )
+		if ( ! $this->keep_empty_addons && null !== $sub && $sub->is_addons_only() && array() === $this->subscriptions->get_items( $subscription_id )
 			&& ! in_array( $sub->status, array( 'cancelled', 'expired' ), true ) ) {
 			$this->subscription_service()->cancel( $subscription_id );
 		}

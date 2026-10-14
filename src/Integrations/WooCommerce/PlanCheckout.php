@@ -1701,19 +1701,22 @@ class PlanCheckout {
 				throw new \RuntimeException( 'the licence issued for this line no longer exists' );
 			}
 			$snapshot = $this->extras_snapshot_for( $pkg, $json );
+			// What an interrupted earlier attempt wrote but never recorded is taken back first.
+			$this->addons()->discard_unstamped( $order, $license );
 
 			// Recurring add-ons on a lifetime licence (v2): one add-ons-only subscription, created once
-			// (a retry reuses it through `_wplm_addons_subscription_id`), its first period paid now.
+			// (a retry reuses it through `_wplm_addons_subscription_id` while it can still bill them), its
+			// first period paid now — counted from when the add-ons are written.
 			$addons         = null;
 			$addons_through = null;
 			if ( null !== ( $snapshot['cycle'] ?? null ) ) {
-				$addons_id = (int) $item->get_meta( '_wplm_addons_subscription_id' );
-				$addons    = $addons_id > 0 ? $this->subscriptions->get( $addons_id ) : null;
+				$addons = $this->addons()->reusable_addons_subscription( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
 				if ( null === $addons ) {
 					$addons = $this->addons()->create_addons_subscription( $license, $order, (string) $snapshot['cycle'] );
 					$item->update_meta_data( '_wplm_addons_subscription_id', $addons->id );
 					$item->save_meta_data();
 				}
+				$addons         = $this->addons()->open_addons_period( $addons );
 				$addons_through = $this->addons()->addons_paid_through( $addons );
 			}
 

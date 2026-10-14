@@ -2184,4 +2184,252 @@ class PackageExtrasTest extends TestCase {
 			$this->assertStringNotContainsString( 'To continue using the software', $body, $template );
 		}
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Review fixes (2026-10-15): retries, add-ons subscription dates, reuse
+	// ---------------------------------------------------------------------------------------------
+
+	/** A recurring-only "Extra seat (billed)" offer on lifetime (300 a month, 3000 a year). */
+	private function add_seat_plan_offer(): void {
+		add_filter(
+			'wplm_package_extras',
+			static function ( $offers, $ctx ) {
+				if ( 'lifetime' === $ctx['billing'] ) {
+					$offers[] = array(
+						'id'         => 'seat-plan',
+						'label'      => 'Extra seat (billed)',
+						'group'      => 'quantity',
+						'unit_price' => null,
+						'recurring'  => array(
+							'month' => 300,
+							'year'  => 3000,
+						),
+						'max_qty'    => 5,
+						'lines'      => array( array( 'kind' => 'limit', 'code' => 'seats', 'qty' => 1 ) ),
+					);
+				}
+				return $offers;
+			},
+			20,
+			2
+		);
+	}
+
+	/** @return \WPLM\Models\Entitlement[] The licence's add-on lines for one code. */
+	private function addon_lines( int $license_id, string $code ): array {
+		return array_values( array_filter( $this->lines( $license_id, 'addon' ), static fn( $l ) => $code === $l->code ) );
+	}
+
+	/** Forget that an order was fulfilled, so completing it again retries it. */
+	private function unfulfil( \WC_Order $order ): void {
+		$order = wc_get_order( $order->get_id() );
+		$order->delete_meta_data( '_wplm_plan_fulfilled' );
+		$order->save();
+	}
+
+	/** A crash right after the add-ons were written: the item was never stamped. */
+	private function lose_the_stamp( \WC_Order_Item_Product $item ): void {
+		$item = \WC_Order_Factory::get_order_item( $item->get_id() );
+		$item->delete_meta_data( '_wplm_entitlement_ids' );
+		$item->delete_meta_data( '_wplm_addon_subscription_item_ids' );
+		$item->save_meta_data();
+	}
+
+	/** @return int[] Subscriptions due for renewal now. */
+	private function due_ids(): array {
+		return array_map( static fn( $s ) => (int) $s->id, $this->make( SubscriptionRepository::class )->get_due_for_renewal() );
+	}
+
+	public function test_a_listener_failing_after_the_addons_are_written_never_bills_them_twice(): void {
+		$throw    = true;
+		$listener = static function ( $sub, $old, $new ) use ( &$throw ) {
+			if ( $throw && $sub->is_addons_only() && 'pending' === $old && 'active' === $new ) {
+				$throw = false;
+				throw new \RuntimeException( 'listener blew up' );
+			}
+		};
+		add_action( 'wplm_subscription_status_changed', $listener, 10, 3 );
+		$bought = $this->lifetime_with_fbr( 'month' );
+		remove_action( 'wplm_subscription_status_changed', $listener, 10 );
+
+		$this->assertNotSame( '', (string) \WC_Order_Factory::get_order_item( $bought['item']->get_id() )->get_meta( '_wplm_entitlement_ids' ), 'Stamped as soon as the add-ons are written.' );
+		$this->assertSame( 'active', $this->subscription_row( $bought['addons'] )['status'], 'It bills its add-on.' );
+
+		$this->unfulfil( $bought['order'] );
+		$this->complete_again( $bought['order'] );
+
+		$this->assertCount( 1, $this->addon_lines( $bought['license_id'], 'fbr' ) );
+		$this->assertCount( 1, $this->addon_lines( $bought['license_id'], 'factory' ) );
+		$this->assertCount( 1, $this->items( $bought['addons'] ) );
+		$this->assertSame( 1000.0, $this->total( $bought['addons'] ), 'Billed once.' );
+	}
+
+	public function test_lines_a_crash_left_unstamped_are_written_once_on_retry_new_licence(): void {
+		$bought = $this->lifetime_with_fbr( 'month' );
+		$this->lose_the_stamp( $bought['item'] );
+		$this->unfulfil( $bought['order'] );
+
+		$this->complete_again( $bought['order'] );
+
+		$this->assertCount( 1, $this->addon_lines( $bought['license_id'], 'fbr' ) );
+		$this->assertCount( 1, $this->addon_lines( $bought['license_id'], 'factory' ) );
+		$this->assertCount( 1, $this->items( $bought['addons'] ) );
+		$this->assertSame( 1000.0, $this->total( $bought['addons'] ) );
+		$this->assertSame( 'active', $this->subscription_row( $bought['addons'] )['status'] );
+		$this->assertSame( '1', (string) wc_get_order( $bought['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+	}
+
+	public function test_lines_a_crash_left_unstamped_are_written_once_on_retry_existing_licence(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$order   = $this->add_to_licence(
+			$product,
+			$base,
+			array(
+				'user'       => '2',
+				'module:fbr' => '1',
+			)
+		);
+		$addons  = $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] );
+		$this->lose_the_stamp( $order['item'] );
+		$this->unfulfil( $order['order'] );
+
+		$this->complete_again( $order['order'] );
+
+		$users = $this->addon_lines( $base['license_id'], 'users' );
+		$this->assertCount( 1, $users, 'The 2 users paid for, once.' );
+		$this->assertSame( 2, $users[0]->qty );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'fbr' ) );
+		$this->assertCount( 1, $this->items( $addons->id ) );
+		$this->assertSame( 1000.0, $this->total( $addons->id ) );
+		$this->assertSame( 'active', $this->subscription_row( $addons->id )['status'] );
+		$this->assertSame( '1', (string) wc_get_order( $order['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ), 'Not stuck on "already has".' );
+	}
+
+	public function test_the_first_addons_period_starts_when_the_addons_are_written_not_when_the_subscription_was_opened(): void {
+		$this->break_next = true;
+		$bought           = $this->lifetime_with_fbr( 'month' );
+		$this->assertSame( 'pending', $this->subscription_row( $bought['addons'] )['status'] );
+		// The owner retries weeks later.
+		$this->set_row( 'subscriptions', $bought['addons'], array( 'next_payment' => $this->utc( -10 * DAY_IN_SECONDS ) ) );
+
+		$this->complete_again( $bought['order'] );
+
+		$today = wp_date( 'Y-m-d' );
+		$fbr   = $this->line( $bought['license_id'], 'fbr', 'addon' );
+		$this->assertGreaterThanOrEqual( EntitlementService::add_period( $today, 27, 'day' ), $fbr->paid_through, 'A full month from the day it was written.' );
+		$this->assertNotContains( $bought['addons'], $this->due_ids(), 'Not billed again at once.' );
+		$this->assertSame( EntitlementService::paid_through_for( $this->subscription_row( $bought['addons'] )['next_payment'] ), $fbr->paid_through );
+	}
+
+	public function test_a_refunded_order_whose_addons_were_never_written_leaves_no_addons_subscription_behind(): void {
+		$product          = $this->addon_product();
+		$base             = $this->customer_with( 'Lifetime' );
+		$this->break_next = true;
+		$first            = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$orphan           = (int) \WC_Order_Factory::get_order_item( $first['item']->get_id() )->get_meta( '_wplm_addons_subscription_id' );
+		$this->assertSame( 'pending', $this->subscription_row( $orphan )['status'] );
+
+		$first['order']->update_status( 'refunded' );
+
+		$this->assertSame( 'cancelled', $this->subscription_row( $orphan )['status'], 'Nothing was ever billed on it.' );
+
+		// Two months later the customer buys FBR again: a full month from today, not due at once.
+		$second = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$fbr    = $this->line( $base['license_id'], 'fbr', 'addon' );
+		$this->assertSame( '1', (string) $second['order']->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertGreaterThanOrEqual( EntitlementService::add_period( wp_date( 'Y-m-d' ), 27, 'day' ), $fbr->paid_through );
+		$this->assertNotContains( $fbr->subscription_id, $this->due_ids() );
+	}
+
+	public function test_an_orphaned_pending_addons_subscription_joined_later_starts_its_period_then(): void {
+		$product          = $this->addon_product();
+		$base             = $this->customer_with( 'Lifetime' );
+		$this->break_next = true;
+		$first            = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$orphan           = (int) \WC_Order_Factory::get_order_item( $first['item']->get_id() )->get_meta( '_wplm_addons_subscription_id' );
+		$this->set_row( 'subscriptions', $orphan, array( 'next_payment' => $this->utc( -60 * DAY_IN_SECONDS ) ) );
+
+		$this->add_seat_plan_offer();
+		$this->add_to_licence( $product, $base, array( 'seat-plan' => '1' ) );
+
+		$seats = $this->line( $base['license_id'], 'seats', 'addon' );
+		$this->assertGreaterThanOrEqual( EntitlementService::add_period( wp_date( 'Y-m-d' ), 27, 'day' ), $seats->paid_through );
+		$this->assertNotContains( $seats->subscription_id, $this->due_ids() );
+	}
+
+	public function test_a_write_rolled_back_part_way_leaves_its_addons_subscription_reusable(): void {
+		global $wpdb;
+		$count  = 0;
+		$fail   = true;
+		$filter = static function ( $query ) use ( &$count, &$fail, $wpdb ) {
+			if ( $fail && 0 === stripos( ltrim( $query ), 'INSERT INTO `' . $wpdb->prefix . 'wplm_subscription_items`' ) ) {
+				++$count;
+				if ( 2 === $count ) {
+					$fail = false;
+					return 'INSERT INTO `wplm_no_such_table` (x) VALUES (1)';
+				}
+			}
+			return $query;
+		};
+		add_filter( 'query', $filter );
+		$wpdb->suppress_errors( true );
+		$customer = $this->create_customer();
+		$bought   = $this->buy_through_cart(
+			$this->product,
+			array(
+				'wplm_package_id'   => (string) $this->package( 'Lifetime' )->id,
+				'wplm_extras'       => array(
+					'module:fbr' => '1',
+					'module:pos' => '1',
+				),
+				'wplm_extras_cycle' => 'year',
+			),
+			$customer
+		);
+		remove_filter( 'query', $filter );
+		$wpdb->suppress_errors( false );
+		$addons = (int) $bought['item']->get_meta( '_wplm_addons_subscription_id' );
+		$this->assertSame( array(), $this->lines( $bought['license_id'], 'addon' ), 'Rolled back.' );
+		$this->assertNotSame( 'cancelled', $this->subscription_row( $addons )['status'], 'A rollback never ends the subscription it is about to bill.' );
+
+		$this->complete_again( $bought['order'] );
+
+		$fbr = $this->line( $bought['license_id'], 'fbr', 'addon' );
+		$sub = $this->subscription_row( $fbr->subscription_id );
+		$this->assertSame( 'active', $sub['status'] );
+		$this->assertSame( 18000.0, (float) $sub['recurring_total'] );
+		$this->set_row( 'subscriptions', $fbr->subscription_id, array( 'next_payment' => $this->utc( -3600 ) ) );
+		$this->assertContains( $fbr->subscription_id, $this->due_ids(), 'It renews.' );
+	}
+
+	public function test_a_cancelled_addons_subscription_is_never_reused_on_retry(): void {
+		$this->break_next = true;
+		$bought           = $this->lifetime_with_fbr( 'month' );
+		$this->make( SubscriptionService::class )->cancel( $bought['addons'] );
+
+		$this->complete_again( $bought['order'] );
+
+		$fbr = $this->line( $bought['license_id'], 'fbr', 'addon' );
+		$this->assertNotSame( $bought['addons'], $fbr->subscription_id, 'A new add-ons subscription.' );
+		$this->assertSame( 'active', $this->subscription_row( $fbr->subscription_id )['status'] );
+		$this->assertSame( 1000.0, $this->total( $fbr->subscription_id ) );
+		$this->assertSame( $fbr->subscription_id, (int) \WC_Order_Factory::get_order_item( $bought['item']->get_id() )->get_meta( '_wplm_addons_subscription_id' ) );
+	}
+
+	public function test_a_cancelled_addons_subscription_is_never_reused_on_retry_existing_licence(): void {
+		$product          = $this->addon_product();
+		$base             = $this->customer_with( 'Lifetime' );
+		$this->break_next = true;
+		$first            = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$opened           = (int) \WC_Order_Factory::get_order_item( $first['item']->get_id() )->get_meta( '_wplm_addons_subscription_id' );
+		$this->make( SubscriptionService::class )->cancel( $opened );
+
+		$this->complete_again( $first['order'] );
+
+		$fbr = $this->line( $base['license_id'], 'fbr', 'addon' );
+		$this->assertNotNull( $fbr );
+		$this->assertNotSame( $opened, $fbr->subscription_id );
+		$this->assertSame( 'active', $this->subscription_row( $fbr->subscription_id )['status'] );
+	}
 }
