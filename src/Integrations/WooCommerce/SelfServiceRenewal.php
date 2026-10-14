@@ -401,6 +401,10 @@ class SelfServiceRenewal {
 			/* translators: 1: add-on, 2: "Add-ons for licence ending ABCD" */
 			$fee->set_name( '' !== $for ? sprintf( __( '%1$s — %2$s', 'wp-license-manager' ), $label, $for ) : $label );
 			$fee->set_total( $sub_item->line_total );
+			// Taxed as the product it was bought on would be (a fee is taxable by default).
+			$product = $sub_item->product_id > 0 ? wc_get_product( $sub_item->product_id ) : null;
+			$fee->set_tax_status( $product instanceof \WC_Product ? $product->get_tax_status() : 'none' );
+			$fee->set_tax_class( $product instanceof \WC_Product ? $product->get_tax_class() : '' );
 			$order->add_item( $fee );
 		}
 		return true;

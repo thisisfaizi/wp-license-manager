@@ -2306,6 +2306,45 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( '1', (string) wc_get_order( $order['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ), 'Not stuck on "already has".' );
 	}
 
+	public function test_a_retry_rewrites_only_the_unstamped_line_of_two_for_one_licence(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		wp_set_current_user( $base['customer'] );
+		foreach ( array( array( 'module:factory' => '1' ), array( 'user' => '2' ) ) as $extras ) {
+			$_POST['wplm_extras']            = $extras;
+			$_POST['wplm_target_license_id'] = (string) $base['license_id'];
+			$this->assertTrue( apply_filters( 'woocommerce_add_to_cart_validation', true, $product->get_id(), 1 ) );
+			$this->assertNotFalse( WC()->cart->add_to_cart( $product->get_id(), 1 ) );
+			unset( $_POST['wplm_extras'], $_POST['wplm_target_license_id'] );
+		}
+		WC()->cart->calculate_totals();
+		$order = new \WC_Order();
+		$order->set_customer_id( $base['customer'] );
+		WC()->checkout()->create_order_line_items( $order, WC()->cart );
+		$order->set_payment_method( 'bacs' );
+		$order->calculate_totals();
+		$order->save();
+		WC()->cart->empty_cart();
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+		$items   = array_values( wc_get_order( $order->get_id() )->get_items() );
+		$factory = $this->line( $base['license_id'], 'factory', 'addon' );
+		$stamp   = (string) $items[0]->get_meta( '_wplm_entitlement_ids' );
+		$this->assertSame( wp_json_encode( array( $factory->id ) ), $stamp );
+
+		$this->lose_the_stamp( $items[1] );
+		$this->unfulfil( $order );
+		$this->complete_again( $order );
+
+		$this->assertSame( $factory->id, $this->line( $base['license_id'], 'factory', 'addon' )->id, 'The stamped line is kept as it is.' );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'factory' ) );
+		$this->assertSame( $stamp, (string) \WC_Order_Factory::get_order_item( $items[0]->get_id() )->get_meta( '_wplm_entitlement_ids' ) );
+		$users = $this->addon_lines( $base['license_id'], 'users' );
+		$this->assertCount( 1, $users, 'The unstamped one is written once.' );
+		$this->assertSame( 2, $users[0]->qty );
+		$this->assertSame( '1', (string) wc_get_order( $order->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+	}
+
 	public function test_the_first_addons_period_starts_when_the_addons_are_written_not_when_the_subscription_was_opened(): void {
 		$this->break_next = true;
 		$bought           = $this->lifetime_with_fbr( 'month' );
@@ -2721,9 +2760,25 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( 1600.0, (float) $invoice->get_total() );
 		$this->assertSame( $sub->recurring_total, (float) $invoice->get_total() );
 
+		foreach ( $invoice->get_items( 'fee' ) as $fee ) {
+			$this->assertSame( $this->product->get_tax_status(), $fee->get_tax_status(), 'Taxed as the product it was bought on.' );
+		}
+
 		$before = $this->line( $bought['license_id'], 'fbr' )->paid_through;
 		$invoice->update_status( 'completed' );
 		$this->assertSame( EntitlementService::add_period( $before, 1, 'month' ), $this->line( $bought['license_id'], 'fbr' )->paid_through, 'Paying it still renews them.' );
+	}
+
+	public function test_an_addons_invoice_is_not_taxed_when_its_product_is_not(): void {
+		$this->product->set_tax_status( 'none' );
+		$this->product->save();
+		$bought = $this->lifetime_with_fbr( 'month' );
+
+		$invoice = $this->make( SelfServiceRenewal::class )->create_renewal_order_object( $bought['addons'] );
+
+		foreach ( $invoice->get_items( 'fee' ) as $fee ) {
+			$this->assertSame( 'none', $fee->get_tax_status() );
+		}
 	}
 
 	// ---------------------------------------------------------------------------------------------

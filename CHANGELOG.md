@@ -237,7 +237,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   `_wplm_addon_license_id` must check the line was applied (`_wplm_entitlement_ids`) and the licence is
   the order customer's.
 - **The add-ons renewal invoice lists the add-ons** ("FBR — Add-ons for licence ending ABCD", one fee
-  line per add-on at what it bills), not the lifetime product the licence was bought as.
+  line per add-on at what it bills, taxed as the product it was bought on), not the lifetime product
+  the licence was bought as.
 - **A draft (or pending, or private) plan product is not for sale.** WPLM made every product with a
   plan purchasable, whatever its status, so a product created as a draft for review could be bought
   through `?add-to-cart=`. WooCommerce's own rule now holds: published, or a user who can edit it.
