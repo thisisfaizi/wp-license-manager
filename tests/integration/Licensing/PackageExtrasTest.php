@@ -978,6 +978,39 @@ class PackageExtrasTest extends TestCase {
 		);
 	}
 
+	public function test_the_plan_editor_saves_an_addon_plan_with_no_rows(): void {
+		$saved = $this->make( \WPLM\Admin\PlanAdminActions::class )->save_plan(
+			array(
+				'plan_name'    => 'Acme add-ons (priced by a plugin)',
+				'plan_profile' => 'acme-office',
+				'plan_kind'    => 'addon',
+				'plan_status'  => '1',
+				'packages'     => array(
+					array( 'name' => '' ), // The editor's unused blank row.
+				),
+			)
+		);
+
+		$this->assertTrue( $saved['ok'], $saved['message'] );
+		$this->assertSame( array(), $saved['warnings'], 'A plugin prices the extras: nothing to warn about.' );
+		$plan = $this->make( PlanService::class )->get( $saved['plan_id'] );
+		$this->assertTrue( $plan->is_addon() );
+		$this->assertSame( array(), $plan->packages );
+
+		remove_all_filters( 'wplm_package_extras' );
+		$again = $this->make( \WPLM\Admin\PlanAdminActions::class )->save_plan(
+			array(
+				'plan_id'      => (string) $saved['plan_id'],
+				'plan_name'    => 'Acme add-ons (priced by a plugin)',
+				'plan_profile' => 'acme-office',
+				'plan_kind'    => 'addon',
+				'plan_status'  => '1',
+			)
+		);
+		$this->assertTrue( $again['ok'] );
+		$this->assertStringContainsString( 'no active plugin prices add-ons', $again['warnings'][0] );
+	}
+
 	public function test_an_addon_plan_with_no_stored_packages_is_sold_to_a_licence_the_filter_prices(): void {
 		$product = $this->addon_product();
 		$base    = $this->customer_with( 'Monthly' );
@@ -1089,6 +1122,54 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( EntitlementService::add_period( wp_date( 'Y-m-d' ), 729, 'day' ), $mine[0]->paid_through );
 	}
 
+	public function test_a_term_offered_to_a_recurring_licence_is_dated_and_never_billed_with_the_plan(): void {
+		add_filter(
+			'wplm_package_extras',
+			static function ( $offers, $ctx ) {
+				if ( 'existing' === $ctx['flow'] && 'month' === $ctx['billing'] ) {
+					$offers[] = array(
+						'id'         => 'assets-pack',
+						'label'      => 'Fixed Assets for 30 days',
+						'group'      => 'term',
+						'unit_price' => 700,
+						'max_qty'    => 1,
+						'lines'      => array(
+							array(
+								'kind' => 'module',
+								'code' => 'assets',
+							),
+						),
+						'term_days'  => 30,
+					);
+				}
+				return $offers;
+			},
+			20,
+			2
+		);
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Monthly' );
+
+		$order = $this->add_to_licence(
+			$product,
+			$base,
+			array(
+				'assets-pack'    => '1',
+				'module:factory' => '1',
+			)
+		);
+
+		$this->assertSame( 2200.0, (float) $order['order']->get_total() );
+		$pack = $this->line( $base['license_id'], 'assets', 'addon' );
+		$this->assertSame( EntitlementService::add_period( wp_date( 'Y-m-d' ), 29, 'day' ), $pack->paid_through );
+		$this->assertNull( $pack->subscription_id, 'The term never joins the plan\'s subscription.' );
+		$this->assertSame( $base['subscription_id'], $this->line( $base['license_id'], 'factory', 'addon' )->subscription_id );
+		$items = $this->items( $base['subscription_id'] );
+		$this->assertCount( 2, $items, 'The plan and Factory: no item for the term.' );
+		$this->assertSame( 6500.0, $this->total( $base['subscription_id'] ), 'The term is not renewed.' );
+		$this->assertCount( 1, json_decode( (string) $order['item']->get_meta( '_wplm_addon_subscription_item_ids' ), true ) );
+	}
+
 	public function test_a_recurring_licence_is_never_offered_a_term_the_filter_does_not_offer_it(): void {
 		$product = $this->addon_product();
 		$base    = $this->customer_with( 'Monthly' );
@@ -1146,6 +1227,31 @@ class PackageExtrasTest extends TestCase {
 		ob_start();
 		$this->checkout()->render_addon_notice();
 		$this->assertStringContainsString( 'Pay your plan&#039;s renewal first, then add this.', (string) ob_get_clean() );
+	}
+
+	public function test_a_live_dated_module_on_the_licence_meets_a_requirement(): void {
+		$this->make( ProfileRegistry::class )->get( 'acme-office' )->requires = array( 'subcontract' => array( 'factory', 'pos' ) );
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Monthly' );
+		wp_set_current_user( $base['customer'] );
+		$post = array(
+			'wplm_extras'            => array( 'module:subcontract' => '1' ),
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+
+		$this->assertFalse( $this->validate( $post, $product ) );
+		$this->assertSame( 'Subcontracting needs Factory or Point of Sale.', $this->first_error() );
+
+		// Factory added by hand for a few weeks (how packs were sold before): live, so it counts.
+		$this->make( EntitlementService::class )->add_line(
+			$base['license_id'],
+			array(
+				'kind'         => 'module',
+				'code'         => 'factory',
+				'paid_through' => EntitlementService::add_period( wp_date( 'Y-m-d' ), 20, 'day' ),
+			)
+		);
+		$this->assertTrue( $this->validate( $post, $product ), $this->first_error() );
 	}
 
 	public function test_completing_an_existing_licence_order_again_adds_nothing_more(): void {

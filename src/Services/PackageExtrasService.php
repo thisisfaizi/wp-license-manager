@@ -32,7 +32,9 @@ defined( 'ABSPATH' ) || exit;
  * - `package`      Package|null     new: the chosen base package; existing: null;
  * - `license`      License|null     existing: the target licence; new: null;
  * - `held_modules` string[]         module codes already held (new: the base package's modules;
- *                                   existing: lifetime modules and those on the licence's subscription).
+ *                                   existing: lifetime modules and those on the licence's subscription,
+ *                                   which are not offered again; for requirements, every module still
+ *                                   live on the licence counts).
  */
 class PackageExtrasService {
 
@@ -381,8 +383,21 @@ class PackageExtrasService {
 			);
 		}
 
-		// Requirements: at least one module of each group, held already or ticked now.
-		$have = array_values( array_unique( array_merge( array_map( 'strval', (array) $ctx['held_modules'] ), $ticked ) ) );
+		// Requirements: at least one module of each group, held already or ticked now. On an existing
+		// licence any module still live there counts too (a dated pack, a line added by hand), as the
+		// add-on checks read it.
+		$have = array_merge( array_map( 'strval', (array) $ctx['held_modules'] ), $ticked );
+		if ( ( $ctx['license'] ?? null ) instanceof \WPLM\Models\License ) {
+			$today   = wp_date( 'Y-m-d' );
+			$grace   = $profile->grace_days();
+			$summary = EntitlementService::summarize_lines( $this->entitlements->lines( $ctx['license']->id ), $profile, $today, $grace );
+			foreach ( $summary['modules'] as $code => $module ) {
+				if ( EntitlementService::STATE_READ_ONLY !== EntitlementService::module_state( $module['until'], $today, $grace ) ) {
+					$have[] = (string) $code;
+				}
+			}
+		}
+		$have = array_values( array_unique( $have ) );
 		foreach ( $items as $item ) {
 			$groups = $offers[ $item['id'] ]['requires'];
 			foreach ( $item['lines'] as $line ) {

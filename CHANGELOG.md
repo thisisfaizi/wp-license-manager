@@ -50,7 +50,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     - an id that is not offered (a held module says so);
     - a quantity below 0 or above `max_qty`;
     - a requirement that is not met. Requirements are the profile's `requires` plus the offer's own,
-      checked against the held modules and the modules ticked now.
+      checked against the held modules and the modules ticked now. On an existing licence, any module
+    still live there (not read-only) also meets a requirement, as the add-on checks read it.
 - **The browser's price is never used.**
   - The posted field is `wplm_extras[<offer id>] = <qty>`, and the cart keeps only that choice
     (`wplm_extras`).
@@ -86,6 +87,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     requirements, `wplm_addon_eligibility`).
   - Stored add-on packages (1.2.6) work exactly as before. When one licence gets both a package radio
     and ticked extras on the same add-to-cart, the extras take the line.
+  - **Plan editor:** an add-on plan may be saved with no add-on types. It then warns when no plugin
+    prices add-ons (`wplm_package_extras`). The plans list shows "Add-ons priced by a plugin", and the
+    product **Licensing** tab lists it as "Name (add-ons priced by a plugin)".
 
 ### Changed
 - `AddonService::apply()` now writes through one private line writer, shared with the new
