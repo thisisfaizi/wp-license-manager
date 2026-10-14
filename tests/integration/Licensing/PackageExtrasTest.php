@@ -2447,6 +2447,57 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( '#' . $factory->id, $this->notes( $order ) );
 	}
 
+	public function test_refunding_the_order_that_opened_an_unbilled_addons_subscription_does_not_strand_another_order_sold_against_it(): void {
+		$this->add_seat_plan_offer();
+		$product          = $this->addon_product();
+		$base             = $this->customer_with( 'Lifetime' );
+		$this->break_next = true;
+		$first            = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$opened           = (int) \WC_Order_Factory::get_order_item( $first['item']->get_id() )->get_meta( '_wplm_addons_subscription_id' );
+		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'], 'Opened, its add-ons not written.' );
+		$second = $this->add_to_licence( $product, $base, array( 'seat-plan' => '1' ), false );
+		$sold   = json_decode( (string) $second['item']->get_meta( '_wplm_extras' ), true );
+		$this->assertSame( $opened, (int) $sold['addons_subscription_id'], 'Sold against the pending one.' );
+
+		wc_get_order( $first['order']->get_id() )->update_status( 'refunded' );
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'] );
+		$order = wc_get_order( $second['order']->get_id() );
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+
+		$order = wc_get_order( $second['order']->get_id() );
+		$this->assertSame( '1', (string) $order->get_meta( '_wplm_plan_fulfilled' ), 'Paid, so granted.' );
+		$seats = $this->addon_lines( $base['license_id'], 'seats' );
+		$this->assertCount( 1, $seats );
+		$now = $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] );
+		$this->assertNotNull( $now );
+		$this->assertNotSame( $opened, $now->id );
+		$this->assertSame( $now->id, (int) $seats[0]->subscription_id );
+		$this->assertSame( 'month', $now->billing_period );
+		$this->assertSame( 'active', $this->subscription_row( $now->id )['status'] );
+		$this->assertSame( 300.0, $this->total( $now->id ), 'Billed what was sold, once.' );
+		$this->assertGreaterThanOrEqual( EntitlementService::add_period( wp_date( 'Y-m-d' ), 27, 'day' ), $seats[0]->paid_through, 'A full cycle, as priced.' );
+		$this->assertStringContainsString( 'ended before it billed anything', $this->notes( $order ) );
+	}
+
+	public function test_addons_sold_against_a_subscription_that_ended_after_billing_are_still_refused(): void {
+		$this->add_seat_plan_offer();
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$addons = $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] );
+		$second = $this->add_to_licence( $product, $base, array( 'seat-plan' => '1' ), false );
+		$this->make( SubscriptionService::class )->cancel( $addons->id );
+
+		$order = wc_get_order( $second['order']->get_id() );
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+
+		$this->assertSame( '', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertCount( 0, $this->addon_lines( $base['license_id'], 'seats' ) );
+		$this->assertStringContainsString( 'no longer billed on subscription #' . $addons->id, $this->notes( $order ) );
+	}
+
 	public function test_the_first_addons_period_starts_when_the_addons_are_written_not_when_the_subscription_was_opened(): void {
 		$this->break_next = true;
 		$bought           = $this->lifetime_with_fbr( 'month' );

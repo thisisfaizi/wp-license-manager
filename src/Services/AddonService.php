@@ -1164,20 +1164,32 @@ class AddonService {
 	private function addons_target_for( \WC_Order $order, $item, License $license, array $snapshot, string $cycle, ?int $now ): array {
 		$addons = $this->reusable_addons_subscription( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
 		$sold   = $snapshot['addons_subscription_id'] ?? null;
+		$gone   = false;
 		if ( null === $addons ) {
 			$addons = $this->addons_subscription( $license );
 			if ( null !== $sold && ( null === $addons || (int) $sold !== $addons->id ) ) {
-				throw new \RuntimeException(
-					/* translators: %d: subscription id */
-					sprintf( __( 'the licence\'s add-ons are no longer billed on subscription #%d, which these add-ons were sold against. Nothing was added', 'wp-license-manager' ), (int) $sold )
-				);
+				// One that ended before it billed anything (another order opened it, then was refunded)
+				// held no dates to align with: these were priced a full cycle, as with none at all.
+				$gone = $this->ended_unbilled( (int) $sold );
+				if ( ! $gone ) {
+					throw new \RuntimeException(
+						/* translators: %d: subscription id */
+						sprintf( __( 'the licence\'s add-ons are no longer billed on subscription #%d, which these add-ons were sold against. Nothing was added', 'wp-license-manager' ), (int) $sold )
+					);
+				}
 			}
 		}
 		if ( null === $addons ) {
 			$addons = $this->create_addons_subscription( $license, $order, $cycle, $now );
 			$item->update_meta_data( '_wplm_addons_subscription_id', $addons->id );
 			$item->save_meta_data();
+			if ( $gone ) {
+				$this->note_sold_sub_gone( $order, (int) $sold, $addons );
+			}
 			return array( $addons, $this->addons_paid_through( $addons ) );
+		}
+		if ( $gone ) {
+			$this->note_sold_sub_gone( $order, (int) $sold, $addons );
 		}
 		$addons = $this->open_addons_period( $addons, $now );
 		if ( $cycle !== $addons->billing_period || 1 !== (int) $addons->billing_interval ) {
@@ -1203,6 +1215,43 @@ class AddonService {
 			);
 		}
 		return array( $addons, $through );
+	}
+
+	/**
+	 * Whether an add-ons subscription has ended without ever billing anything: gone, or cancelled /
+	 * expired with no items and no lines on it — opened for an order whose add-ons were never written,
+	 * then closed (that order refunded, or cancelled by hand).
+	 *
+	 * @param int $id Subscription id.
+	 * @return bool
+	 */
+	private function ended_unbilled( int $id ): bool {
+		if ( array() !== $this->lines->get_by_subscription( $id ) ) {
+			return false;
+		}
+		$sub = $this->subscriptions->find_by_id( $id );
+		return null === $sub
+			|| ( $sub->is_addons_only() && in_array( $sub->status, array( 'cancelled', 'expired' ), true ) && array() === $this->subscriptions->get_items( $id ) );
+	}
+
+	/**
+	 * The order note when add-ons sold against an add-ons subscription that has since ended unbilled
+	 * are billed on another.
+	 *
+	 * @param \WC_Order     $order  The order.
+	 * @param int           $sold   The subscription they were sold against.
+	 * @param Subscription  $addons The one they join.
+	 * @return void
+	 */
+	private function note_sold_sub_gone( \WC_Order $order, int $sold, Subscription $addons ): void {
+		$order->add_order_note(
+			sprintf(
+				/* translators: 1: subscription id at the sale, 2: subscription id now */
+				__( 'WPLM: the add-ons subscription #%1$d these add-ons were sold against ended before it billed anything. They are billed on add-ons subscription #%2$d instead.', 'wp-license-manager' ),
+				$sold,
+				$addons->id
+			)
+		);
 	}
 
 	// -------------------------------------------------------------------------

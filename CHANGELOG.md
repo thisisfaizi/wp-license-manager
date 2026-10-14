@@ -219,7 +219,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   opened (`AddonService::reusable_addons_subscription()`). A write rolled back part-way no longer
   cancels the add-ons subscription it was about to bill.
 - **A refund cancels an add-ons subscription the order opened but never billed** (pending, no items),
-  whatever kind of line opened it.
+  whatever kind of line opened it. Another order sold against it while it was pending is no longer
+  stranded: its add-ons join the licence's current add-ons subscription, or open a new one, with an
+  order note — it had no dates to align with, so it was priced a full cycle either way. Add-ons sold
+  against an add-ons subscription that billed and then ended are still refused.
 - **Monthly / yearly add-ons for a lifetime licence are refused before payment** when its add-ons
   subscription could not take them: on hold (paused: "resume it"; unpaid: "pay the renewal first"), its
   paid period over, or set to cancel at period end (it would never renew them). The product page no
