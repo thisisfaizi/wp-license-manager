@@ -938,4 +938,251 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( get_woocommerce_currency(), $data['currency']['code'] );
 		$this->assertArrayHasKey( 'decimals', $data['currency'] );
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// An existing licence: the add-ons product, priced by the same filter
+	// ---------------------------------------------------------------------------------------------
+
+	/** An add-on plan with no stored packages, and its product. */
+	private function addon_product(): \WC_Product_Simple {
+		$plan = $this->create_plan(
+			array(),
+			array(
+				'name'    => 'Acme add-ons',
+				'profile' => 'acme-office',
+				'kind'    => Plan::KIND_ADDON,
+			)
+		);
+		$this->assertSame( array(), $plan['packages'] );
+		return $this->create_plan_product( $plan['plan_id'] );
+	}
+
+	/** A customer who bought a licence type without extras (the 1.2.x way). */
+	private function customer_with( string $package ): array {
+		$customer           = $this->create_customer();
+		$bought             = $this->buy( $this->product, $this->package( $package ), $customer );
+		$bought['customer'] = $customer;
+		$this->assertGreaterThan( 0, $bought['license_id'] );
+		return $bought;
+	}
+
+	private function add_to_licence( \WC_Product $product, array $base, array $extras, bool $complete = true ): array {
+		return $this->buy_through_cart(
+			$product,
+			array(
+				'wplm_extras'            => $extras,
+				'wplm_target_license_id' => (string) $base['license_id'],
+			),
+			$base['customer'],
+			$complete
+		);
+	}
+
+	public function test_an_addon_plan_with_no_stored_packages_is_sold_to_a_licence_the_filter_prices(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Monthly' );
+
+		$this->assertFalse( $this->checkout()->plan_is_purchasable( true, $product ), 'Nobody logged in: nothing to add to.' );
+		wp_set_current_user( $base['customer'] );
+		$this->assertTrue( $this->checkout()->plan_is_purchasable( false, $product ) );
+
+		$_GET['wplm_license'] = (string) $base['license_id'];
+		$html                 = $this->render( $product );
+		$this->assertMatchesRegularExpression( '/<option value="' . $base['license_id'] . '"\s+selected/', $html );
+		$this->assertStringNotContainsString( 'Choose an add-on', $html, 'No stored packages to choose from.' );
+		$this->assertMatchesRegularExpression( '/<fieldset class="wplm-extras" data-wplm-for="' . $base['license_id'] . '" style/', $html );
+		$this->assertStringContainsString( 'name="wplm_extras[module:factory]"', $html );
+		$this->assertStringNotContainsString( 'wplm_extras[module:distribution]', $html, 'The licence has Distribution.' );
+		$this->assertStringNotContainsString( 'wplm_extras[updates]', $html, 'A monthly licence is not offered the term pack.' );
+	}
+
+	public function test_a_monthly_licence_takes_monthly_extras_on_its_subscription(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Monthly' );
+		$applied = array();
+		add_action(
+			'wplm_order_addons_applied',
+			static function ( $order_id, $entries ) use ( &$applied ) {
+				$applied[] = $entries;
+			},
+			10,
+			2
+		);
+
+		$order = $this->add_to_licence(
+			$product,
+			$base,
+			array(
+				'module:factory' => '1',
+				'user'           => '2',
+			)
+		);
+
+		$this->assertSame( 2100.0, (float) $order['order']->get_total(), 'Factory 1500 + 2 users × 300, paid now in full.' );
+		$this->assertSame( 1, $this->licence_count( $base['customer'] ), 'No new key.' );
+		$this->assertSame( '', (string) $order['item']->get_meta( '_wplm_license_ids' ) );
+		$this->assertSame( '', (string) $order['item']->get_meta( '_wplm_package_id' ) );
+		$this->assertSame( $base['license_id'], (int) $order['item']->get_meta( '_wplm_addon_license_id' ) );
+		$this->assertSame( 'existing', json_decode( (string) $order['item']->get_meta( '_wplm_extras' ), true )['flow'] );
+		$this->assertSame( '1', (string) $order['order']->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertCount( 1, $applied );
+
+		$plan_line = $this->line( $base['license_id'], 'base', 'plan' );
+		$factory   = $this->line( $base['license_id'], 'factory', 'addon' );
+		$this->assertSame( $base['subscription_id'], $factory->subscription_id );
+		$this->assertSame( $plan_line->paid_through, $factory->paid_through );
+		$this->assertSame( $order['order']->get_id(), $factory->order_id );
+		$this->assertCount( 3, $this->items( $base['subscription_id'] ) );
+		$this->assertSame( 7100.0, $this->total( $base['subscription_id'] ) );
+
+		// The licence now holds Factory for its term: it is not offered again.
+		$this->assertFalse(
+			$this->validate(
+				array(
+					'wplm_extras'            => array( 'module:factory' => '1' ),
+					'wplm_target_license_id' => (string) $base['license_id'],
+				),
+				$product
+			)
+		);
+		$this->assertSame( 'You already have Factory, so it cannot be added again.', $this->first_error() );
+	}
+
+	public function test_a_yearly_licence_takes_yearly_prices(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Yearly' );
+
+		$order = $this->add_to_licence( $product, $base, array( 'module:factory' => '1' ) );
+
+		$this->assertSame( 15000.0, (float) $order['order']->get_total() );
+		$this->assertSame( 65000.0, $this->total( $base['subscription_id'] ) );
+		$this->assertSame( $this->line( $base['license_id'], 'base' )->paid_through, $this->line( $base['license_id'], 'factory' )->paid_through );
+	}
+
+	public function test_a_lifetime_licence_takes_lifetime_prices_for_life_and_a_dated_term_pack(): void {
+		update_option( 'timezone_string', 'Asia/Karachi' );
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+
+		$order = $this->add_to_licence(
+			$product,
+			$base,
+			array(
+				'module:factory' => '1',
+				'updates'        => '1',
+			)
+		);
+
+		$this->assertSame( 50000.0, (float) $order['order']->get_total(), 'Factory 45000 + updates 5000.' );
+		$factory = $this->line( $base['license_id'], 'factory', 'addon' );
+		$this->assertNull( $factory->paid_through );
+		$this->assertNull( $factory->subscription_id );
+		$updates = $this->line( $base['license_id'], 'assets', 'addon' );
+		$this->assertSame( EntitlementService::add_period( wp_date( 'Y-m-d' ), 364, 'day' ), $updates->paid_through, 'today + 365 − 1' );
+		$this->assertNull( $updates->subscription_id, 'A term never joins a subscription.' );
+		$this->assertSame( '', (string) $order['item']->get_meta( '_wplm_addon_subscription_item_ids' ) );
+
+		// A second pack continues from the first one's end (packs stack).
+		$second = $this->add_to_licence( $product, $base, array( 'updates' => '1' ) );
+		$mine   = array_values( array_filter( $this->lines( $base['license_id'], 'addon' ), static fn( $l ) => $l->order_id === $second['order']->get_id() ) );
+		$this->assertCount( 1, $mine );
+		$this->assertSame( EntitlementService::add_period( wp_date( 'Y-m-d' ), 729, 'day' ), $mine[0]->paid_through );
+	}
+
+	public function test_a_recurring_licence_is_never_offered_a_term_the_filter_does_not_offer_it(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Monthly' );
+		$plan    = $this->make( PlanService::class )->get( (int) $product->get_meta( '_wplm_plan_id' ) );
+
+		$ids = array_column( $this->make( AddonService::class )->extras_offers( $plan, $this->make( LicenseService::class )->get_by_id( $base['license_id'] ) ), 'id' );
+
+		$this->assertNotContains( 'updates', $ids );
+		$this->assertContains( 'module:factory', $ids );
+		wp_set_current_user( $base['customer'] );
+		$this->assertFalse(
+			$this->validate(
+				array(
+					'wplm_extras'            => array( 'updates' => '1' ),
+					'wplm_target_license_id' => (string) $base['license_id'],
+				),
+				$product
+			)
+		);
+	}
+
+	public function test_someone_elses_licence_and_an_overdue_licence_are_refused(): void {
+		$addon    = $this->addon_product();
+		$base     = $this->customer_with( 'Monthly' );
+		$stranger = $this->create_customer();
+
+		wp_set_current_user( $stranger );
+		$this->assertFalse(
+			$this->validate(
+				array(
+					'wplm_extras'            => array( 'module:factory' => '1' ),
+					'wplm_target_license_id' => (string) $base['license_id'],
+				),
+				$addon
+			)
+		);
+		$this->assertSame( 'That licence is not on your account.', $this->first_error() );
+
+		// Overdue: the extras would be paid for again at the very next renewal.
+		global $wpdb;
+		$wpdb->update( $wpdb->prefix . 'wplm_entitlements', array( 'paid_through' => EntitlementService::add_period( wp_date( 'Y-m-d' ), -3, 'day' ) ), array( 'license_id' => $base['license_id'] ) );
+		wp_set_current_user( $base['customer'] );
+		$this->assertFalse( $this->checkout()->plan_is_purchasable( true, $addon ) );
+		$this->assertFalse(
+			$this->validate(
+				array(
+					'wplm_extras'            => array( 'module:factory' => '1' ),
+					'wplm_target_license_id' => (string) $base['license_id'],
+				),
+				$addon
+			)
+		);
+		global $product;
+		$product = $addon;
+		ob_start();
+		$this->checkout()->render_addon_notice();
+		$this->assertStringContainsString( 'Pay your plan&#039;s renewal first, then add this.', (string) ob_get_clean() );
+	}
+
+	public function test_completing_an_existing_licence_order_again_adds_nothing_more(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Monthly' );
+		$order   = $this->add_to_licence( $product, $base, array( 'module:factory' => '1' ) );
+		$o       = $order['order'];
+		$o->delete_meta_data( '_wplm_plan_fulfilled' );
+		$o->save();
+
+		$this->complete_again( $o );
+
+		$this->assertCount( 1, $this->lines( $base['license_id'], 'addon' ) );
+		$this->assertSame( 6500.0, $this->total( $base['subscription_id'] ) );
+	}
+
+	public function test_a_refund_of_an_existing_licence_order_leaves_the_licence_alone(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Monthly' );
+		$order   = $this->add_to_licence( $product, $base, array( 'module:factory' => '1' ) );
+
+		$order['order']->update_status( 'refunded' );
+
+		$this->assertSame( array(), $this->lines( $base['license_id'], 'addon' ) );
+		$this->assertSame( 5000.0, $this->total( $base['subscription_id'] ) );
+		$this->assertSame( 'active', $this->subscription_row( $base['subscription_id'] )['status'] );
+		$this->assertStringContainsString( 'The licence itself is unchanged.', $this->notes( $order['order'] ) );
+	}
+
+	public function test_the_new_licence_email_does_not_say_its_extras_were_added_to_a_licence(): void {
+		$bought = $this->buy_new( 'Monthly', array( 'module:factory' => '1' ) );
+
+		ob_start();
+		do_action( 'woocommerce_email_after_order_table', new \WC_Order( $bought['order']->get_id() ), false, false, new \WC_Email_Customer_Completed_Order() );
+		$body = (string) ob_get_clean();
+
+		$this->assertStringContainsString( 'Your licence key and setup details are in the PDF', $body );
+		$this->assertStringNotContainsString( 'Added to your licence', $body );
+	}
 }

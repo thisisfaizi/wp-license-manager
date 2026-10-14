@@ -577,7 +577,7 @@ class AddonService {
 		if ( PackageExtrasService::FLOW_EXISTING !== ( $snapshot['flow'] ?? '' ) ) {
 			throw new \RuntimeException( 'the add-ons on this line were not sold for an existing licence' );
 		}
-		$ok       = $this->check_for_user( (int) $order->get_customer_id(), $license, $this->extras_package( $plan, $ctx['billing'], $snapshot['items'] ), 1, $now );
+		$ok = $this->check_for_user( (int) $order->get_customer_id(), $license, $this->extras_package( $plan, $ctx['billing'], $snapshot['items'] ), 1, $now );
 		if ( is_wp_error( $ok ) ) {
 			throw new \RuntimeException( $ok->get_error_message() );
 		}

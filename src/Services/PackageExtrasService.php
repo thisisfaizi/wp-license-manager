@@ -166,7 +166,7 @@ class PackageExtrasService {
 			if ( $max < 1 ) {
 				continue;
 			}
-			$days = isset( $offer['term_days'] ) && null !== $offer['term_days'] && '' !== $offer['term_days'] ? (int) $offer['term_days'] : null;
+			$days  = isset( $offer['term_days'] ) && null !== $offer['term_days'] && '' !== $offer['term_days'] ? (int) $offer['term_days'] : null;
 			$group = in_array( $offer['group'] ?? '', self::GROUPS, true ) ? (string) $offer['group'] : 'module';
 			if ( null !== $days && $days < 1 ) {
 				continue;

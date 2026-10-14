@@ -1338,7 +1338,7 @@ class PlanCheckout {
 		if ( ! is_array( $ids ) || empty( $ids ) ) {
 			try {
 				$this->extras_snapshot_for( $pkg, $json ); // Checked before a key is generated.
-				$license = $this->fulfill_item( $order, $item, $pkg );
+				$license  = $this->fulfill_item( $order, $item, $pkg );
 				$issued[] = $license;
 				$item->update_meta_data( '_wplm_license_ids', wp_json_encode( array( $license->id ) ) );
 				$item->save_meta_data();

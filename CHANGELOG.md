@@ -6,6 +6,111 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.3.0] — 2026-10-15
+
+### Added
+- **Package extras at purchase.** Beside a licence type the customer can tick **extras**: modules and
+  extra quantities (users, seats, phones…). The result is one key and one bill. A recurring licence gets
+  one subscription that bills the base and every extra, and each renewal bills base + extras and extends
+  every line. A lifetime licence is one payment. WP License Manager stays product-agnostic: a plugin for
+  the licence profile prices the extras through the hooks below.
+- **`Package::billing_key()`** returns how a package is priced for extras:
+  - `month`: recurring, every 1 month.
+  - `year`: recurring, every 1 year.
+  - `lifetime`.
+  - `null` for anything else (one-time, other intervals).
+
+  A package with a **trial is offered no extras** at purchase: the filter is not even called.
+- **Hooks:**
+  - `apply_filters( 'wplm_package_extras', array(), array $ctx )` returns the offers for a context.
+    - `$ctx` always has `profile`, `plan`, `billing`, `flow` (`new` | `existing`), `package`, `license`
+      and `held_modules`.
+    - Each offer has `id`, `label`, `group`, `unit_price`, `max_qty`, `lines` (per unit), and optionally
+      `requires` (any-of groups of module codes, every group to be met), `term_days` and `description`.
+  - `apply_filters( 'wplm_package_extras_snapshot', array $snapshot, array $ctx )` adds keys to the
+    order-line snapshot (for example a price-list version). Unknown keys are kept; WPLM's own
+    (`billing`, `flow`, `items`) always win.
+  - `do_action( 'wplm_package_extras_form', array $data )` prints the form after the licence-type radios.
+    - `$data` holds `plan`, `flow`, `offers_by_package`, `offers_by_license`, `base_prices` (each
+      package's first payment, sign-up fee included) and `currency`.
+    - With nothing hooked, WPLM prints a plain, accessible fallback: a checkbox or number input per
+      offer, shown for the selected licence type or licence. The other groups are `disabled`, so their
+      same-named fields never post.
+- **What WPLM holds an offer to, whatever the filter returns** (`PackageExtrasService::offers()`):
+  - **Dropped:**
+    - a bad or repeated id (`[a-z0-9:_-]`);
+    - a price that is not a finite number of 0 or more;
+    - `max_qty` below 1;
+    - lines the profile does not allow;
+    - a `term` offer without `term_days`;
+    - a module offer for a module already held. A term offer is never "held", so packs stack.
+  - **Rounded:** prices to the shop's decimals.
+  - **Bought once:** a module-only or term offer (`max_qty` forced to 1).
+  - **Refused choices** (`PackageExtrasService::choose()`), with a message the customer sees:
+    - an id that is not offered (a held module says so);
+    - a quantity below 0 or above `max_qty`;
+    - a requirement that is not met. Requirements are the profile's `requires` plus the offer's own,
+      checked against the held modules and the modules ticked now.
+- **The browser's price is never used.**
+  - The posted field is `wplm_extras[<offer id>] = <qty>`, and the cart keeps only that choice
+    (`wplm_extras`).
+  - The price is rebuilt from the filter on add to cart, on every cart total (`first payment of the
+    base + extras`), in the cart display, in `woocommerce_check_cart_items` (stops the checkout with
+    the reason) and when the order line is saved.
+  - A line with extras is forced to quantity 1.
+- **The order line keeps the sale:**
+  - `_wplm_extras` (JSON: `billing`, `flow`, `items` with id, label, qty, unit_price, amount, lines
+    already × qty, term_days);
+  - `_wplm_extras_total`;
+  - a visible **"Add-ons"** entry ("Factory; 2 × Extra phone").
+- **Fulfilment writes from the snapshot only:**
+  - The snapshot is checked **before a key is generated**: its billing must still be the package's,
+    and every line valid for the profile.
+  - The licence is issued as before (`source = plan`). The extras are written with `source = addon`
+    and the order id.
+    - **Recurring:** extras are paid through the same day as the base and join the new subscription,
+      one item per extra (`addon`, `extra_id`, `entitlement_ids`). The recurring total is the sum of
+      the items.
+    - **Lifetime:** extras are undated.
+    - **Term** (`term_days`): a dated line that never joins a subscription.
+  - **Idempotent:** `_wplm_license_ids` marks the licence done and `_wplm_entitlement_ids` the extras;
+    `_wplm_plan_fulfilled` is set only when both are. A retry does only what is missing and never issues
+    a second key. An extras step that fails part-way removes every line it wrote.
+- **Extras for an existing licence.** The add-ons product (plan kind `addon`) prices extras with the same
+  filter (`flow = existing`, the licence's billing). It needs **no stored packages**:
+  - The product is purchasable, and the licence picker and form render, when the filter offers something
+    for one of the customer's licences.
+  - The cart keeps `wplm_addon_license_id` + `wplm_extras`.
+  - Fulfilment checks the extras as one in-memory add-on (id 0, the add-on plan, the licence's billing),
+    so every add-on rule still applies (status, trial, overdue, base module, "already has",
+    requirements, `wplm_addon_eligibility`).
+  - Stored add-on packages (1.2.6) work exactly as before. When one licence gets both a package radio
+    and ticked extras on the same add-to-cart, the extras take the line.
+
+### Changed
+- `AddonService::apply()` now writes through one private line writer, shared with the new
+  `AddonService::apply_extras()` and `AddonService::apply_extras_to_licence()`. If it fails part-way,
+  it removes what it wrote through the service, which also detaches any subscription items.
+- **Plan switch with add-ons** (`SwitchManager::switch_plan()`). Add-on items (stored add-ons and
+  extras) are carried forward:
+  - The new `recurring_total` is the new plan's own price. It is set on the plan's item, and adjustments
+    are dropped.
+  - The recurring total is re-derived from the items.
+  - The proration charge is the new plan plus the add-ons.
+  - Switching to another period or interval while add-on items exist is refused
+    (`wplm_switch_addons_billing`), because the add-ons are priced per period.
+  - Without add-on items, a switch is unchanged.
+- **Refund note.** For a licence issued with extras, a full refund still suspends (or revokes) the
+  licence and removes its extras lines. The note now says so, instead of "the licence itself is
+  unchanged".
+- The completed-order email no longer says a brand-new licence's extras were "added to your licence".
+- The classic checkout handler also skips lines with `_wplm_extras`.
+- `AddonService::eligible_targets()` entries carry `extras` (the offers for that licence).
+
+### Deploy
+- No database change. Deploy this before Super Ledger Licensing 1.4.0, which requires WPLM 1.3.0. Plans
+  built at purchase (1.2.7) and their orders keep working.
+
 ## [1.2.7] — 2026-10-14
 
 ### Added
