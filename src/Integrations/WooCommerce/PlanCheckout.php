@@ -838,6 +838,11 @@ class PlanCheckout {
 				wc_add_notice( $twice, 'error' );
 				return false;
 			}
+			$clash = $this->cart_cycle_clash( $built['license'], $built['cycle'] );
+			if ( null !== $clash ) {
+				wc_add_notice( $clash, 'error' );
+				return false;
+			}
 			return $passed;
 		}
 
@@ -1303,6 +1308,77 @@ class PlanCheckout {
 				wc_add_notice( $this->twice_message( $license, $twice ), 'error' );
 			}
 		}
+
+		// Monthly / yearly add-ons for one licence join one add-ons subscription, billed one way: a
+		// second cycle in the same cart could be charged but never added.
+		$cycles = array();
+		foreach ( WC()->cart->get_cart() as $cart_item ) {
+			$cycle = $this->line_cycle( $cart_item );
+			if ( null !== $cycle ) {
+				$cycles[ (int) $cart_item['wplm_addon_license_id'] ][ $cycle ] = true;
+			}
+		}
+		foreach ( $cycles as $license_id => $seen ) {
+			if ( count( $seen ) > 1 ) {
+				$license = $this->licenses->get_by_id( (int) $license_id );
+				wc_add_notice( $this->cycle_clash_message( $license, (string) array_key_first( $seen ) ), 'error' );
+			}
+		}
+	}
+
+	/**
+	 * The cycle an add-on cart line bills its monthly / yearly extras on, for a licence the customer
+	 * already has; null when it has none (or is not such a line).
+	 *
+	 * @param array $cart_item Cart item.
+	 * @return string|null `month` or `year`.
+	 */
+	private function line_cycle( array $cart_item ): ?string {
+		if ( empty( $cart_item['wplm_extras'] ) || empty( $cart_item['wplm_addon_license_id'] ) ) {
+			return null;
+		}
+		$built = $this->extras_for_cart_item( $cart_item );
+		return is_wp_error( $built ) || null === $built['license'] ? null : $built['cycle'];
+	}
+
+	/**
+	 * Why a new add-on line for a licence cannot join the cart: the cart already bills that licence's
+	 * monthly / yearly add-ons on the other cycle. Null when it does not.
+	 *
+	 * @param License|null $license The licence.
+	 * @param string|null  $cycle   The new line's cycle.
+	 * @return string|null
+	 */
+	private function cart_cycle_clash( ?License $license, ?string $cycle ): ?string {
+		if ( null === $license || null === $cycle || ! function_exists( 'WC' ) || null === WC()->cart ) {
+			return null;
+		}
+		foreach ( WC()->cart->get_cart() as $cart_item ) {
+			if ( (int) ( $cart_item['wplm_addon_license_id'] ?? 0 ) !== $license->id ) {
+				continue;
+			}
+			$other = $this->line_cycle( $cart_item );
+			if ( null !== $other && $other !== $cycle ) {
+				return $this->cycle_clash_message( $license, $other );
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * "Your cart already has add-ons for your licence ending ABCD billed every month. …"
+	 *
+	 * @param License|null $license The licence.
+	 * @param string       $cycle   The cycle already in the cart.
+	 * @return string
+	 */
+	private function cycle_clash_message( ?License $license, string $cycle ): string {
+		return sprintf(
+			/* translators: 1: licence label (licence ending ABCD), 2: billing schedule (every month) */
+			__( 'Your cart already has add-ons for your %1$s billed %2$s. One licence\'s monthly / yearly add-ons are billed one way: choose the same, or remove the other line first.', 'wp-license-manager' ),
+			null !== $license ? AddonService::licence_label( $license ) : __( 'licence', 'wp-license-manager' ),
+			AddonService::schedule( 1, $cycle )
+		);
 	}
 
 	/**

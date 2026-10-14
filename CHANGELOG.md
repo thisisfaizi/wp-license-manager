@@ -222,6 +222,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   (`AddonService::addons_join_problem()`). Lifetime-priced add-ons are still sold.
 - An add-ons subscription set to cancel whose last period is over is no longer the licence's open
   add-ons subscription: its modules can be bought again and a new purchase chooses its own cycle.
+- **One cycle per licence in a cart.** Two cart lines adding monthly and yearly add-ons to the same
+  licence are refused at add to cart and at checkout: the second could be charged but never added.
 
 ### Deploy
 - **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added

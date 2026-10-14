@@ -2564,4 +2564,50 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( 'set to end', $this->notes( $order['order'] ) );
 		$this->assertSame( 1000.0, $this->total( $base['addons'] ) );
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Review fixes (2026-10-15): one cycle per licence in a cart
+	// ---------------------------------------------------------------------------------------------
+
+	public function test_two_cart_lines_for_one_licence_cannot_be_billed_on_two_cycles(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		wp_set_current_user( $base['customer'] );
+		$monthly = array(
+			'wplm_extras'            => array( 'module:fbr' => '1' ),
+			'wplm_extras_cycle'      => 'month',
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		$this->assertTrue( $this->validate( $monthly, $product ) );
+		WC()->cart->add_to_cart( $product->get_id(), 1, 0, array(), array( 'wplm_extras' => array( 'module:fbr' => 1 ), 'wplm_extras_cycle' => 'month', 'wplm_addon_license_id' => $base['license_id'] ) );
+
+		$this->assertFalse(
+			$this->validate(
+				array(
+					'wplm_extras'            => array( 'module:pos' => '1' ),
+					'wplm_extras_cycle'      => 'year',
+					'wplm_target_license_id' => (string) $base['license_id'],
+				),
+				$product
+			),
+			'Yearly beside monthly for the same licence: the second could never be added.'
+		);
+		$this->assertStringContainsString( 'billed every month', $this->first_error() );
+		$this->assertTrue(
+			$this->validate(
+				array(
+					'wplm_extras'            => array( 'module:factory' => '1' ),
+					'wplm_target_license_id' => (string) $base['license_id'],
+				),
+				$product
+			),
+			'A lifetime add-on beside it is fine.'
+		);
+
+		// Both already in the cart (added before this check existed): checkout stops.
+		WC()->cart->add_to_cart( $product->get_id(), 1, 0, array(), array( 'wplm_extras' => array( 'module:pos' => 1 ), 'wplm_extras_cycle' => 'year', 'wplm_addon_license_id' => $base['license_id'] ) );
+		wc_clear_notices();
+		$this->checkout()->check_cart_extras();
+		$this->assertStringContainsString( 'billed every month', $this->first_error() );
+	}
 }
