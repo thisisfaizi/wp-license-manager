@@ -976,9 +976,13 @@ class PlanCheckout {
 			}
 			$data['wplm_unique'] = 'extras-' . microtime();
 		}
+		// The licence an add-on is added to: only an add-on plan's line names one (and validation has
+		// checked it is the customer's). Any other line ignores a posted licence id.
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
 		$license_id = isset( $_POST['wplm_target_license_id'] ) ? absint( wp_unslash( $_POST['wplm_target_license_id'] ) ) : 0;
-		if ( ( $package_id || array() !== $extras ) && $license_id ) {
+		if ( null === $plan || ! $plan->is_addon() ) {
+			unset( $data['wplm_addon_license_id'] );
+		} elseif ( ( $package_id || array() !== $extras ) && $license_id ) {
 			$data['wplm_addon_license_id'] = $license_id;
 		}
 		return $data;
@@ -1102,12 +1106,12 @@ class PlanCheckout {
 		if ( ! empty( $cart_item['wplm_package_id'] ) ) {
 			$pkg = $this->lookup_package( (int) $cart_item['wplm_package_id'] );
 			if ( $pkg ) {
-				$addon   = ! empty( $cart_item['wplm_addon_license_id'] );
+				$license = $this->addon_target( $pkg, (int) ( $cart_item['wplm_addon_license_id'] ?? 0 ), get_current_user_id() );
+				$addon   = null !== $license;
 				$items[] = array(
 					'key'   => $addon ? __( 'Add-on', 'wp-license-manager' ) : __( 'License Type', 'wp-license-manager' ),
 					'value' => wp_strip_all_tags( $pkg->name . ' — ' . $this->price_label( $pkg, $addon ) ),
 				);
-				$license = $addon ? $this->licenses->get_by_id( (int) $cart_item['wplm_addon_license_id'] ) : null;
 				if ( null !== $license ) {
 					$items[] = array(
 						'key'   => __( 'Added to', 'wp-license-manager' ),
@@ -1137,6 +1141,7 @@ class PlanCheckout {
 			$this->save_extras_line_item( $item, $values );
 			return;
 		}
+		$pkg = null;
 		if ( ! empty( $values['wplm_package_id'] ) ) {
 			$item->add_meta_data( '_wplm_package_id', (int) $values['wplm_package_id'], true );
 			$pkg = $this->lookup_package( (int) $values['wplm_package_id'] );
@@ -1145,13 +1150,35 @@ class PlanCheckout {
 				$item->add_meta_data( __( 'License Type', 'wp-license-manager' ), $pkg->name, true );
 			}
 		}
-		if ( ! empty( $values['wplm_addon_license_id'] ) ) {
-			$item->add_meta_data( '_wplm_addon_license_id', (int) $values['wplm_addon_license_id'], true );
-			$license = $this->licenses->get_by_id( (int) $values['wplm_addon_license_id'] );
-			if ( null !== $license ) {
-				$item->add_meta_data( __( 'Added to', 'wp-license-manager' ), ucfirst( AddonService::licence_label( $license ) ), true );
-			}
+		// Only an add-on line names the licence it adds to, and only one of the buyer's own: the id
+		// (and the "licence ending ABCD" shown with it) is never written for anyone else's licence.
+		$buyer   = $order instanceof \WC_Order && $order->get_customer_id() > 0 ? (int) $order->get_customer_id() : get_current_user_id();
+		$license = null !== $pkg ? $this->addon_target( $pkg, (int) ( $values['wplm_addon_license_id'] ?? 0 ), $buyer ) : null;
+		if ( null !== $license ) {
+			$item->add_meta_data( '_wplm_addon_license_id', $license->id, true );
+			$item->add_meta_data( __( 'Added to', 'wp-license-manager' ), ucfirst( AddonService::licence_label( $license ) ), true );
 		}
+	}
+
+	/**
+	 * The licence a stored add-on line adds to: named on an add-on plan's line and the buyer's own;
+	 * null otherwise (a licence type, someone else's licence, none).
+	 *
+	 * @param Package $pkg        The line's package.
+	 * @param int     $license_id The licence id on the line.
+	 * @param int     $user_id    The buyer.
+	 * @return License|null
+	 */
+	private function addon_target( Package $pkg, int $license_id, int $user_id ): ?License {
+		if ( $license_id <= 0 || $user_id <= 0 ) {
+			return null;
+		}
+		$plan = $this->plans->get( $pkg->plan_id );
+		if ( null === $plan || ! $plan->is_addon() ) {
+			return null;
+		}
+		$license = $this->licenses->get_by_id( $license_id );
+		return null !== $license && (int) $license->user_id === $user_id ? $license : null;
 	}
 
 	/**

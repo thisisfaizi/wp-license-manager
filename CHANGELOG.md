@@ -229,6 +229,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   5 minutes), so two orders completed at once cannot both pass the "already has" check or both open
   an add-ons subscription. The one that waits fails with a note and is retried by completing it again.
   The per-order fulfilment claim (`wplm_fulfil_lock_{order id}`) uses the same `WPLM\Support\Lock`.
+- **Security: a licence id is only recorded on an add-on line, for its owner.** A licence id posted
+  with any other product (`wplm_target_license_id`) was stored on the order line as
+  `_wplm_addon_license_id` with an "Added to: licence ending ABCD" label, for anyone's licence. It is
+  now ignored unless the line is an add-on plan's, and the order line records it only when the licence
+  belongs to the buyer. Orders placed before this release may still carry such ids: readers of
+  `_wplm_addon_license_id` must check the line was applied (`_wplm_entitlement_ids`) and the licence is
+  the order customer's.
 
 ### Deploy
 - **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added

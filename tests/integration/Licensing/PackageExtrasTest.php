@@ -2642,4 +2642,52 @@ class PackageExtrasTest extends TestCase {
 
 		$this->assertNotNull( $this->line( $base['license_id'], 'fbr', 'addon' ) );
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Review fixes (2026-10-15): a licence id is only taken from an add-on line, for its owner
+	// ---------------------------------------------------------------------------------------------
+
+	public function test_a_licence_type_line_never_records_someone_elses_licence(): void {
+		$victim   = $this->customer_with( 'Lifetime' );
+		$attacker = $this->create_customer();
+
+		$bought = $this->buy_through_cart(
+			$this->product,
+			array(
+				'wplm_package_id'        => (string) $this->package( 'Monthly' )->id,
+				'wplm_target_license_id' => (string) $victim['license_id'],
+			),
+			$attacker
+		);
+
+		$item = \WC_Order_Factory::get_order_item( $bought['item']->get_id() );
+		$this->assertSame( '', (string) $item->get_meta( '_wplm_addon_license_id' ), 'The victim\'s licence is not tied to the attacker\'s order.' );
+		$this->assertSame( '', (string) $item->get_meta( 'Added to' ), 'Nor shown, with the end of its key.' );
+		$this->assertGreaterThan( 0, $bought['license_id'], 'The attacker gets the licence type they paid for.' );
+
+		// A cart line from before this fix still carries the id: the order line ignores it.
+		wp_set_current_user( $attacker );
+		$order = new \WC_Order();
+		$order->set_customer_id( $attacker );
+		$line = new \WC_Order_Item_Product();
+		$line->set_product( $this->product );
+		$this->checkout()->save_order_line_item(
+			$line,
+			'key',
+			array(
+				'wplm_package_id'       => $this->package( 'Monthly' )->id,
+				'wplm_addon_license_id' => $victim['license_id'],
+			),
+			$order
+		);
+		$this->assertSame( '', (string) $line->get_meta( '_wplm_addon_license_id' ) );
+		$data = $this->checkout()->display_cart_item_data(
+			array(),
+			array(
+				'wplm_package_id'       => $this->package( 'Monthly' )->id,
+				'wplm_addon_license_id' => $victim['license_id'],
+			)
+		);
+		$this->assertNotContains( 'Added to', array_column( $data, 'key' ) );
+	}
 }
