@@ -1213,7 +1213,7 @@ class PlanCheckout {
 			$package_id = (int) $item->get_meta( '_wplm_package_id' );
 			if ( ! $package_id ) {
 				// Package extras added to a licence the customer already has.
-				if ( '' !== $extras && (int) $item->get_meta( '_wplm_addon_license_id' ) > 0 ) {
+				if ( '' !== $extras ) {
 					$entry = $this->fulfill_existing_extras( $order, $item, $failed );
 					if ( null !== $entry ) {
 						$applied[] = $entry;
