@@ -2725,4 +2725,35 @@ class PackageExtrasTest extends TestCase {
 		$invoice->update_status( 'completed' );
 		$this->assertSame( EntitlementService::add_period( $before, 1, 'month' ), $this->line( $bought['license_id'], 'fbr' )->paid_through, 'Paying it still renews them.' );
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Review fixes (2026-10-15): a draft is not for sale
+	// ---------------------------------------------------------------------------------------------
+
+	public function test_a_draft_plan_product_cannot_be_bought_until_it_is_published(): void {
+		$draft = $this->create_plan_product( $this->plan['plan_id'] );
+		$draft->set_status( 'draft' );
+		$draft->save();
+		$addons = $this->addon_product();
+		$addons->set_status( 'draft' );
+		$addons->save();
+		$base = $this->customer_with( 'Lifetime' );
+
+		foreach ( array( 0, $base['customer'] ) as $visitor ) {
+			wp_set_current_user( $visitor );
+			$this->assertFalse( wc_get_product( $draft->get_id() )->is_purchasable(), 'Draft licence product, visitor ' . $visitor );
+			$this->assertFalse( wc_get_product( $addons->get_id() )->is_purchasable(), 'Draft add-ons product, visitor ' . $visitor );
+		}
+		$_POST['wplm_package_id'] = (string) $this->package( 'Lifetime' )->id;
+		$this->assertFalse( WC()->cart->add_to_cart( $draft->get_id(), 1 ), 'Not even through ?add-to-cart=.' );
+		unset( $_POST['wplm_package_id'] );
+
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		$this->assertTrue( wc_get_product( $draft->get_id() )->is_purchasable(), 'The owner can test it.' );
+
+		$draft->set_status( 'publish' );
+		$draft->save();
+		wp_set_current_user( $base['customer'] );
+		$this->assertTrue( wc_get_product( $draft->get_id() )->is_purchasable(), 'Published: for sale, priced by its plan.' );
+	}
 }

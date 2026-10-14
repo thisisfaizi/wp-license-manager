@@ -701,10 +701,17 @@ class PlanCheckout {
 	 * @return bool
 	 */
 	public function plan_is_purchasable( $purchasable, $product ) {
-		if ( $product instanceof \WC_Product && $this->is_dynamic_product( $product ) ) {
+		$plan    = $product instanceof \WC_Product ? $this->plan_for_product( $product ) : null;
+		$dynamic = $product instanceof \WC_Product && $this->is_dynamic_product( $product );
+		if ( ( null !== $plan || $dynamic ) && ! self::viewable( $product ) ) {
+			// A draft, pending or private product is not for sale until the owner publishes it (a shop
+			// manager may still test it): only the missing price is lifted here, never WooCommerce's
+			// own status rule.
+			return false;
+		}
+		if ( $dynamic ) {
 			return true; // The package (and its price) is built when it is added to the cart.
 		}
-		$plan = $product instanceof \WC_Product ? $this->plan_for_product( $product ) : null;
 		if ( null !== $plan && $plan->is_addon() ) {
 			// An add-on is added to one of the buyer's licences: nobody else can buy it. It may sell
 			// stored packages, package extras, or both.
@@ -714,6 +721,22 @@ class PlanCheckout {
 			return true;
 		}
 		return $purchasable;
+	}
+
+	/**
+	 * Whether the visitor may see (and so buy) a product: published, or one they can edit — and the
+	 * same for its parent — as WooCommerce's own `is_purchasable()` reads it.
+	 *
+	 * @param \WC_Product $product Product.
+	 * @return bool
+	 */
+	private static function viewable( \WC_Product $product ): bool {
+		if ( method_exists( $product, 'is_viewable' ) ) {
+			return (bool) $product->is_viewable();
+		}
+		$parent = $product->get_parent_id();
+		return ( 'publish' === $product->get_status() || current_user_can( 'edit_post', $product->get_id() ) )
+			&& ( ! $parent || 'publish' === get_post_status( $parent ) || current_user_can( 'edit_post', $parent ) );
 	}
 
 	/**
