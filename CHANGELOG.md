@@ -224,6 +224,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   add-ons subscription: its modules can be bought again and a new purchase chooses its own cycle.
 - **One cycle per licence in a cart.** Two cart lines adding monthly and yearly add-ons to the same
   licence are refused at add to cart and at checkout: the second could be charged but never added.
+- **One request at a time adds to a licence.** Adding add-ons or extras to an existing licence now
+  checks and writes under a per-licence lock (option `wplm_addons_lock_{licence id}`, taken over after
+  5 minutes), so two orders completed at once cannot both pass the "already has" check or both open
+  an add-ons subscription. The one that waits fails with a note and is retried by completing it again.
+  The per-order fulfilment claim (`wplm_fulfil_lock_{order id}`) uses the same `WPLM\Support\Lock`.
 
 ### Deploy
 - **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added

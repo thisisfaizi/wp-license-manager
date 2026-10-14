@@ -54,6 +54,9 @@ class AddonService {
 	/** Subscription statuses an add-on may join. */
 	public const SUBSCRIPTION_STATUSES = array( 'active', 'trial', 'on-hold' );
 
+	/** Seconds after which a licence's add-ons lock is taken to be from a request that died. */
+	public const LICENCE_LOCK_TTL = 300;
+
 	/** @var EntitlementService */
 	private EntitlementService $entitlements;
 
@@ -900,6 +903,38 @@ class AddonService {
 	 * @throws \RuntimeException When they cannot be added.
 	 */
 	public function apply_extras_to_licence( \WC_Order $order, $item, License $license, Plan $plan, string $json, ?int $now = null ): array {
+		return $this->with_licence_lock( $license, fn() => $this->apply_extras_to_licence_locked( $order, $item, $license, $plan, $json, $now ) );
+	}
+
+	/**
+	 * Run a check-then-write on a licence's add-ons while no other request does: two orders completed
+	 * at the same moment for the same licence must not both pass the "already has" check, nor both
+	 * open an add-ons subscription. Everything is read again inside the lock.
+	 *
+	 * @param License  $license The licence.
+	 * @param callable $write   The check and the write.
+	 * @return mixed What `$write` returns.
+	 * @throws \RuntimeException When another request is adding to the licence now (retryable).
+	 */
+	private function with_licence_lock( License $license, callable $write ) {
+		$name = 'wplm_addons_lock_' . $license->id;
+		if ( ! \WPLM\Support\Lock::claim( $name, self::LICENCE_LOCK_TTL ) ) {
+			throw new \RuntimeException( __( 'another order is adding to this licence right now. Nothing was added', 'wp-license-manager' ) );
+		}
+		try {
+			return $write();
+		} finally {
+			\WPLM\Support\Lock::release( $name );
+		}
+	}
+
+	/**
+	 * {@see apply_extras_to_licence()} under the licence's add-ons lock.
+	 *
+	 * @return Entitlement[]
+	 * @throws \RuntimeException When they cannot be added.
+	 */
+	private function apply_extras_to_licence_locked( \WC_Order $order, $item, License $license, Plan $plan, string $json, ?int $now ): array {
 		$this->discard_unstamped( $order, $license );
 		$ctx = $this->extras_context( $plan, $license, $now );
 		if ( null === $ctx ) {
@@ -1048,6 +1083,16 @@ class AddonService {
 	 * @throws \RuntimeException When the add-on cannot be added.
 	 */
 	public function apply( \WC_Order $order, $item, Package $package, License $license, ?int $now = null ): array {
+		return $this->with_licence_lock( $license, fn() => $this->apply_locked( $order, $item, $package, $license, $now ) );
+	}
+
+	/**
+	 * {@see apply()} under the licence's add-ons lock.
+	 *
+	 * @return Entitlement[]
+	 * @throws \RuntimeException When the add-on cannot be added.
+	 */
+	private function apply_locked( \WC_Order $order, $item, Package $package, License $license, ?int $now ): array {
 		$this->discard_unstamped( $order, $license );
 		$ok = $this->check_for_user( (int) $order->get_customer_id(), $license, $package, (int) $item->get_quantity(), $now );
 		if ( is_wp_error( $ok ) ) {

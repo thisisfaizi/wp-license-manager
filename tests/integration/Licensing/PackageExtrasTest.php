@@ -2610,4 +2610,36 @@ class PackageExtrasTest extends TestCase {
 		$this->checkout()->check_cart_extras();
 		$this->assertStringContainsString( 'billed every month', $this->first_error() );
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Review fixes (2026-10-15): one request at a time adds to a licence
+	// ---------------------------------------------------------------------------------------------
+
+	public function test_a_licence_another_request_is_adding_to_takes_nothing_until_retried(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		add_option( 'wplm_addons_lock_' . $base['license_id'], (string) time(), '', 'no' );
+
+		$order = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+
+		$this->assertNull( $this->line( $base['license_id'], 'fbr', 'addon' ), 'Checked and written only under the licence lock.' );
+		$this->assertNull( $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] ) );
+		$this->assertStringContainsString( 'another order is adding to this licence right now', $this->notes( $order['order'] ) );
+		$this->assertSame( '', (string) wc_get_order( $order['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+
+		delete_option( 'wplm_addons_lock_' . $base['license_id'] );
+		$this->complete_again( $order['order'] );
+		$this->assertNotNull( $this->line( $base['license_id'], 'fbr', 'addon' ) );
+		$this->assertFalse( get_option( 'wplm_addons_lock_' . $base['license_id'] ), 'Released.' );
+	}
+
+	public function test_a_stale_licence_lock_is_taken_over(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		add_option( 'wplm_addons_lock_' . $base['license_id'], (string) ( time() - AddonService::LICENCE_LOCK_TTL - 5 ), '', 'no' );
+
+		$this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+
+		$this->assertNotNull( $this->line( $base['license_id'], 'fbr', 'addon' ) );
+	}
 }

@@ -1538,30 +1538,15 @@ class PlanCheckout {
 	public const FULFIL_LOCK_TTL = 300;
 
 	/**
-	 * Claim an order for fulfilment: an atomic insert of the option `wplm_fulfil_lock_{id}`, which
-	 * fails while another request holds it. A claim older than {@see FULFIL_LOCK_TTL} is taken over.
-	 * The option API is not used: `add_option()` cannot be relied on to fail on an existing row.
+	 * Claim an order for fulfilment: the option `wplm_fulfil_lock_{id}` ({@see \WPLM\Support\Lock}),
+	 * which another request cannot claim while this one holds it. A claim older than
+	 * {@see FULFIL_LOCK_TTL} is taken over.
 	 *
 	 * @param int $order_id Order id.
 	 * @return bool Whether this request holds the claim.
 	 */
 	private function claim_order( int $order_id ): bool {
-		global $wpdb;
-		$name = 'wplm_fulfil_lock_' . $order_id;
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- an atomic claim.
-		$claimed = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", $name, (string) time() ) );
-		if ( 1 === (int) $claimed ) {
-			return true;
-		}
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- the claim, never cached.
-		$since = (string) $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) );
-		if ( (int) $since > time() - self::FULFIL_LOCK_TTL ) {
-			return false; // Another request is fulfilling this order now.
-		}
-		// A stale claim: take it over, unless another request just did.
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- an atomic take-over.
-		$taken = $wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s", (string) time(), $name, $since ) );
-		return 1 === (int) $taken;
+		return \WPLM\Support\Lock::claim( 'wplm_fulfil_lock_' . $order_id, self::FULFIL_LOCK_TTL );
 	}
 
 	/**
@@ -1571,9 +1556,7 @@ class PlanCheckout {
 	 * @return void
 	 */
 	private function release_order( int $order_id ): void {
-		global $wpdb;
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- the claim, never cached.
-		$wpdb->delete( $wpdb->options, array( 'option_name' => 'wplm_fulfil_lock_' . $order_id ) );
+		\WPLM\Support\Lock::release( 'wplm_fulfil_lock_' . $order_id );
 	}
 
 	/**
