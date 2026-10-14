@@ -550,7 +550,7 @@ class PlanAdminTest extends TestCase {
 
 		$html = $this->editor( $addon['plan_id'] );
 		$row  = $this->row_html( $html, 0 );
-		$this->assertMatchesRegularExpression( '/name="plan_addon"[^>]*checked/', $html );
+		$this->assertMatchesRegularExpression( '/id="wplm_plan_addon"[^>]*checked/', $html );
 		$this->assertStringContainsString( 'This plan sells add-ons to an existing licence', $html );
 		$this->assertMatchesRegularExpression( '/data-wplm-standalone-only\s*hidden>\s*<label>[^<]*<br>\s*<select[^>]*name="packages\[0\]\[generator_id\]"[^>]*disabled/', $row, 'No generator: no key is issued.' );
 		$this->assertMatchesRegularExpression( '/name="packages\[0\]\[max_activations\]"[^>]*disabled/', $row, 'No computers per key.' );

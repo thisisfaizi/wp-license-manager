@@ -145,7 +145,7 @@ class CheckoutHandler {
 
 			// Plan/package-driven items are fulfilled by PlanCheckout — skip them
 			// here so they are not processed twice.
-			if ( $item->get_meta( '_wplm_package_id' ) ) {
+			if ( $item->get_meta( '_wplm_package_id' ) || $item->get_meta( '_wplm_dynamic_package' ) ) {
 				continue;
 			}
 
