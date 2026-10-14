@@ -236,6 +236,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   belongs to the buyer. Orders placed before this release may still carry such ids: readers of
   `_wplm_addon_license_id` must check the line was applied (`_wplm_entitlement_ids`) and the licence is
   the order customer's.
+- **The add-ons renewal invoice lists the add-ons** ("FBR — Add-ons for licence ending ABCD", one fee
+  line per add-on at what it bills), not the lifetime product the licence was bought as.
 
 ### Deploy
 - **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added

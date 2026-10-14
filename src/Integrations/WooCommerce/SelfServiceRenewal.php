@@ -188,8 +188,10 @@ class SelfServiceRenewal {
 		// Deliberately NOT copying _wplm_package_id onto this line item —
 		// PlanCheckout::fulfill_order() would issue a brand-new license if it saw
 		// a package id. Renewal orders must NOT re-fulfill.
-		$product_id = $this->resolve_product_id( $sub );
-		$item_added = false;
+		// An add-ons-only subscription bills the add-ons of a lifetime licence: the invoice lists them,
+		// never the product the licence was bought as (that was paid once, for life).
+		$item_added = $sub->is_addons_only() && $this->add_addons_lines( $order, $sub );
+		$product_id = $item_added || $sub->is_addons_only() ? 0 : $this->resolve_product_id( $sub );
 
 		if ( $product_id > 0 ) {
 			$product = wc_get_product( $product_id );
@@ -208,7 +210,7 @@ class SelfServiceRenewal {
 
 		if ( ! $item_added ) {
 			$fee = new \WC_Order_Item_Fee();
-			$fee->set_name( __( 'License Renewal', 'wp-license-manager' ) );
+			$fee->set_name( $sub->is_addons_only() ? \WPLM\Services\AddonService::label_for( $sub ) : __( 'License Renewal', 'wp-license-manager' ) );
 			$fee->set_total( $sub->recurring_total );
 			$order->add_item( $fee );
 		}
@@ -365,6 +367,43 @@ class SelfServiceRenewal {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * One fee line per add-on an add-ons-only subscription bills ("FBR — Add-ons for licence ending
+	 * ABCD"), at what it bills. Nothing is added (false) when its items do not add up to its recurring
+	 * total: the caller then bills the total on one line.
+	 *
+	 * @param \WC_Order     $order The renewal order.
+	 * @param Subscription $sub   The add-ons-only subscription.
+	 * @return bool Whether the lines were added.
+	 */
+	private function add_addons_lines( \WC_Order $order, Subscription $sub ): bool {
+		$items = $this->sub_repo->get_items( $sub->id );
+		$sum   = 0.0;
+		foreach ( $items as $sub_item ) {
+			$sum += $sub_item->line_total;
+		}
+		if ( array() === $items || abs( round( $sum - (float) $sub->recurring_total, 4 ) ) >= 0.00005 ) {
+			return false;
+		}
+		$for = \WPLM\Services\AddonService::label_for( $sub );
+		foreach ( $items as $sub_item ) {
+			$label = (string) ( $sub_item->meta['label'] ?? '' );
+			if ( '' === $label ) {
+				$label = __( 'Add-on', 'wp-license-manager' );
+			}
+			if ( $sub_item->quantity > 1 ) {
+				/* translators: 1: quantity, 2: add-on name */
+				$label = sprintf( __( '%1$d × %2$s', 'wp-license-manager' ), $sub_item->quantity, $label );
+			}
+			$fee = new \WC_Order_Item_Fee();
+			/* translators: 1: add-on, 2: "Add-ons for licence ending ABCD" */
+			$fee->set_name( '' !== $for ? sprintf( __( '%1$s — %2$s', 'wp-license-manager' ), $label, $for ) : $label );
+			$fee->set_total( $sub_item->line_total );
+			$order->add_item( $fee );
+		}
+		return true;
 	}
 
 	/**

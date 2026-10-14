@@ -2690,4 +2690,39 @@ class PackageExtrasTest extends TestCase {
 		);
 		$this->assertNotContains( 'Added to', array_column( $data, 'key' ) );
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Review fixes (2026-10-15): the add-ons renewal invoice names the add-ons
+	// ---------------------------------------------------------------------------------------------
+
+	public function test_the_addons_renewal_invoice_lists_the_addons_never_the_lifetime_product(): void {
+		$this->add_seat_plan_offer();
+		$customer = $this->create_customer();
+		$bought   = $this->buy_through_cart(
+			$this->product,
+			array(
+				'wplm_package_id' => (string) $this->package( 'Lifetime' )->id,
+				'wplm_extras'     => array(
+					'module:fbr' => '1',
+					'seat-plan'  => '2',
+				),
+			),
+			$customer
+		);
+		$addons  = (int) $bought['item']->get_meta( '_wplm_addons_subscription_id' );
+		$sub     = $this->make( SubscriptionRepository::class )->find_by_id( $addons );
+		$tail    = strtoupper( substr( $this->make( LicenseRepository::class )->find_by_id( $bought['license_id'] )->license_key, -4 ) );
+
+		$invoice = $this->make( SelfServiceRenewal::class )->create_renewal_order_object( $addons );
+
+		$this->assertSame( array(), $invoice->get_items( 'line_item' ), 'Not the lifetime product.' );
+		$names = array_values( array_map( static fn( $fee ) => $fee->get_name(), $invoice->get_items( 'fee' ) ) );
+		$this->assertSame( array( 'FBR — Add-ons for licence ending ' . $tail, '2 × Extra seat (billed) — Add-ons for licence ending ' . $tail ), $names );
+		$this->assertSame( 1600.0, (float) $invoice->get_total() );
+		$this->assertSame( $sub->recurring_total, (float) $invoice->get_total() );
+
+		$before = $this->line( $bought['license_id'], 'fbr' )->paid_through;
+		$invoice->update_status( 'completed' );
+		$this->assertSame( EntitlementService::add_period( $before, 1, 'month' ), $this->line( $bought['license_id'], 'fbr' )->paid_through, 'Paying it still renews them.' );
+	}
 }
