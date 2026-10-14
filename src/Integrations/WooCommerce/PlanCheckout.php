@@ -12,6 +12,7 @@ defined( 'ABSPATH' ) || exit;
 use WPLM\Licensing\ProfileRegistry;
 use WPLM\Models\License;
 use WPLM\Models\Package;
+use WPLM\Models\Plan;
 use WPLM\Services\AddonService;
 use WPLM\Services\EntitlementService;
 use WPLM\Services\GeneratorService;
@@ -33,6 +34,13 @@ use WPLM\Services\Subscriptions\SubscriptionService;
  * A plan whose kind is `addon` sells add-ons for a licence the customer already has: the product
  * page asks which of their licences to add it to, nothing is sold to a logged-out visitor, and
  * fulfilment adds lines to that licence instead of issuing a key ({@see AddonService}).
+ *
+ * A plan whose kind is `dynamic` has no stored packages: the customer builds one on the product page
+ * (a form a product add-on prints on `wplm_dynamic_package_form`), and the package is made by the
+ * `wplm_dynamic_package` filter from what they chose. The server rebuilds it from the choice on add to
+ * cart, on every cart total, at checkout and when the order line is saved; a price the browser sends
+ * is never used. The order line keeps a snapshot of the package, and fulfilment issues from that
+ * snapshot, so a later price change never alters a sale ({@see self::dynamic_package()}).
  *
  * Products stay 100% native WooCommerce — no custom product types — so none of
  * the WC variable-product internals are involved.
@@ -114,6 +122,11 @@ class PlanCheckout {
 		add_action( 'woocommerce_single_product_summary', array( $this, 'render_addon_notice' ), 31 );
 		add_action( 'woocommerce_check_cart_items', array( $this, 'check_cart_addons' ) );
 
+		// Packages built at purchase: one per cart line (one licence), re-checked before checkout.
+		add_filter( 'woocommerce_is_sold_individually', array( $this, 'dynamic_sold_individually' ), 20, 2 );
+		add_filter( 'woocommerce_add_to_cart_quantity', array( $this, 'dynamic_quantity' ), 20, 2 );
+		add_action( 'woocommerce_check_cart_items', array( $this, 'check_cart_dynamic' ) );
+
 		// Persist the package on the order line item.
 		add_action( 'woocommerce_checkout_create_order_line_item', array( $this, 'save_order_line_item' ), 10, 4 );
 
@@ -140,6 +153,17 @@ class PlanCheckout {
 
 		$plan = $this->plan_for_product( $product );
 		if ( null === $plan ) {
+			return;
+		}
+		if ( $plan->is_dynamic() ) {
+			/**
+			 * Print the form a customer builds their package with. Its fields must post as
+			 * `wplm_dynamic[...]`; that array is passed to `wplm_dynamic_package` as the spec.
+			 *
+			 * @param Plan        $plan    The dynamic plan.
+			 * @param \WC_Product $product The product being viewed.
+			 */
+			do_action( 'wplm_dynamic_package_form', $plan, $product );
 			return;
 		}
 
@@ -384,6 +408,17 @@ class PlanCheckout {
 		if ( ! $product instanceof \WC_Product ) {
 			return $html;
 		}
+		$plan = $this->plan_for_product( $product );
+		if ( null !== $plan && $plan->is_dynamic() ) {
+			/**
+			 * The price shown for a product whose package is built at purchase (e.g. "From …").
+			 *
+			 * @param string      $html    WooCommerce's price HTML (the product's own price).
+			 * @param Plan        $plan    The dynamic plan.
+			 * @param \WC_Product $product The product.
+			 */
+			return (string) apply_filters( 'wplm_dynamic_price_html', $html, $plan, $product );
+		}
 		$packages = $this->active_packages( $product );
 		if ( empty( $packages ) ) {
 			return $html;
@@ -404,6 +439,9 @@ class PlanCheckout {
 	 * @return bool
 	 */
 	public function plan_is_purchasable( $purchasable, $product ) {
+		if ( $product instanceof \WC_Product && $this->is_dynamic_product( $product ) ) {
+			return true; // The package (and its price) is built when it is added to the cart.
+		}
 		if ( $product instanceof \WC_Product && ! empty( $this->active_packages( $product ) ) ) {
 			$plan = $this->plan_for_product( $product );
 			if ( null !== $plan && $plan->is_addon() ) {
@@ -474,6 +512,14 @@ class PlanCheckout {
 		}
 		$plan = $this->plan_for_product( $product );
 		if ( null === $plan ) {
+			return $passed;
+		}
+		if ( $plan->is_dynamic() ) {
+			$built = $this->dynamic_package( self::posted_dynamic_spec(), $plan, $product );
+			if ( is_wp_error( $built ) ) {
+				wc_add_notice( $built->get_error_message(), 'error' );
+				return false;
+			}
 			return $passed;
 		}
 
@@ -551,6 +597,17 @@ class PlanCheckout {
 	 * @return array
 	 */
 	public function add_cart_item_data( $data, $product_id ) {
+		$product = wc_get_product( $product_id );
+		if ( $product instanceof \WC_Product && $this->is_dynamic_product( $product ) ) {
+			// The customer's choice only: the package and its price are rebuilt from it on every pass.
+			// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
+			$posted                    = isset( $_POST['wplm_dynamic'] );
+			$data['wplm_dynamic_spec'] = $posted || ! is_array( $data['wplm_dynamic_spec'] ?? null )
+				? self::posted_dynamic_spec()
+				: map_deep( $data['wplm_dynamic_spec'], 'sanitize_text_field' );
+			$data['wplm_unique']       = 'dynamic-' . microtime();
+			return $data;
+		}
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
 		$package_id = isset( $_POST['wplm_package_id'] ) ? absint( wp_unslash( $_POST['wplm_package_id'] ) ) : 0;
 		if ( $package_id ) {
@@ -580,6 +637,9 @@ class PlanCheckout {
 		if ( isset( $session['wplm_addon_license_id'] ) ) {
 			$item['wplm_addon_license_id'] = $session['wplm_addon_license_id'];
 		}
+		if ( isset( $session['wplm_dynamic_spec'] ) && is_array( $session['wplm_dynamic_spec'] ) ) {
+			$item['wplm_dynamic_spec'] = $session['wplm_dynamic_spec'];
+		}
 		return $item;
 	}
 
@@ -597,7 +657,18 @@ class PlanCheckout {
 			return;
 		}
 
-		foreach ( $cart->get_cart() as $cart_item ) {
+		foreach ( $cart->get_cart() as $cart_key => $cart_item ) {
+			if ( isset( $cart_item['wplm_dynamic_spec'] ) && ! empty( $cart_item['data'] ) ) {
+				// One configuration is one licence: never more than one of it on a line.
+				if ( 1 !== (int) ( $cart_item['quantity'] ?? 1 ) ) {
+					$cart->set_quantity( $cart_key, 1, false );
+				}
+				$built = $this->dynamic_package_for_cart_item( $cart_item );
+				if ( $built instanceof Package ) {
+					$cart_item['data']->set_price( $built->price );
+				}
+				continue; // An invalid one is refused by check_cart_dynamic() before checkout.
+			}
 			if ( empty( $cart_item['wplm_package_id'] ) || empty( $cart_item['data'] ) ) {
 				continue;
 			}
@@ -617,6 +688,16 @@ class PlanCheckout {
 	 * @return array
 	 */
 	public function display_cart_item_data( $items, $cart_item ) {
+		if ( isset( $cart_item['wplm_dynamic_spec'] ) ) {
+			$built = $this->dynamic_package_for_cart_item( $cart_item );
+			if ( $built instanceof Package ) {
+				$items[] = array(
+					'key'   => __( 'License Type', 'wp-license-manager' ),
+					'value' => wp_strip_all_tags( $built->name . ' — ' . $this->price_label( $built ) ),
+				);
+			}
+			return $items;
+		}
 		if ( ! empty( $cart_item['wplm_package_id'] ) ) {
 			$pkg = $this->lookup_package( (int) $cart_item['wplm_package_id'] );
 			if ( $pkg ) {
@@ -647,6 +728,10 @@ class PlanCheckout {
 	 * @return void
 	 */
 	public function save_order_line_item( $item, $cart_item_key, $values, $order ): void {
+		if ( isset( $values['wplm_dynamic_spec'] ) ) {
+			$this->save_dynamic_line_item( $item, $values );
+			return;
+		}
 		if ( ! empty( $values['wplm_package_id'] ) ) {
 			$item->add_meta_data( '_wplm_package_id', (int) $values['wplm_package_id'], true );
 			$pkg = $this->lookup_package( (int) $values['wplm_package_id'] );
@@ -689,6 +774,35 @@ class PlanCheckout {
 
 		/** @var \WC_Order_Item_Product $item */
 		foreach ( $order->get_items() as $item ) {
+			$snapshot = (string) $item->get_meta( '_wplm_dynamic_package' );
+			if ( '' !== $snapshot ) {
+				// Already issued on an earlier attempt: never issue a second licence.
+				if ( '' !== (string) $item->get_meta( '_wplm_license_ids' ) ) {
+					continue;
+				}
+				try {
+					$pkg     = $this->package_from_snapshot( $snapshot, (int) $item->get_meta( '_wplm_plan_id' ) );
+					$license = $this->fulfill_item( $order, $item, $pkg, $this->stored_dynamic_spec( $item ) );
+					if ( $license ) {
+						$issued[] = $license;
+						$item->update_meta_data( '_wplm_license_ids', wp_json_encode( array( $license->id ) ) );
+						$item->save_meta_data();
+					}
+				} catch ( \Throwable $e ) {
+					++$failed;
+					\WPLM\Support\Logger::error( 'PlanCheckout: fulfilment failed for a package built at purchase (order item ' . $item->get_id() . ') — ' . $e->getMessage() );
+					$order->add_order_note(
+						sprintf(
+							/* translators: 1: product name, 2: error message */
+							__( 'WPLM: a licence could not be issued for "%1$s" — %2$s. Fix the cause, then set the order to Completed again to retry.', 'wp-license-manager' ),
+							$item->get_name(),
+							$e->getMessage()
+						)
+					);
+				}
+				continue;
+			}
+
 			$package_id = (int) $item->get_meta( '_wplm_package_id' );
 			if ( ! $package_id ) {
 				continue;
@@ -798,9 +912,10 @@ class PlanCheckout {
 	 * @param \WC_Order              $order Order.
 	 * @param \WC_Order_Item_Product $item  Line item.
 	 * @param Package                $pkg   Chosen package.
+	 * @param array|null             $dynamic_spec What the customer chose, for a package built at purchase.
 	 * @return \WPLM\Models\License|null
 	 */
-	private function fulfill_item( \WC_Order $order, $item, Package $pkg ) {
+	private function fulfill_item( \WC_Order $order, $item, Package $pkg, ?array $dynamic_spec = null ) {
 		$generator_id = $pkg->generator_id ?: (int) get_option( 'wplm_default_generator_id', 0 );
 		if ( $generator_id <= 0 ) {
 			throw new \RuntimeException( 'no key generator is configured (WPLM → Generators)' );
@@ -870,11 +985,14 @@ class PlanCheckout {
 						array(
 							'product_id'   => $item->get_product_id(),
 							'variation_id' => $item->get_variation_id() ?: null,
-							'quantity'     => (int) $item->get_quantity(),
+							'quantity'     => null !== $dynamic_spec ? 1 : (int) $item->get_quantity(),
 							'line_total'   => $pkg->price,
-							'meta'         => array(
-								'package_id'    => $pkg->id,
-								'order_item_id' => $item->get_id(),
+							'meta'         => array_merge(
+								array(
+									'package_id'    => $pkg->id,
+									'order_item_id' => $item->get_id(),
+								),
+								null !== $dynamic_spec ? array( 'dynamic_spec' => $dynamic_spec ) : array()
 							),
 						),
 					),
@@ -926,6 +1044,260 @@ class PlanCheckout {
 		}
 
 		return $license;
+	}
+
+	// -------------------------------------------------------------------------
+	// Packages built at purchase (dynamic plans)
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Build and check the package for a customer's choice on a dynamic plan.
+	 *
+	 * The package comes from the filter `wplm_dynamic_package( null|Package|\WP_Error $package,
+	 * array $spec, Plan $plan, \WC_Product $product )`: return a Package (its `plan_id` the plan's),
+	 * or a WP_Error whose message the customer sees. WPLM then holds it to what a dynamic package may
+	 * be, whatever the filter returned:
+	 *
+	 * - billed `recurring` (every 1 month or every 1 year) or `lifetime`;
+	 * - a finite price of 0 or more, rounded to the shop's decimals;
+	 * - an entitlement template valid for the plan's licence profile, with at least one line;
+	 * - no sign-up fee, trial, length or "valid for" days; id 0; status active;
+	 * - computers per licence key: the filter's if it is 1 or more, else 1.
+	 *
+	 * @param array       $spec    What the customer chose (sanitised `wplm_dynamic[...]`).
+	 * @param Plan        $plan    The dynamic plan.
+	 * @param \WC_Product $product The product it is bought through.
+	 * @return Package|\WP_Error
+	 */
+	public function dynamic_package( array $spec, Plan $plan, \WC_Product $product ) {
+		$unavailable = new \WP_Error( 'wplm_dynamic_unavailable', __( 'This plan cannot be bought right now. Please contact us.', 'wp-license-manager' ) );
+		if ( ! $plan->is_dynamic() || null === $plan->profile ) {
+			return $unavailable;
+		}
+		$profile = $this->profiles->get( $plan->profile );
+		if ( null === $profile ) {
+			return $unavailable;
+		}
+
+		/**
+		 * Build the package a customer chose on a dynamic plan (see PlanCheckout::dynamic_package()).
+		 *
+		 * @param null|Package|\WP_Error $package Null until a plugin builds it.
+		 * @param array                  $spec    What the customer chose.
+		 * @param Plan                   $plan    The dynamic plan.
+		 * @param \WC_Product            $product The product.
+		 */
+		$built = apply_filters( 'wplm_dynamic_package', null, $spec, $plan, $product );
+		if ( is_wp_error( $built ) ) {
+			return $built;
+		}
+		if ( ! $built instanceof Package || (int) $built->plan_id !== (int) $plan->id ) {
+			\WPLM\Support\Logger::error( 'PlanCheckout: wplm_dynamic_package returned no package for plan ' . $plan->id . '.' );
+			return $unavailable;
+		}
+
+		$pkg = clone $built;
+		if ( Package::TYPE_RECURRING === $pkg->billing_type ) {
+			if ( ! in_array( $pkg->billing_period, array( 'month', 'year' ), true ) || 1 !== (int) $pkg->billing_interval ) {
+				\WPLM\Support\Logger::error( 'PlanCheckout: a dynamic package must bill every 1 month or every 1 year (plan ' . $plan->id . ').' );
+				return $unavailable;
+			}
+		} elseif ( Package::TYPE_LIFETIME !== $pkg->billing_type ) {
+			\WPLM\Support\Logger::error( 'PlanCheckout: a dynamic package must be recurring or lifetime (plan ' . $plan->id . ').' );
+			return $unavailable;
+		}
+		if ( ! is_finite( $pkg->price ) || $pkg->price < 0 ) {
+			\WPLM\Support\Logger::error( 'PlanCheckout: a dynamic package needs a price of 0 or more (plan ' . $plan->id . ').' );
+			return $unavailable;
+		}
+		$decimals   = function_exists( 'wc_get_price_decimals' ) ? (int) wc_get_price_decimals() : 2;
+		$pkg->price = round( $pkg->price, max( 0, $decimals ) );
+
+		try {
+			$pkg->entitlements = $this->entitlements->normalize_template( $profile, (array) $pkg->entitlements );
+		} catch ( \InvalidArgumentException $e ) {
+			\WPLM\Support\Logger::error( 'PlanCheckout: a dynamic package has an invalid template (plan ' . $plan->id . ') — ' . $e->getMessage() );
+			return $unavailable;
+		}
+		if ( array() === $pkg->entitlements ) {
+			return $unavailable;
+		}
+
+		$pkg->id               = 0;
+		$pkg->plan_id          = (int) $plan->id;
+		$pkg->name             = '' !== trim( $pkg->name ) ? sanitize_text_field( $pkg->name ) : $plan->name;
+		$pkg->billing_interval = 1;
+		if ( ! $pkg->is_recurring() ) {
+			$pkg->billing_period = 'month';
+		}
+		$pkg->signup_fee      = 0.0;
+		$pkg->trial_days      = 0;
+		$pkg->length_cycles   = 0;
+		$pkg->valid_for_days  = null;
+		$pkg->max_activations = null !== $pkg->max_activations && $pkg->max_activations >= 1 ? (int) $pkg->max_activations : 1;
+		$pkg->generator_id    = null !== $pkg->generator_id && $pkg->generator_id > 0 ? (int) $pkg->generator_id : null;
+		$pkg->benefits        = array_values( array_filter( array_map( 'strval', (array) $pkg->benefits ) ) );
+		$pkg->status          = 1;
+		return $pkg;
+	}
+
+	/**
+	 * `woocommerce_is_sold_individually`: a product whose package is built at purchase is bought one
+	 * per line (each line is one licence), so WooCommerce shows no quantity box for it.
+	 *
+	 * @param bool        $individually Current value.
+	 * @param \WC_Product $product      Product.
+	 * @return bool
+	 */
+	public function dynamic_sold_individually( $individually, $product = null ) {
+		return $product instanceof \WC_Product && $this->is_dynamic_product( $product ) ? true : $individually;
+	}
+
+	/**
+	 * `woocommerce_add_to_cart_quantity`: one of a built package per cart line.
+	 *
+	 * @param int $quantity   Requested quantity.
+	 * @param int $product_id Product id.
+	 * @return int
+	 */
+	public function dynamic_quantity( $quantity, $product_id = 0 ) {
+		$product = $product_id ? wc_get_product( $product_id ) : null;
+		return $product instanceof \WC_Product && $this->is_dynamic_product( $product ) ? 1 : $quantity;
+	}
+
+	/**
+	 * `woocommerce_check_cart_items`: rebuild every built package in the cart. One that can no longer
+	 * be built (the price list changed, a rule now refuses it) stops the checkout with the reason.
+	 *
+	 * @return void
+	 */
+	public function check_cart_dynamic(): void {
+		if ( ! function_exists( 'WC' ) || null === WC()->cart ) {
+			return;
+		}
+		foreach ( WC()->cart->get_cart() as $cart_item ) {
+			if ( ! isset( $cart_item['wplm_dynamic_spec'] ) ) {
+				continue;
+			}
+			$built = $this->dynamic_package_for_cart_item( $cart_item );
+			if ( is_wp_error( $built ) ) {
+				$name = isset( $cart_item['data'] ) && $cart_item['data'] instanceof \WC_Product ? $cart_item['data']->get_name() : __( 'Your plan', 'wp-license-manager' );
+				/* translators: 1: product name, 2: reason */
+				wc_add_notice( sprintf( __( '%1$s: %2$s', 'wp-license-manager' ), $name, $built->get_error_message() ), 'error' );
+			}
+		}
+	}
+
+	/**
+	 * The package for a cart line holding a customer's choice, rebuilt now.
+	 *
+	 * @param array $cart_item Cart item.
+	 * @return Package|\WP_Error
+	 */
+	private function dynamic_package_for_cart_item( array $cart_item ) {
+		$product = $cart_item['data'] ?? null;
+		if ( ! $product instanceof \WC_Product ) {
+			$product = wc_get_product( (int) ( $cart_item['variation_id'] ?? 0 ) ?: (int) ( $cart_item['product_id'] ?? 0 ) );
+		}
+		$plan = $product instanceof \WC_Product ? $this->plan_for_product( $product ) : null;
+		if ( null === $plan || ! $plan->is_dynamic() ) {
+			return new \WP_Error( 'wplm_dynamic_unavailable', __( 'This plan cannot be bought right now. Please contact us.', 'wp-license-manager' ) );
+		}
+		$spec = is_array( $cart_item['wplm_dynamic_spec'] ?? null ) ? $cart_item['wplm_dynamic_spec'] : array();
+		return $this->dynamic_package( $spec, $plan, $product );
+	}
+
+	/**
+	 * Persist a built package on its order line: the plan, the customer's choice, and a snapshot of
+	 * the package (which fulfilment issues from). Never a package id: there is no stored package.
+	 *
+	 * @param \WC_Order_Item_Product $item   Order line item.
+	 * @param array                  $values Cart item values.
+	 * @return void
+	 * @throws \Exception When the package can no longer be built, which stops the checkout.
+	 */
+	private function save_dynamic_line_item( $item, array $values ): void {
+		$built = $this->dynamic_package_for_cart_item( $values );
+		if ( is_wp_error( $built ) ) {
+			throw new \Exception( esc_html( $built->get_error_message() ) );
+		}
+		$spec = is_array( $values['wplm_dynamic_spec'] ?? null ) ? $values['wplm_dynamic_spec'] : array();
+
+		$snapshot = $built->to_array();
+		/**
+		 * Extra keys for the snapshot of a built package kept on the order line (e.g. which version
+		 * of a price list priced it). The package's own fields always win over a returned key.
+		 *
+		 * @param array   $snapshot The package as an array.
+		 * @param Package $package  The package.
+		 * @param array   $spec     What the customer chose.
+		 */
+		$extra    = apply_filters( 'wplm_dynamic_package_snapshot', $snapshot, $built, $spec );
+		$snapshot = array_merge( is_array( $extra ) ? $extra : array(), $snapshot );
+
+		$item->set_quantity( 1 );
+		$item->add_meta_data( '_wplm_plan_id', (int) $built->plan_id, true );
+		$item->add_meta_data( '_wplm_dynamic_spec', wp_json_encode( $spec ), true );
+		$item->add_meta_data( '_wplm_dynamic_package', wp_json_encode( $snapshot ), true );
+		$item->add_meta_data( __( 'License Type', 'wp-license-manager' ), $built->name, true );
+	}
+
+	/**
+	 * The package an order line was sold, from its snapshot.
+	 *
+	 * @param string $json    The `_wplm_dynamic_package` meta.
+	 * @param int    $plan_id The line's `_wplm_plan_id`.
+	 * @return Package
+	 * @throws \RuntimeException When the snapshot is unreadable or belongs to another plan.
+	 */
+	private function package_from_snapshot( string $json, int $plan_id ): Package {
+		$row = json_decode( $json, true );
+		if ( ! is_array( $row ) ) {
+			throw new \RuntimeException( 'the package bought on this line is unreadable' );
+		}
+		$pkg = Package::from_row( $row );
+		if ( $plan_id <= 0 || $pkg->plan_id !== $plan_id ) {
+			throw new \RuntimeException( 'the package bought on this line does not belong to its plan' );
+		}
+		if ( ! in_array( $pkg->billing_type, array( Package::TYPE_RECURRING, Package::TYPE_LIFETIME ), true ) ) {
+			throw new \RuntimeException( 'the package bought on this line has an unknown billing type' );
+		}
+		$pkg->id = 0;
+		return $pkg;
+	}
+
+	/**
+	 * What the customer chose on an order line (empty when it was not stored).
+	 *
+	 * @param \WC_Order_Item_Product $item Order line item.
+	 * @return array
+	 */
+	private function stored_dynamic_spec( $item ): array {
+		$spec = json_decode( (string) $item->get_meta( '_wplm_dynamic_spec' ), true );
+		return is_array( $spec ) ? $spec : array();
+	}
+
+	/**
+	 * The posted `wplm_dynamic[...]` choice, sanitised (text fields only).
+	 *
+	 * @return array
+	 */
+	private static function posted_dynamic_spec(): array {
+		// phpcs:disable WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- WC add-to-cart form, validated by WC; sanitised below.
+		$raw = isset( $_POST['wplm_dynamic'] ) ? wp_unslash( $_POST['wplm_dynamic'] ) : array();
+		// phpcs:enable WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+		return is_array( $raw ) ? map_deep( $raw, 'sanitize_text_field' ) : array();
+	}
+
+	/**
+	 * Whether a product sells a plan whose package is built at purchase.
+	 *
+	 * @param \WC_Product $product Product.
+	 * @return bool
+	 */
+	private function is_dynamic_product( \WC_Product $product ): bool {
+		$plan = $this->plan_for_product( $product );
+		return null !== $plan && $plan->is_dynamic();
 	}
 
 	// -------------------------------------------------------------------------

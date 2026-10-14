@@ -91,6 +91,9 @@ class PlanListTable extends \WP_List_Table {
 	 * @return string
 	 */
 	public function column_packages( $item ): string {
+		if ( $item->is_dynamic() ) {
+			return '<em>' . esc_html__( 'Built at purchase', 'wp-license-manager' ) . '</em>';
+		}
 		$names = array_map( static fn( $p ) => $p->name, $item->packages );
 		$names = array_filter( $names );
 		return $names ? esc_html( implode( ', ', $names ) ) : '<em>' . esc_html__( 'No license types yet', 'wp-license-manager' ) . '</em>';
@@ -112,7 +115,12 @@ class PlanListTable extends \WP_List_Table {
 			'delete' => '<a href="' . esc_url( $delete_url ) . '" style="color:#d63638;" onclick="return confirm(\'' . esc_js( __( 'Delete this plan and all its license types?', 'wp-license-manager' ) ) . '\');">' . esc_html__( 'Delete', 'wp-license-manager' ) . '</a>',
 		);
 
-		$kind = $item->is_addon() ? ' <span class="description">(' . esc_html__( 'add-ons', 'wp-license-manager' ) . ')</span>' : '';
+		$kind = '';
+		if ( $item->is_addon() ) {
+			$kind = ' <span class="description">(' . esc_html__( 'add-ons', 'wp-license-manager' ) . ')</span>';
+		} elseif ( $item->is_dynamic() ) {
+			$kind = ' <span class="description">(' . esc_html__( 'built at purchase', 'wp-license-manager' ) . ')</span>';
+		}
 		return '<strong><a href="' . esc_url( $edit_url ) . '">' . esc_html( $item->name ) . '</a></strong>' . $kind . $this->row_actions( $actions );
 	}
 
@@ -190,6 +198,7 @@ class PlanListTable extends \WP_List_Table {
 		$generators = $this->generator_repo->get_all();
 		$profile    = $plan ? $this->profiles->get( $plan->profile ) : null;
 		$addon      = null !== $plan && $plan->is_addon();
+		$kind       = null !== $plan ? $plan->kind : \WPLM\Models\Plan::KIND_STANDALONE;
 		?>
 		<div class="wrap">
 			<h1><?php echo esc_html( $id > 0 ? __( 'Edit Plan', 'wp-license-manager' ) : __( 'Add Plan', 'wp-license-manager' ) ); ?></h1>
@@ -225,14 +234,20 @@ class PlanListTable extends \WP_List_Table {
 						</td>
 					</tr>
 					<tr>
-						<th scope="row"><?php esc_html_e( 'Add-ons', 'wp-license-manager' ); ?></th>
+						<th scope="row"><?php esc_html_e( 'What the plan sells', 'wp-license-manager' ); ?></th>
 						<td>
-							<label><input type="checkbox" name="plan_addon" id="wplm_plan_addon" value="1" <?php checked( $addon ); ?>> <?php esc_html_e( 'This plan sells add-ons to an existing licence', 'wp-license-manager' ); ?></label>
-							<p class="description"><?php esc_html_e( 'The customer picks one of their licences on the product page and the add-on is added to it: no new key. A recurring add-on is paid in full now, ends with the plan\'s paid period and is then billed with the plan; a lifetime add-on is for life; a one-time (fixed term) add-on lasts its "Valid for (days)". Monthly licences are offered monthly add-ons, yearly licences yearly ones, and lifetime licences lifetime and one-time ones. Needs a licence type with modules and limits. Save the plan to see the modules only add-ons may grant.', 'wp-license-manager' ); ?></p>
+							<fieldset id="wplm_plan_kind">
+								<label style="display:block;margin-bottom:6px;"><input type="radio" name="plan_kind" value="standalone" <?php checked( \WPLM\Models\Plan::KIND_STANDALONE, $kind ); ?>> <?php esc_html_e( 'This plan sells a licence', 'wp-license-manager' ); ?></label>
+								<label style="display:block;margin-bottom:6px;"><input type="radio" name="plan_kind" id="wplm_plan_addon" value="addon" <?php checked( $addon ); ?>> <?php esc_html_e( 'This plan sells add-ons to an existing licence', 'wp-license-manager' ); ?></label>
+								<p class="description" style="margin:0 0 8px 24px;"><?php esc_html_e( 'The customer picks one of their licences on the product page and the add-on is added to it: no new key. A recurring add-on is paid in full now, ends with the plan\'s paid period and is then billed with the plan; a lifetime add-on is for life; a one-time (fixed term) add-on lasts its "Valid for (days)". Monthly licences are offered monthly add-ons, yearly licences yearly ones, and lifetime licences lifetime and one-time ones. Needs a licence type with modules and limits. Save the plan to see the modules only add-ons may grant.', 'wp-license-manager' ); ?></p>
+								<label style="display:block;margin-bottom:6px;"><input type="radio" name="plan_kind" id="wplm_plan_dynamic" value="dynamic" <?php checked( \WPLM\Models\Plan::KIND_DYNAMIC, $kind ); ?>> <?php esc_html_e( 'The customer builds the package at purchase', 'wp-license-manager' ); ?></label>
+								<p class="description" style="margin:0 0 0 24px;"><?php esc_html_e( 'No licence types are entered here: a plugin for the licence type supplies the product-page form and prices the package (filter wplm_dynamic_package); WP License Manager checks what it returns, and the server re-prices it when it is added to the cart and again at checkout. Monthly and yearly packages renew at the price paid; lifetime ones never end. One computer per licence key. Needs a licence type with modules and limits.', 'wp-license-manager' ); ?></p>
+							</fieldset>
 						</td>
 					</tr>
 				</table>
 
+				<div id="wplm-package-section"<?php echo \WPLM\Models\Plan::KIND_DYNAMIC === $kind ? ' hidden' : ''; ?>>
 				<h2><?php esc_html_e( 'License Types', 'wp-license-manager' ); ?></h2>
 				<p class="description"><?php esc_html_e( 'Each license type is a purchasable tier with its own price and rules. Only the fields that apply to the chosen type are shown: Recurring bills every period; One-time (fixed term) is paid once and lasts "Valid for (days)"; Lifetime is paid once and never ends.', 'wp-license-manager' ); ?></p>
 
@@ -251,6 +266,7 @@ class PlanListTable extends \WP_List_Table {
 				</div>
 
 				<p><button type="button" class="button" id="wplm-add-package"><?php esc_html_e( '+ Add license type', 'wp-license-manager' ); ?></button></p>
+				</div>
 
 				<?php submit_button( __( 'Save Plan', 'wp-license-manager' ) ); ?>
 				<a href="<?php echo esc_url( admin_url( 'admin.php?page=wplm-plans' ) ); ?>" class="button button-secondary"><?php esc_html_e( 'Cancel', 'wp-license-manager' ); ?></a>
@@ -280,6 +296,8 @@ class PlanListTable extends \WP_List_Table {
 			// A hidden field is also disabled, so it is not submitted (the server normalises it either way).
 			var select = document.getElementById('wplm_plan_profile');
 			var addonBox = document.getElementById('wplm_plan_addon');
+			var kindSet  = document.getElementById('wplm_plan_kind');
+			var section  = document.getElementById('wplm-package-section');
 			function toggle(el, on){
 				el.hidden = !on;
 				el.querySelectorAll('input, select, textarea').forEach(function(i){ i.disabled = !on; });
@@ -316,9 +334,16 @@ class PlanListTable extends \WP_List_Table {
 				}
 			});
 			select.addEventListener('change', applyAll);
-			if ( addonBox ) { addonBox.addEventListener('change', applyAll); }
+			// A plan built at purchase has no licence types: the rows are hidden (the save ignores them).
+			function applyKind(){
+				var dyn = document.getElementById('wplm_plan_dynamic');
+				if ( section ) { section.hidden = !!(dyn && dyn.checked); }
+				applyAll();
+			}
+			if ( kindSet ) { kindSet.addEventListener('change', applyKind); }
 			document.getElementById('wplm-add-package').addEventListener('click', applyAll);
 			applyAll();
+			applyKind();
 		})();
 		</script>
 		<?php
