@@ -120,6 +120,16 @@ class SubscriptionRepository {
 	}
 
 	/**
+	 * Whether the 1.3.0 database upgrade (the `addons_license_id` column) has run. Between uploading the
+	 * plugin and the next admin page load it has not, and the add-ons lookups must not query it.
+	 *
+	 * @return bool
+	 */
+	public static function has_addons_column(): bool {
+		return version_compare( (string) get_option( 'wplm_db_version', '0' ), '1.3.0', '>=' );
+	}
+
+	/**
 	 * The open add-ons-only subscription of a lifetime licence (the newest that is active, in trial,
 	 * pending, on hold or pending cancellation), or null.
 	 *
@@ -127,6 +137,9 @@ class SubscriptionRepository {
 	 * @return Subscription|null
 	 */
 	public function find_addons_for_license( int $license_id ): ?Subscription {
+		if ( ! self::has_addons_column() ) {
+			return null;
+		}
 		global $wpdb;
 		$table = $wpdb->prefix . 'wplm_subscriptions';
 		$row   = $wpdb->get_row(
@@ -144,6 +157,9 @@ class SubscriptionRepository {
 	 * @return Subscription[]
 	 */
 	public function get_addons_for_license( int $license_id ): array {
+		if ( ! self::has_addons_column() ) {
+			return array();
+		}
 		global $wpdb;
 		$table = $wpdb->prefix . 'wplm_subscriptions';
 		$rows  = $wpdb->get_results(

@@ -2123,4 +2123,65 @@ class PackageExtrasTest extends TestCase {
 		wc_get_template( 'myaccount/wplm-subscriptions.php', array( 'subscriptions' => array( $sub ) ), '', WPLM_PLUGIN_DIR . 'templates/' );
 		$this->assertStringContainsString( 'Add-ons for licence ending ' . $tail, (string) ob_get_clean() );
 	}
+
+	public function test_refunding_the_order_that_opened_a_shared_addons_subscription_keeps_the_later_addons_billed(): void {
+		add_filter(
+			'wplm_package_extras',
+			static function ( $offers, $ctx ) {
+				if ( 'lifetime' === $ctx['billing'] ) {
+					$offers[] = array(
+						'id'         => 'seat-plan',
+						'label'      => 'Extra seat (billed)',
+						'unit_price' => null,
+						'recurring'  => array(
+							'month' => 300,
+							'year'  => 3000,
+						),
+						'max_qty'    => 5,
+						'lines'      => array( array( 'kind' => 'limit', 'code' => 'seats', 'qty' => 1 ) ),
+					);
+				}
+				return $offers;
+			},
+			20,
+			2
+		);
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$state   = $this->licence_state( $base['license_id'] );
+		$first   = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$second  = $this->add_to_licence( $product, $base, array( 'seat-plan' => '2' ) );
+		$addons  = $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] );
+		$this->assertSame( 1600.0, $this->total( $addons->id ) );
+		$this->assertSame( $addons->id, (int) $first['item']->get_meta( '_wplm_addons_subscription_id' ), 'The first order opened it.' );
+
+		$first['order']->update_status( 'refunded' );
+
+		$this->assertSame( 'active', $this->subscription_row( $addons->id )['status'], 'The second order\'s seats keep renewing.' );
+		$this->assertSame( 600.0, $this->total( $addons->id ) );
+		$this->assertNull( $this->line( $base['license_id'], 'fbr', 'addon' ) );
+		$this->assertNotNull( $this->line( $base['license_id'], 'seats', 'addon' ) );
+		$this->assertSame( $state, $this->licence_state( $base['license_id'] ) );
+		unset( $second );
+	}
+
+	public function test_the_cancelled_and_expired_emails_say_the_lifetime_licence_keeps_working(): void {
+		$bought       = $this->lifetime_with_fbr( 'month' );
+		$subscription = $this->make( SubscriptionRepository::class )->find_by_id( $bought['addons'] );
+		$license      = null;
+		$email_heading = 'Heading';
+		$email        = null;
+		$sent_to_admin = false;
+		foreach ( array( 'subscription-cancelled', 'subscription-expired', 'payment-failed' ) as $template ) {
+			$at_period_end      = false;
+			$attempts_remaining = 0;
+			$retry_date         = '';
+			ob_start();
+			include WPLM_PLUGIN_DIR . 'templates/emails/' . $template . '.php';
+			$body = (string) ob_get_clean();
+			$this->assertStringContainsString( 'Your licence itself is for life and keeps working', $body, $template );
+			$this->assertStringNotContainsString( 'licenses has been revoked', $body, $template );
+			$this->assertStringNotContainsString( 'To continue using the software', $body, $template );
+		}
+	}
 }

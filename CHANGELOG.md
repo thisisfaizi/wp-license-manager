@@ -154,8 +154,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     On hold, cancelled, expired, failed or refunded: only its own lines lapse, after their paid-through
     day plus grace.
   - **Refunds:** a full refund of the order that bought the licence still suspends or revokes the
-    licence, and now also cancels its add-ons subscription. Removing or refunding the last add-on of an
-    add-ons subscription cancels that subscription; the licence is untouched.
+    licence, and now also cancels its add-ons subscription. A refund of an order that added to an
+    existing licence removes only its own add-ons, even when that order opened the add-ons subscription
+    and later orders joined it; the subscription is cancelled only when nothing is left on it. The
+    licence is untouched either way.
+  - **Emails:** the cancelled, expired and payment-failed emails for an add-ons subscription say the
+    lifetime licence keeps working and only those add-ons stop. Webhooks for it are `subscription.*`
+    only: no `license.*` event is ever derived from it.
   - **Labels:** "Add-ons for licence ending ABCD" appears in the admin subscription list and screen and
     in My Account. The licence's admin panel lists its add-ons subscriptions under its own lifetime
     status.
@@ -196,7 +201,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ### Deploy
 - **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added
-  automatically on the first admin page load after the update, and existing rows are unchanged.
+  automatically on the first admin page load after the update, and existing rows are unchanged. Until
+  then, subscriptions are still created and the add-ons lookups return nothing instead of querying the
+  missing column.
 - Deploy this before Super Ledger Licensing 1.4.0, which requires WPLM 1.3.0. Plans built at purchase
   (1.2.7) and their orders keep working.
 

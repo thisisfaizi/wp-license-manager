@@ -276,7 +276,11 @@ class CheckoutHandler {
 			// Also cancel any subscription bound to this item, and the add-ons-only subscription a
 			// lifetime licence bought with it (v2). Cancelling never changes a licence's status; the
 			// licence below is suspended or revoked only because this order issued it.
-			foreach ( array( '_wplm_subscription_id', '_wplm_addons_subscription_id' ) as $meta_key ) {
+			// The add-ons subscription only when this line issued the licence: an add-ons subscription
+			// an existing licence's order opened may be shared by later orders' add-ons; refunding that
+			// order removes its own add-ons, and the subscription ends only once nothing is left to bill.
+			$keys = '' !== (string) $item->get_meta( '_wplm_license_ids' ) ? array( '_wplm_subscription_id', '_wplm_addons_subscription_id' ) : array( '_wplm_subscription_id' );
+			foreach ( $keys as $meta_key ) {
 				$sub_id = (int) $item->get_meta( $meta_key );
 				if ( $sub_id > 0 ) {
 					try {

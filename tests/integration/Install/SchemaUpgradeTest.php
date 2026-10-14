@@ -204,4 +204,31 @@ class SchemaUpgradeTest extends TestCase {
 
 		$wpdb->delete( $p . 'subscriptions', array( 'id' => $sub_id ) );
 	}
+
+	/** Between uploading 1.3.0 and the upgrade (the next admin page), subscriptions are still created. */
+	public function test_subscriptions_are_created_before_the_1_3_0_upgrade_has_run(): void {
+		global $wpdb;
+		$p = $wpdb->prefix . 'wplm_';
+		$wpdb->query( "ALTER TABLE {$p}subscriptions DROP INDEX addons_license_id, DROP COLUMN addons_license_id" );
+		update_option( 'wplm_db_version', '1.2.2' );
+		$wpdb->query( 'COMMIT' );
+
+		$sub = $this->make( \WPLM\Services\Subscriptions\SubscriptionService::class )->create(
+			array(
+				'user_id'          => 1,
+				'billing_interval' => 1,
+				'billing_period'   => 'month',
+				'recurring_total'  => 5000,
+				'currency'         => 'PKR',
+			)
+		);
+		$this->assertGreaterThan( 0, $sub->id );
+		$this->assertFalse( $sub->is_addons_only() );
+		$repo = $this->make( \WPLM\Repositories\SubscriptionRepository::class );
+		$this->assertNull( $repo->find_addons_for_license( 42 ), 'No query on a column that is not there yet.' );
+		$this->assertSame( array(), $repo->get_addons_for_license( 42 ) );
+		$this->assertSame( '', $wpdb->last_error );
+
+		$wpdb->delete( $p . 'subscriptions', array( 'id' => $sub->id ) );
+	}
 }

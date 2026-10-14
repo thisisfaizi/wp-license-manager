@@ -92,23 +92,28 @@ class SubscriptionService {
 		}
 
 		$data = array(
-			'user_id'           => (int) $args['user_id'],
-			'billing_interval'  => (int) $args['billing_interval'],
-			'billing_period'    => (string) $args['billing_period'],
-			'recurring_total'   => (float) $args['recurring_total'],
-			'currency'          => (string) $args['currency'],
-			'status'            => $status,
-			'next_payment'      => $next_payment,
-			'parent_order_id'   => isset( $args['parent_order_id'] ) ? (int) $args['parent_order_id'] : null,
-			'license_id'        => isset( $args['license_id'] ) ? (int) $args['license_id'] : null,
-			'addons_license_id' => isset( $args['addons_license_id'] ) ? (int) $args['addons_license_id'] : null,
-			'signup_fee'        => isset( $args['signup_fee'] ) ? (float) $args['signup_fee'] : 0.0,
-			'trial_end'         => $args['trial_end'] ?? null,
-			'payment_method'    => $args['payment_method'] ?? null,
-			'payment_token_id'  => isset( $args['payment_token_id'] ) ? (int) $args['payment_token_id'] : null,
-			'end_date'          => $args['end_date'] ?? null,
-			'failed_attempts'   => 0,
+			'user_id'          => (int) $args['user_id'],
+			'billing_interval' => (int) $args['billing_interval'],
+			'billing_period'   => (string) $args['billing_period'],
+			'recurring_total'  => (float) $args['recurring_total'],
+			'currency'         => (string) $args['currency'],
+			'status'           => $status,
+			'next_payment'     => $next_payment,
+			'parent_order_id'  => isset( $args['parent_order_id'] ) ? (int) $args['parent_order_id'] : null,
+			'license_id'       => isset( $args['license_id'] ) ? (int) $args['license_id'] : null,
+			'signup_fee'       => isset( $args['signup_fee'] ) ? (float) $args['signup_fee'] : 0.0,
+			'trial_end'        => $args['trial_end'] ?? null,
+			'payment_method'   => $args['payment_method'] ?? null,
+			'payment_token_id' => isset( $args['payment_token_id'] ) ? (int) $args['payment_token_id'] : null,
+			'end_date'         => $args['end_date'] ?? null,
+			'failed_attempts'  => 0,
 		);
+
+		// Only written when set: before the 1.3.0 database upgrade has run the column does not exist yet,
+		// and every other subscription must still be created.
+		if ( ! empty( $args['addons_license_id'] ) ) {
+			$data['addons_license_id'] = (int) $args['addons_license_id'];
+		}
 
 		$id = $this->sub_repo->create( $data );
 
