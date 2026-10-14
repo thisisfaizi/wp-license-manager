@@ -215,6 +215,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   cancels the add-ons subscription it was about to bill.
 - **A refund cancels an add-ons subscription the order opened but never billed** (pending, no items),
   whatever kind of line opened it.
+- **Monthly / yearly add-ons for a lifetime licence are refused before payment** when its add-ons
+  subscription could not take them: on hold (paused: "resume it"; unpaid: "pay the renewal first"), its
+  paid period over, or set to cancel at period end (it would never renew them). The product page no
+  longer offers them, add to cart and checkout refuse them, and fulfilment applies the same check
+  (`AddonService::addons_join_problem()`). Lifetime-priced add-ons are still sold.
+- An add-ons subscription set to cancel whose last period is over is no longer the licence's open
+  add-ons subscription: its modules can be bought again and a new purchase chooses its own cycle.
 
 ### Deploy
 - **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added

@@ -571,6 +571,59 @@ class AddonService {
 	}
 
 	/**
+	 * Why new recurring add-ons cannot join a lifetime licence's add-ons subscription right now, or
+	 * null when they can (or it has none: one is opened). Checked before payment — on the product
+	 * page, at add to cart and at checkout — and again at fulfilment, so a customer is never charged for
+	 * a monthly or yearly add-on that could not then be added, or that would never renew:
+	 *
+	 * - set to cancel at the end of its period (`pending-cancel`): it never renews;
+	 * - on hold: paused by the customer while still paid up (resume it), else unpaid;
+	 * - its paid period over (a renewal not yet paid, in grace): the new add-on would be billed again
+	 *   at once.
+	 *
+	 * A pending subscription (opened, nothing billed yet) is fine: its first period starts when the
+	 * add-ons are written ({@see open_addons_period()}). Lifetime-priced add-ons never join it and are
+	 * never refused for it.
+	 *
+	 * @param License  $license The lifetime licence.
+	 * @param int|null $now     Unix time (tests).
+	 * @return \WP_Error|null
+	 */
+	public function addons_join_problem( License $license, ?int $now = null ): ?\WP_Error {
+		$addons = $this->addons_subscription( $license );
+		return null !== $addons ? $this->addons_subscription_problem( $addons, $now ) : null;
+	}
+
+	/**
+	 * {@see addons_join_problem()} for a given add-ons subscription.
+	 *
+	 * @param Subscription $addons The add-ons subscription.
+	 * @param int|null     $now    Unix time (tests).
+	 * @return \WP_Error|null
+	 */
+	private function addons_subscription_problem( Subscription $addons, ?int $now = null ): ?\WP_Error {
+		if ( 'pending' === $addons->status ) {
+			return null;
+		}
+		if ( 'pending-cancel' === $addons->status ) {
+			return $this->error( 'addons_ending', __( 'The monthly / yearly add-ons of that licence are set to end at the end of their period. Renew them under My Account → Subscriptions first, then add this.', 'wp-license-manager' ) );
+		}
+		if ( ! in_array( $addons->status, array( 'active', 'trial', 'on-hold' ), true ) ) {
+			return $this->error( 'addons_ended', __( 'The monthly / yearly add-ons of that licence have ended. Please contact us.', 'wp-license-manager' ) );
+		}
+		$through = $this->addons_paid_through( $addons );
+		$today   = wp_date( 'Y-m-d', $now ?? time() );
+		$overdue = null === $through || strcmp( $through, $today ) < 0;
+		if ( 'on-hold' === $addons->status && ! $overdue ) {
+			return $this->error( 'addons_paused', __( 'The monthly / yearly add-ons of that licence are paused. Resume them under My Account → Subscriptions first, then add this.', 'wp-license-manager' ) );
+		}
+		if ( 'on-hold' === $addons->status || $overdue ) {
+			return $this->error( 'addons_overdue', __( 'Pay the licence\'s add-ons renewal first, then add this.', 'wp-license-manager' ) );
+		}
+		return null;
+	}
+
+	/**
 	 * The day an add-ons subscription is paid through: its lines' latest, else the day before its next
 	 * payment.
 	 *
@@ -719,7 +772,24 @@ class AddonService {
 		if ( null === $ctx || true !== $this->check( $license, $this->extras_package( $plan, $ctx['billing'] ), $now ) ) {
 			return array();
 		}
-		return $this->extras()->offers( $ctx );
+		return $this->joinable_offers( $this->extras()->offers( $ctx ), $license, $now );
+	}
+
+	/**
+	 * Offers without the monthly / yearly ones a lifetime licence cannot take now
+	 * ({@see addons_join_problem()}).
+	 *
+	 * @param array[]  $offers  Offers.
+	 * @param License  $license The licence.
+	 * @param int|null $now     Unix time (tests).
+	 * @return array[]
+	 */
+	private function joinable_offers( array $offers, License $license, ?int $now ): array {
+		$recurring = array_filter( $offers, static fn( $o ) => null !== ( $o['recurring'] ?? null ) );
+		if ( array() === $recurring || null === $this->addons_join_problem( $license, $now ) ) {
+			return $offers;
+		}
+		return array_values( array_filter( $offers, static fn( $o ) => null === ( $o['recurring'] ?? null ) ) );
 	}
 
 	/**
@@ -742,7 +812,12 @@ class AddonService {
 		if ( null === $ctx ) {
 			return $stored ? null : $this->error( 'no_extras', __( 'Add-ons are added to a licence billed monthly, yearly or for life.', 'wp-license-manager' ) );
 		}
-		if ( array() === $this->extras()->offers( $ctx ) ) {
+		$offers = $this->extras()->offers( $ctx );
+		if ( array() === $this->joinable_offers( $offers, $license, $now ) ) {
+			$why = array() !== $offers ? $this->addons_join_problem( $license, $now ) : null;
+			if ( null !== $why ) {
+				return $why;
+			}
 			return $stored ? null : $this->error( 'no_extras', __( 'There is nothing more to add to that licence right now.', 'wp-license-manager' ) );
 		}
 		return null;
@@ -899,9 +974,10 @@ class AddonService {
 
 	/**
 	 * The add-ons-only subscription an existing lifetime licence's recurring add-ons join, and its
-	 * paid-through day. Its open one when it has one: billed the same cycle, not on hold or overdue,
-	 * and — when the sale recorded one — the same one (a renewal since the sale is noted). Otherwise a
-	 * new one (reused on a retry through `_wplm_addons_subscription_id`).
+	 * paid-through day. Its open one when it has one: billed the same cycle, able to take them
+	 * ({@see addons_join_problem()}: not on hold, overdue or set to end), and — when the sale recorded
+	 * one — the same one (a renewal since the sale is noted). Otherwise a new one (reused on a retry
+	 * through `_wplm_addons_subscription_id` while it can still bill them).
 	 *
 	 * @return array{0: Subscription, 1: string|null}
 	 * @throws \RuntimeException When the add-ons cannot join.
@@ -931,11 +1007,11 @@ class AddonService {
 				sprintf( __( 'the licence\'s add-ons are billed on subscription #%1$d every %2$s; these were priced otherwise. Nothing was added', 'wp-license-manager' ), $addons->id, $addons->billing_period )
 			);
 		}
-		$through = $this->addons_paid_through( $addons );
-		$today   = wp_date( 'Y-m-d', $now ?? time() );
-		if ( 'pending' !== $addons->status && ( 'on-hold' === $addons->status || null === $through || strcmp( $through, $today ) < 0 ) ) {
-			throw new \RuntimeException( __( 'Pay the licence\'s add-ons renewal first, then add this.', 'wp-license-manager' ) );
+		$problem = $this->addons_subscription_problem( $addons, $now );
+		if ( null !== $problem ) {
+			throw new \RuntimeException( $problem->get_error_message() );
 		}
+		$through      = $this->addons_paid_through( $addons );
 		$sold_through = $snapshot['addons_paid_through'] ?? null;
 		if ( null !== $sold_through && $sold_through !== $through ) {
 			$order->add_order_note(

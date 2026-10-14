@@ -1245,6 +1245,12 @@ class PlanCheckout {
 			if ( is_wp_error( $ok ) ) {
 				return $ok;
 			}
+			// Monthly / yearly add-ons join the licence's add-ons subscription: refused now, before
+			// payment, when they could not be added (or would never renew).
+			$problem = null !== $chosen['cycle'] ? $this->addons()->addons_join_problem( $license ) : null;
+			if ( null !== $problem ) {
+				return $problem;
+			}
 		}
 		$base = null !== $package ? $this->first_payment_amount( $package ) : 0.0;
 		return array(

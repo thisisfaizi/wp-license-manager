@@ -131,7 +131,9 @@ class SubscriptionRepository {
 
 	/**
 	 * The open add-ons-only subscription of a lifetime licence (the newest that is active, in trial,
-	 * pending, on hold or pending cancellation), or null.
+	 * pending, on hold, or set to cancel and still inside its paid period), or null. One set to cancel
+	 * whose period is over has ended in all but name — nothing moves it on — so it no longer holds its
+	 * modules or forces the cycle of new add-ons.
 	 *
 	 * @param int $license_id Licence id.
 	 * @return Subscription|null
@@ -144,7 +146,7 @@ class SubscriptionRepository {
 		$table = $wpdb->prefix . 'wplm_subscriptions';
 		$row   = $wpdb->get_row(
 			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
-			$wpdb->prepare( "SELECT * FROM `{$table}` WHERE addons_license_id = %d AND status IN ('active','trial','pending','on-hold','pending-cancel') ORDER BY id DESC LIMIT 1", $license_id ),
+			$wpdb->prepare( "SELECT * FROM `{$table}` WHERE addons_license_id = %d AND ( status IN ('active','trial','pending','on-hold') OR ( status = 'pending-cancel' AND next_payment > UTC_TIMESTAMP() ) ) ORDER BY id DESC LIMIT 1", $license_id ),
 			ARRAY_A
 		);
 		return is_array( $row ) ? Subscription::from_row( $row ) : null;
