@@ -344,16 +344,18 @@ class AddonService {
 	 * reason to show. The most telling refusal wins: anything but "billed differently" (an overdue plan
 	 * refuses its own monthly add-ons and, being monthly, every lifetime one too).
 	 *
-	 * @param int      $user_id The customer.
-	 * @param Plan     $plan    An add-on plan (with its packages loaded).
-	 * @param int|null $now     Unix time (tests).
+	 * @param int        $user_id  The customer.
+	 * @param Plan       $plan     An add-on plan (with its packages loaded).
+	 * @param int|null   $now      Unix time (tests).
+	 * @param array|null $eligible {@see eligible_targets()} for the same customer and plan, when the
+	 *                             caller already has it (so the offers and checks are not run twice).
 	 * @return array<int, array{license: License, reason: string}> Keyed by licence id.
 	 */
-	public function blocked_targets( int $user_id, Plan $plan, ?int $now = null ): array {
+	public function blocked_targets( int $user_id, Plan $plan, ?int $now = null, ?array $eligible = null ): array {
 		if ( $user_id <= 0 || ! $plan->is_addon() || null === $plan->profile ) {
 			return array();
 		}
-		$eligible = $this->eligible_targets( $user_id, $plan, $now );
+		$eligible = $eligible ?? $this->eligible_targets( $user_id, $plan, $now );
 		$blocked  = array();
 		foreach ( $this->licences_of( $user_id ) as $license ) {
 			if ( $plan->profile !== $license->profile || isset( $eligible[ $license->id ] ) ) {
@@ -438,6 +440,24 @@ class AddonService {
 			'package'      => null,
 			'license'      => $license,
 			'held_modules' => array_values( array_unique( $held ) ),
+		);
+	}
+
+	/**
+	 * What extras for a licence are sold against: the subscription that bills it and the day it is
+	 * paid through (both null for a lifetime licence). Kept in the snapshot at checkout, so fulfilment
+	 * can tell when the plan renewed or changed in between.
+	 *
+	 * @param License $license The licence.
+	 * @return array{target_subscription_id: int|null, target_paid_through: string|null}
+	 */
+	public function extras_target( License $license ): array {
+		$profile = $this->profiles->get( $license->profile );
+		$billing = null !== $profile ? $this->billing( $license, $profile, $this->entitlements->lines( $license->id ) ) : array( 'type' => 'none' );
+		$sub     = 'recurring' === $billing['type'] ? $billing['subscription'] : null;
+		return array(
+			'target_subscription_id' => null !== $sub ? (int) $sub->id : null,
+			'target_paid_through'    => null !== $sub ? $billing['paid_through'] : null,
 		);
 	}
 
@@ -559,6 +579,16 @@ class AddonService {
 	 * licence's subscription, paid through the plan's day; lifetime items are for life; term items get
 	 * their own dated line and never join a subscription.
 	 *
+	 * Checked again here, per item, because another order may have changed the licence between the sale
+	 * and now: an item whose module the licence now holds for the same term (bought on another order
+	 * that completed first) refuses the whole line — it would be billed twice at every renewal. A term
+	 * item is never "held": packs stack.
+	 *
+	 * The extras are aligned to the plan's paid-through day as it is NOW. When the snapshot recorded the
+	 * subscription and day at the sale: another subscription now refuses the line; a different day (the
+	 * plan renewed between the sale and completion) is applied with an order note saying so, so the shop
+	 * sees the cycle the customer received. An overdue plan is refused by the add-on checks.
+	 *
 	 * @param \WC_Order              $order    The order.
 	 * @param \WC_Order_Item_Product $item     Its extras line.
 	 * @param License                $license  The licence it is added to.
@@ -577,13 +607,58 @@ class AddonService {
 		if ( PackageExtrasService::FLOW_EXISTING !== ( $snapshot['flow'] ?? '' ) ) {
 			throw new \RuntimeException( 'the add-ons on this line were not sold for an existing licence' );
 		}
+		foreach ( $snapshot['items'] as $extra ) {
+			if ( null !== $extra['term_days'] ) {
+				continue;
+			}
+			$held = array();
+			foreach ( $extra['lines'] as $line ) {
+				if ( Entitlement::KIND_MODULE === $line['kind'] && in_array( $line['code'], $ctx['held_modules'], true ) ) {
+					$held[] = $ctx['profile']->code_label( $line['code'] );
+				}
+			}
+			if ( array() !== $held ) {
+				throw new \RuntimeException(
+					sprintf(
+						/* translators: 1: licence label, 2: module names */
+						__( '%1$s already has %2$s (added since this order was placed, e.g. by another order). Nothing was added; refund this line or remove it from the order', 'wp-license-manager' ),
+						ucfirst( self::licence_label( $license ) ),
+						implode( ', ', array_unique( $held ) )
+					)
+				);
+			}
+		}
 		$ok = $this->check_for_user( (int) $order->get_customer_id(), $license, $this->extras_package( $plan, $ctx['billing'], $snapshot['items'] ), 1, $now );
 		if ( is_wp_error( $ok ) ) {
 			throw new \RuntimeException( $ok->get_error_message() );
 		}
 		$billing = $this->billing( $license, $ctx['profile'], $this->entitlements->lines( $license->id ) );
 		$sub     = 'recurring' === $billing['type'] ? $billing['subscription'] : null;
-		return $this->apply_extras( $order, $item, $license, $snapshot['items'], $sub, null !== $sub ? $billing['paid_through'] : null, $now );
+		$through = null !== $sub ? $billing['paid_through'] : null;
+
+		$sold_sub = $snapshot['target_subscription_id'] ?? null;
+		if ( null !== $sold_sub && ( null === $sub || (int) $sold_sub !== (int) $sub->id ) ) {
+			throw new \RuntimeException(
+				sprintf(
+					/* translators: %d: subscription id */
+					__( 'the licence is no longer billed on subscription #%d, which these add-ons were sold against. Nothing was added', 'wp-license-manager' ),
+					(int) $sold_sub
+				)
+			);
+		}
+		$sold_through = $snapshot['target_paid_through'] ?? null;
+		$written      = $this->apply_extras( $order, $item, $license, $snapshot['items'], $sub, $through, $now );
+		if ( null !== $sub && null !== $sold_through && $sold_through !== $through ) {
+			$order->add_order_note(
+				sprintf(
+					/* translators: 1: paid-through day at the sale, 2: paid-through day now */
+					__( 'WPLM: the plan renewed after this sale (it was paid through %1$s). The add-ons are aligned with the plan and cover through %2$s, with no extra charge. Charge the difference by hand if that was not intended.', 'wp-license-manager' ),
+					$sold_through,
+					(string) $through
+				)
+			);
+		}
+		return $written;
 	}
 
 	// -------------------------------------------------------------------------
@@ -884,9 +959,12 @@ class AddonService {
 	 * @return int Lines removed.
 	 */
 	public function revert( \WC_Order $order ): int {
-		$removed = 0;
-		$touched = false;
-		$issued  = false;
+		$issued  = 0; // Lines on a licence this order issued.
+		$added   = 0; // Lines on a licence the customer already had.
+		$touched = array(
+			'issued' => false,
+			'added'  => false,
+		);
 
 		foreach ( $order->get_items() as $item ) {
 			if ( ! $item instanceof \WC_Order_Item_Product ) {
@@ -896,11 +974,14 @@ class AddonService {
 			if ( ! is_array( $ids ) ) {
 				continue;
 			}
-			$touched = true;
-			$issued  = $issued || '' !== (string) $item->get_meta( '_wplm_license_ids' );
+			$kind             = '' !== (string) $item->get_meta( '_wplm_license_ids' ) ? 'issued' : 'added';
+			$touched[ $kind ] = true;
 			foreach ( $ids as $id ) {
-				if ( $this->entitlements->delete_line( (int) $id ) ) {
-					++$removed;
+				$line = $this->lines->find_by_id( (int) $id );
+				// Only add-on lines: one a plan switch moved into the plan (source plan) stays.
+				if ( null !== $line && 'addon' === $line->source && $this->entitlements->delete_line( $line->id ) ) {
+					$issued += 'issued' === $kind ? 1 : 0;
+					$added  += 'added' === $kind ? 1 : 0;
 				}
 			}
 			// The billing goes with the lines; this also covers an item whose lines were removed by hand.
@@ -919,26 +1000,33 @@ class AddonService {
 
 		// Anything else this order wrote (an interrupted fulfilment that never stamped its item).
 		foreach ( $this->lines->get_by_order( $order->get_id() ) as $line ) {
-			if ( 'addon' === $line->source && $this->entitlements->delete_line( $line->id ) ) {
-				++$removed;
-				$touched = true;
+			if ( 'addon' !== $line->source ) {
+				continue;
+			}
+			$license = $this->licenses->find_by_id( $line->license_id );
+			$kind    = null !== $license && $order->get_id() === $license->order_id ? 'issued' : 'added';
+			if ( $this->entitlements->delete_line( $line->id ) ) {
+				$issued          += 'issued' === $kind ? 1 : 0;
+				$added           += 'added' === $kind ? 1 : 0;
+				$touched[ $kind ] = true;
 			}
 		}
 
-		if ( $touched ) {
-			if ( $issued ) {
-				$note = 'revoke' === get_option( 'wplm_refund_action', 'suspend' )
-					/* translators: %d: number of lines */
-					? _n( 'WPLM: refunded — %d add-on line bought with the licence removed. The licence issued by this order is revoked.', 'WPLM: refunded — %d add-on lines bought with the licence removed. The licence issued by this order is revoked.', $removed, 'wp-license-manager' )
-					/* translators: %d: number of lines */
-					: _n( 'WPLM: refunded — %d add-on line bought with the licence removed. The licence issued by this order is suspended.', 'WPLM: refunded — %d add-on lines bought with the licence removed. The licence issued by this order is suspended.', $removed, 'wp-license-manager' );
-			} else {
+		if ( $touched['issued'] ) {
+			$note = 'revoke' === get_option( 'wplm_refund_action', 'suspend' )
 				/* translators: %d: number of lines */
-				$note = _n( 'WPLM: refunded — %d add-on line removed from the licence. The licence itself is unchanged.', 'WPLM: refunded — %d add-on lines removed from the licence. The licence itself is unchanged.', $removed, 'wp-license-manager' );
-			}
-			$order->add_order_note( sprintf( $note, $removed ) );
+				? _n( 'WPLM: refunded — %d add-on line bought with the licence removed. The licence issued by this order is revoked.', 'WPLM: refunded — %d add-on lines bought with the licence removed. The licence issued by this order is revoked.', $issued, 'wp-license-manager' )
+				/* translators: %d: number of lines */
+				: _n( 'WPLM: refunded — %d add-on line bought with the licence removed. The licence issued by this order is suspended.', 'WPLM: refunded — %d add-on lines bought with the licence removed. The licence issued by this order is suspended.', $issued, 'wp-license-manager' );
+			$order->add_order_note( sprintf( $note, $issued ) );
 		}
-		return $removed;
+		if ( $touched['added'] ) {
+			$order->add_order_note(
+				/* translators: %d: number of lines */
+				sprintf( _n( 'WPLM: refunded — %d add-on line removed from the licence. The licence itself is unchanged.', 'WPLM: refunded — %d add-on lines removed from the licence. The licence itself is unchanged.', $added, 'wp-license-manager' ), $added )
+			);
+		}
+		return $issued + $added;
 	}
 
 	// -------------------------------------------------------------------------

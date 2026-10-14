@@ -435,15 +435,25 @@ class PackageExtrasService {
 	 * `wplm_package_extras_snapshot( array $snapshot, array $ctx )` may add keys (a price list version);
 	 * unknown keys are kept, WPLM's own always win.
 	 *
+	 * WPLM's own keys besides `billing`, `flow` and `items` (passed in `$sale`):
+	 * - new purchase: `base_price` and `base_signup_fee`, what the licence type cost at the sale (the
+	 *   subscription is created at that price, whatever the package costs by the time it is fulfilled);
+	 * - existing licence: `target_subscription_id` and `target_paid_through`, the subscription and
+	 *   paid-through day the extras were sold against (null for a lifetime licence).
+	 *
 	 * @param array   $ctx   The context.
 	 * @param array[] $items Items from {@see choose()}.
+	 * @param array   $sale  WPLM's own extra keys (see above).
 	 * @return array
 	 */
-	public function snapshot( array $ctx, array $items ): array {
-		$own = array(
-			'billing' => (string) $ctx['billing'],
-			'flow'    => (string) $ctx['flow'],
-			'items'   => array_values( $items ),
+	public function snapshot( array $ctx, array $items, array $sale = array() ): array {
+		$own = array_merge(
+			array(
+				'billing' => (string) $ctx['billing'],
+				'flow'    => (string) $ctx['flow'],
+				'items'   => array_values( $items ),
+			),
+			$sale
 		);
 
 		/**

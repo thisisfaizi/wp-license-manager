@@ -28,13 +28,23 @@ defined( 'ABSPATH' ) || exit;
  * wplm_subscription_renewals row of type 'switch'.
  *
  * Add-ons (1.3.0): a subscription that also bills add-ons — stored add-ons or package extras, items
- * whose meta has `addon` — keeps billing them. The new `recurring_total` is the new plan's own price:
- * the plan's item is set to it, a "not itemised" adjustment is dropped, the add-on items are carried
- * forward unchanged, and the recurring total is re-derived from the items. The proration charge is the
- * new plan plus the add-ons. Because add-ons are priced per billing period, a switch that changes the
- * period or interval of a subscription with add-ons is refused (`wplm_switch_addons_billing`): remove
- * the add-ons first, or re-sell them at the new period. A subscription with no add-on items switches
- * exactly as before.
+ * whose meta has `addon` — keeps billing them.
+ *
+ * - **`$new_plan['recurring_total']` changes meaning on such a subscription: it is the new plan's
+ *   OWN price, without the add-ons** (on a subscription with no add-on items it is still the whole
+ *   recurring charge, as before). Omitted, it is the current total minus the add-ons.
+ * - The plan's item is set to that price, a "not itemised" adjustment is dropped, the add-on items are
+ *   carried forward unchanged, and the recurring total is re-derived from the items (the action's
+ *   `$new_plan` carries `addons_total`). The proration charge is the new plan plus the add-ons.
+ * - An add-on the new plan already grants is not billed twice: pass `$new_plan['package_id']` (the
+ *   licence type switched to) or `$new_plan['modules']` (the module codes it grants). An add-on item
+ *   whose lines are all modules the new plan grants leaves the subscription, and its lines stay on the
+ *   licence as plan lines (`source` plan, no order), renewed with the plan. Nothing else is written to
+ *   the licence's lines: the switch never grants or removes modules itself.
+ * - Add-ons are priced per billing period, so a switch that changes the period or interval while
+ *   add-on items remain is refused (`wplm_switch_addons_billing`): remove them first, or re-sell them
+ *   at the new period.
+ * - A subscription with no add-on items switches exactly as before.
  */
 class SwitchManager {
 
@@ -112,21 +122,26 @@ class SwitchManager {
 			);
 		}
 
-		// Add-ons keep being billed: carried forward, and the total re-derived from the items.
-		$items  = $this->sub_repo->get_items( $sub->id );
-		$addons = array_values( array_filter( $items, static fn( $i ) => ! empty( $i->meta['addon'] ) ) );
-		$extra  = round( array_sum( array_map( static fn( $i ) => (float) $i->line_total, $addons ) ), 4 );
-		if ( array() !== $addons ) {
+		// Add-ons keep being billed: carried forward, and the total re-derived from the items. One the
+		// new plan grants itself leaves the billing (it is part of the plan now).
+		$items    = $this->sub_repo->get_items( $sub->id );
+		$addons   = array_values( array_filter( $items, static fn( $i ) => ! empty( $i->meta['addon'] ) ) );
+		$itemised = array() !== $addons;
+		$absorbed = $this->absorbed_items( $addons, $this->new_plan_modules( $new_plan ) );
+		$addons   = array_values( array_filter( $addons, static fn( $i ) => ! in_array( $i->id, array_keys( $absorbed ), true ) ) );
+		$extra    = round( array_sum( array_map( static fn( $i ) => (float) $i->line_total, $addons ) ), 4 );
+		if ( $itemised ) {
 			$interval = (int) ( $new_plan['billing_interval'] ?? $sub->billing_interval );
 			$period   = (string) ( $new_plan['billing_period'] ?? $sub->billing_period );
-			if ( $interval !== (int) $sub->billing_interval || $period !== $sub->billing_period ) {
+			if ( array() !== $addons && ( $interval !== (int) $sub->billing_interval || $period !== $sub->billing_period ) ) {
 				return new \WP_Error(
 					'wplm_switch_addons_billing',
 					__( 'This subscription also bills add-ons priced for its current billing period. Remove the add-ons before switching to another period.', 'wp-license-manager' )
 				);
 			}
 			if ( ! isset( $new_plan['recurring_total'] ) ) {
-				$new_plan['recurring_total'] = max( 0.0, round( $sub->recurring_total - $extra, 4 ) );
+				$all                         = round( array_sum( array_map( static fn( $i ) => (float) $i->line_total, array_filter( $items, static fn( $i ) => ! empty( $i->meta['addon'] ) ) ) ), 4 );
+				$new_plan['recurring_total'] = max( 0.0, round( $sub->recurring_total - $all, 4 ) );
 			}
 			$new_plan['addons_total'] = $extra;
 		}
@@ -179,8 +194,20 @@ class SwitchManager {
 			'billing_interval' => (int) ( $new_plan['billing_interval'] ?? $sub->billing_interval ),
 			'billing_period'   => (string) ( $new_plan['billing_period'] ?? $sub->billing_period ),
 		);
-		if ( array() !== $addons ) {
-			$update_data['recurring_total'] = $this->rewrite_plan_items( $sub->id, $items, $new_plan );
+		if ( $itemised ) {
+			foreach ( $absorbed as $item_id => $line_ids ) {
+				$this->sub_repo->delete_item( (int) $item_id );
+				foreach ( $line_ids as $line_id ) {
+					$this->entitlements()->update_line(
+						(int) $line_id,
+						array(
+							'source'   => 'plan',
+							'order_id' => null,
+						)
+					);
+				}
+			}
+			$update_data['recurring_total'] = $this->rewrite_plan_items( $sub->id, $this->sub_repo->get_items( $sub->id ), $new_plan );
 		}
 		$this->sub_repo->update( $sub->id, $update_data );
 
@@ -217,6 +244,65 @@ class SwitchManager {
 	// -------------------------------------------------------------------------
 	// Private helpers
 	// -------------------------------------------------------------------------
+
+	/**
+	 * The module codes the plan switched to grants: `modules`, else the template of `package_id`.
+	 *
+	 * @param array $new_plan The new plan.
+	 * @return string[]
+	 */
+	private function new_plan_modules( array $new_plan ): array {
+		if ( isset( $new_plan['modules'] ) && is_array( $new_plan['modules'] ) ) {
+			return array_values( array_map( 'strval', $new_plan['modules'] ) );
+		}
+		$package_id = (int) ( $new_plan['package_id'] ?? 0 );
+		if ( $package_id <= 0 ) {
+			return array();
+		}
+		$package = \WPLM\Plugin::get_instance()->container()->make( \WPLM\Repositories\PackageRepository::class )->find_by_id( $package_id );
+		$codes   = array();
+		foreach ( null !== $package ? $package->entitlements : array() as $line ) {
+			if ( 'module' === ( $line['kind'] ?? '' ) ) {
+				$codes[] = (string) $line['code'];
+			}
+		}
+		return $codes;
+	}
+
+	/**
+	 * The add-on items the new plan grants in full: every line they pay for is a module the plan grants.
+	 *
+	 * @param \WPLM\Models\SubscriptionItem[] $addons  Add-on items.
+	 * @param string[]                         $modules Module codes the new plan grants.
+	 * @return array<int, int[]> Item id => its line ids.
+	 */
+	private function absorbed_items( array $addons, array $modules ): array {
+		if ( array() === $modules ) {
+			return array();
+		}
+		$repo = \WPLM\Plugin::get_instance()->container()->make( \WPLM\Repositories\EntitlementRepository::class );
+		$out  = array();
+		foreach ( $addons as $item ) {
+			$ids = array_map( 'intval', (array) ( $item->meta['entitlement_ids'] ?? array() ) );
+			$all = array() !== $ids;
+			foreach ( $ids as $id ) {
+				$line = $repo->find_by_id( $id );
+				if ( null === $line || 'module' !== $line->kind || ! in_array( $line->code, $modules, true ) ) {
+					$all = false;
+					break;
+				}
+			}
+			if ( $all ) {
+				$out[ $item->id ] = $ids;
+			}
+		}
+		return $out;
+	}
+
+	/** The entitlement service (from the container: the constructor is unchanged). */
+	private function entitlements(): \WPLM\Services\EntitlementService {
+		return \WPLM\Plugin::get_instance()->container()->make( \WPLM\Services\EntitlementService::class );
+	}
 
 	/**
 	 * Put the new plan's price on the plan's own item (the first item that is neither an add-on nor an

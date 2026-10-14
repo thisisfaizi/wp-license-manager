@@ -86,6 +86,9 @@ class PlanCheckout {
 	/** @var array<string, array> Per-request eligible licences, by user and plan. */
 	private array $target_cache = array();
 
+	/** @var array<string, array> Per-request licences that cannot take the add-on, by user and plan. */
+	private array $blocked_cache = array();
+
 	/**
 	 * @param PlanService         $plans
 	 * @param GeneratorService    $generators
@@ -157,6 +160,9 @@ class PlanCheckout {
 
 		// A refunded add-on order takes back exactly what it added; the licence is never suspended.
 		add_action( 'woocommerce_order_status_refunded', array( $this, 'revert_addons' ), 10, 1 );
+
+		// A partial refund changes no licence line: say so on an order with extras.
+		add_action( 'woocommerce_order_partially_refunded', array( $this, 'note_partial_refund' ), 10, 2 );
 	}
 
 	// -------------------------------------------------------------------------
@@ -386,7 +392,7 @@ class PlanCheckout {
 			);
 		}
 		// Licences that cannot take an add-on now are listed, disabled, with the reason.
-		foreach ( $this->addons()->blocked_targets( get_current_user_id(), $plan ) as $id => $blocked ) {
+		foreach ( $this->blocked( get_current_user_id(), $plan ) as $id => $blocked ) {
 			printf(
 				'<option value="%1$d" disabled>%2$s</option>',
 				(int) $id,
@@ -399,7 +405,33 @@ class PlanCheckout {
 			echo '<p style="font-weight:600;margin-bottom:8px;">' . esc_html__( 'Choose an add-on', 'wp-license-manager' ) . '</p>';
 		}
 
+		// A plan with stored add-ons AND extras: "none" is a choice of its own, checked by default for a
+		// licence that is offered extras, so ticking extras never sits beside a pre-checked add-on. Both
+		// together are refused at add to cart (one line is one or the other).
+		$with_extras = array();
+		foreach ( $targets as $id => $target ) {
+			if ( ! empty( $target['extras'] ) ) {
+				$with_extras[] = (int) $id;
+			}
+		}
 		$first = true;
+		if ( array() !== $fitting && array() !== $with_extras ) {
+			$shown = in_array( $selected, $with_extras, true );
+			$first = ! $shown;
+			printf(
+				'<label for="wplm-pkg-none" class="wplm-addon-package" data-wplm-licences="%1$s" style="display:block;border:1px solid #dcdcde;border-radius:6px;padding:12px;margin-bottom:8px;cursor:pointer;"%2$s>',
+				esc_attr( implode( ' ', $with_extras ) ),
+				$shown ? '' : ' hidden'
+			);
+			printf(
+				'<input type="radio" id="wplm-pkg-none" name="wplm_package_id" value="0" %1$s%2$s style="margin-right:8px;"> <strong>%3$s</strong>',
+				checked( $shown, true, false ),
+				$shown ? '' : ' disabled',
+				esc_html__( 'None — only the add-ons ticked below', 'wp-license-manager' )
+			);
+			echo '</label>';
+		}
+
 		foreach ( $packages as $pkg ) {
 			$fits = array();
 			foreach ( $targets as $id => $target ) {
@@ -492,7 +524,7 @@ class PlanCheckout {
 			return;
 		}
 		if ( array() === $this->targets( $user_id, $plan ) ) {
-			$blocked = $this->addons()->blocked_targets( $user_id, $plan );
+			$blocked = $this->blocked( $user_id, $plan );
 			if ( array() === $blocked ) {
 				echo '<p class="wplm-addon-none woocommerce-info">' . esc_html__( 'None of your licences can take this add-on. Add-ons are added to an active licence billed the same way (monthly, yearly or lifetime).', 'wp-license-manager' ) . '</p>';
 				return;
@@ -634,6 +666,25 @@ class PlanCheckout {
 		return $this->target_cache[ $key ];
 	}
 
+	/**
+	 * The current request's licences that cannot take an add-on plan now, with why — computed once per
+	 * request from the eligible targets already in hand.
+	 *
+	 * @param int               $user_id The customer.
+	 * @param \WPLM\Models\Plan $plan    The add-on plan.
+	 * @return array<int, array{license: License, reason: string}>
+	 */
+	private function blocked( int $user_id, $plan ): array {
+		if ( $user_id <= 0 ) {
+			return array();
+		}
+		$key = $user_id . ':' . $plan->id;
+		if ( ! isset( $this->blocked_cache[ $key ] ) ) {
+			$this->blocked_cache[ $key ] = $this->addons()->blocked_targets( $user_id, $plan, null, $this->targets( $user_id, $plan ) );
+		}
+		return $this->blocked_cache[ $key ];
+	}
+
 	/** The add-on service (lazily, so the older six-argument constructor keeps working). */
 	private function addons(): AddonService {
 		if ( null === $this->addons ) {
@@ -696,17 +747,26 @@ class PlanCheckout {
 
 		$choice = self::posted_extras();
 		if ( $plan->is_addon() && array() !== $choice ) {
-			// Package extras for an existing licence (they take the line; a package radio is ignored).
-			$built = $this->extras_for_cart_item(
-				array(
-					'data'                  => $product,
-					'wplm_extras'           => $choice,
-					// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
-					'wplm_addon_license_id' => isset( $_POST['wplm_target_license_id'] ) ? absint( wp_unslash( $_POST['wplm_target_license_id'] ) ) : 0,
-				)
+			// Package extras for an existing licence. One cart line is a stored add-on or extras, never both.
+			// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
+			if ( isset( $_POST['wplm_package_id'] ) && absint( wp_unslash( $_POST['wplm_package_id'] ) ) > 0 ) {
+				wc_add_notice( __( 'Choose either an add-on above or the add-ons ticked below, not both. Add them to the cart one at a time.', 'wp-license-manager' ), 'error' );
+				return false;
+			}
+			$line  = array(
+				'data'                  => $product,
+				'wplm_extras'           => $choice,
+				// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
+				'wplm_addon_license_id' => isset( $_POST['wplm_target_license_id'] ) ? absint( wp_unslash( $_POST['wplm_target_license_id'] ) ) : 0,
 			);
+			$built = $this->extras_for_cart_item( $line );
 			if ( is_wp_error( $built ) ) {
 				wc_add_notice( $built->get_error_message(), 'error' );
+				return false;
+			}
+			$twice = $this->cart_duplicates( $built['license'], $this->line_modules( $line ) );
+			if ( null !== $twice ) {
+				wc_add_notice( $twice, 'error' );
 				return false;
 			}
 			return $passed;
@@ -1023,7 +1083,15 @@ class PlanCheckout {
 		if ( is_wp_error( $built ) ) {
 			throw new \Exception( esc_html( $built->get_error_message() ) );
 		}
-		$snapshot = $this->extras()->snapshot( $built['ctx'], $built['items'] );
+		// What the sale was made against: the licence type's price (new), or the plan's subscription
+		// and paid-through day (existing licence). Fulfilment holds the sale to these.
+		$sale     = null !== $built['package']
+			? array(
+				'base_price'      => (float) $built['package']->price,
+				'base_signup_fee' => (float) $built['package']->signup_fee,
+			)
+			: $this->addons()->extras_target( $built['license'] );
+		$snapshot = $this->extras()->snapshot( $built['ctx'], $built['items'], $sale );
 
 		$item->set_quantity( 1 );
 		$item->add_meta_data( '_wplm_plan_id', (int) $built['ctx']['plan']->id, true );
@@ -1126,6 +1194,102 @@ class PlanCheckout {
 				wc_add_notice( sprintf( __( '%1$s: %2$s', 'wp-license-manager' ), $name, $built->get_error_message() ), 'error' );
 			}
 		}
+
+		// The same module twice for one licence (two lines, placed together) would be billed twice.
+		$by_licence = array();
+		foreach ( WC()->cart->get_cart() as $cart_item ) {
+			$license_id = (int) ( $cart_item['wplm_addon_license_id'] ?? 0 );
+			if ( $license_id > 0 ) {
+				foreach ( array_unique( $this->line_modules( $cart_item ) ) as $code ) {
+					$by_licence[ $license_id ][ $code ] = ( $by_licence[ $license_id ][ $code ] ?? 0 ) + 1;
+				}
+			}
+		}
+		foreach ( $by_licence as $license_id => $codes ) {
+			$twice = array_keys( array_filter( $codes, static fn( $n ) => $n > 1 ) );
+			if ( array() !== $twice ) {
+				$license = $this->licenses->get_by_id( (int) $license_id );
+				wc_add_notice( $this->twice_message( $license, $twice ), 'error' );
+			}
+		}
+	}
+
+	/**
+	 * The module codes an add-on cart line adds to its licence for the plan's term: extras (terms
+	 * excluded — packs stack) or a stored add-on (a dated one-time pack excluded).
+	 *
+	 * @param array $cart_item Cart item.
+	 * @return string[]
+	 */
+	private function line_modules( array $cart_item ): array {
+		$codes = array();
+		if ( ! empty( $cart_item['wplm_extras'] ) ) {
+			$built = $this->extras_for_cart_item( $cart_item );
+			if ( is_wp_error( $built ) ) {
+				return array();
+			}
+			foreach ( $built['items'] as $extra ) {
+				if ( null !== $extra['term_days'] ) {
+					continue;
+				}
+				foreach ( $extra['lines'] as $line ) {
+					if ( 'module' === $line['kind'] ) {
+						$codes[] = (string) $line['code'];
+					}
+				}
+			}
+			return $codes;
+		}
+		$pkg = ! empty( $cart_item['wplm_package_id'] ) ? $this->lookup_package( (int) $cart_item['wplm_package_id'] ) : null;
+		if ( null === $pkg || ( Package::TYPE_ONETIME === $pkg->billing_type && (int) $pkg->valid_for_days > 0 ) ) {
+			return array();
+		}
+		foreach ( $pkg->entitlements as $line ) {
+			if ( 'module' === ( $line['kind'] ?? '' ) ) {
+				$codes[] = (string) $line['code'];
+			}
+		}
+		return $codes;
+	}
+
+	/**
+	 * Why a new add-on line for a licence cannot join the cart: a module it adds is already in the cart
+	 * for the same licence. Null when nothing repeats.
+	 *
+	 * @param License|null $license The licence.
+	 * @param string[]     $codes   Modules the new line adds.
+	 * @return string|null
+	 */
+	private function cart_duplicates( ?License $license, array $codes ): ?string {
+		if ( null === $license || array() === $codes || ! function_exists( 'WC' ) || null === WC()->cart ) {
+			return null;
+		}
+		$in_cart = array();
+		foreach ( WC()->cart->get_cart() as $cart_item ) {
+			if ( (int) ( $cart_item['wplm_addon_license_id'] ?? 0 ) === $license->id ) {
+				$in_cart = array_merge( $in_cart, $this->line_modules( $cart_item ) );
+			}
+		}
+		$twice = array_values( array_unique( array_intersect( $codes, $in_cart ) ) );
+		return array() === $twice ? null : $this->twice_message( $license, $twice );
+	}
+
+	/**
+	 * "Factory is already in your cart for your licence ending ABCD. …"
+	 *
+	 * @param License|null $license The licence.
+	 * @param string[]     $codes   Module codes.
+	 * @return string
+	 */
+	private function twice_message( ?License $license, array $codes ): string {
+		$profile = null !== $license ? $this->profiles->get( $license->profile ) : null;
+		$names   = null !== $profile ? array_map( array( $profile, 'code_label' ), $codes ) : $codes;
+		return sprintf(
+			/* translators: 1: module names, 2: "licence ending ABCD" */
+			__( '%1$s is already in your cart for your %2$s. Remove one: it would be billed twice.', 'wp-license-manager' ),
+			implode( ', ', $names ),
+			null !== $license ? AddonService::licence_label( $license ) : __( 'licence', 'wp-license-manager' )
+		);
 	}
 
 	/**
@@ -1174,9 +1338,75 @@ class PlanCheckout {
 			return;
 		}
 
-		$issued  = array();
-		$applied = array();
-		$failed  = 0;
+		// Two completions at once (a gateway callback and the return page) must not both see an
+		// unfulfilled line: claim the order first, then read it again.
+		if ( ! $this->claim_order( $order_id ) ) {
+			return;
+		}
+		try {
+			$order = wc_get_order( $order_id );
+			if ( ! $order instanceof \WC_Order || '1' === $order->get_meta( '_wplm_plan_fulfilled' ) ) {
+				return;
+			}
+			$this->fulfill_claimed( $order );
+		} finally {
+			$this->release_order( $order_id );
+		}
+	}
+
+	/** Seconds after which a fulfilment claim is taken to be from a request that died. */
+	public const FULFIL_LOCK_TTL = 300;
+
+	/**
+	 * Claim an order for fulfilment: an atomic insert of the option `wplm_fulfil_lock_{id}`, which
+	 * fails while another request holds it. A claim older than {@see FULFIL_LOCK_TTL} is taken over.
+	 * The option API is not used: `add_option()` cannot be relied on to fail on an existing row.
+	 *
+	 * @param int $order_id Order id.
+	 * @return bool Whether this request holds the claim.
+	 */
+	private function claim_order( int $order_id ): bool {
+		global $wpdb;
+		$name = 'wplm_fulfil_lock_' . $order_id;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- an atomic claim.
+		$claimed = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')", $name, (string) time() ) );
+		if ( 1 === (int) $claimed ) {
+			return true;
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- the claim, never cached.
+		$since = (string) $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name ) );
+		if ( (int) $since > time() - self::FULFIL_LOCK_TTL ) {
+			return false; // Another request is fulfilling this order now.
+		}
+		// A stale claim: take it over, unless another request just did.
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- an atomic take-over.
+		$taken = $wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s", (string) time(), $name, $since ) );
+		return 1 === (int) $taken;
+	}
+
+	/**
+	 * Release an order's fulfilment claim.
+	 *
+	 * @param int $order_id Order id.
+	 * @return void
+	 */
+	private function release_order( int $order_id ): void {
+		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- the claim, never cached.
+		$wpdb->delete( $wpdb->options, array( 'option_name' => 'wplm_fulfil_lock_' . $order_id ) );
+	}
+
+	/**
+	 * Fulfil an order this request has claimed ({@see fulfill_order()}).
+	 *
+	 * @param \WC_Order $order The order, read after the claim.
+	 * @return void
+	 */
+	private function fulfill_claimed( \WC_Order $order ): void {
+		$order_id = $order->get_id();
+		$issued   = array();
+		$applied  = array();
+		$failed   = 0;
 
 		/** @var \WC_Order_Item_Product $item */
 		foreach ( $order->get_items() as $item ) {
@@ -1337,8 +1567,16 @@ class PlanCheckout {
 
 		if ( ! is_array( $ids ) || empty( $ids ) ) {
 			try {
-				$this->extras_snapshot_for( $pkg, $json ); // Checked before a key is generated.
-				$license  = $this->fulfill_item( $order, $item, $pkg );
+				$snapshot = $this->extras_snapshot_for( $pkg, $json ); // Checked before a key is generated.
+				// The licence type at the price it was sold for: renewals bill exactly what the cart showed.
+				$sold = clone $pkg;
+				if ( isset( $snapshot['base_price'] ) && is_numeric( $snapshot['base_price'] ) && (float) $snapshot['base_price'] >= 0 ) {
+					$sold->price = (float) $snapshot['base_price'];
+				}
+				if ( isset( $snapshot['base_signup_fee'] ) && is_numeric( $snapshot['base_signup_fee'] ) && (float) $snapshot['base_signup_fee'] >= 0 ) {
+					$sold->signup_fee = (float) $snapshot['base_signup_fee'];
+				}
+				$license  = $this->fulfill_item( $order, $item, $sold );
 				$issued[] = $license;
 				$item->update_meta_data( '_wplm_license_ids', wp_json_encode( array( $license->id ) ) );
 				$item->save_meta_data();
@@ -1459,6 +1697,28 @@ class PlanCheckout {
 			throw new \RuntimeException( 'the add-ons on this line were not sold with a new licence' );
 		}
 		return $snapshot;
+	}
+
+	/**
+	 * `woocommerce_order_partially_refunded`: a partial refund of an order with package extras changes
+	 * no licence line (WPLM cannot tell which extra a part refund was for). The note tells the shop.
+	 *
+	 * @param int $order_id  Order id.
+	 * @param int $refund_id Refund id.
+	 * @return void
+	 */
+	public function note_partial_refund( $order_id, $refund_id = 0 ): void {
+		unset( $refund_id );
+		$order = wc_get_order( (int) $order_id );
+		if ( ! $order instanceof \WC_Order ) {
+			return;
+		}
+		foreach ( $order->get_items() as $item ) {
+			if ( '' !== (string) $item->get_meta( '_wplm_extras' ) ) {
+				$order->add_order_note( __( 'WPLM: partial refund — the licence and its add-on lines are unchanged. If an add-on should go, remove its line on the licence screen (its billing goes with it).', 'wp-license-manager' ) );
+				return;
+			}
+		}
 	}
 
 	/**

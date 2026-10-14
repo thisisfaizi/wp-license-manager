@@ -1291,4 +1291,356 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( 'Your licence key and setup details are in the PDF', $body );
 		$this->assertStringNotContainsString( 'Added to your licence', $body );
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Review fixes (1.3.0)
+	// ---------------------------------------------------------------------------------------------
+
+	private function factory_lines( int $license_id ): array {
+		return array_values( array_filter( $this->lines( $license_id, 'addon' ), static fn( $l ) => 'factory' === $l->code ) );
+	}
+
+	/** Two orders for the same module on one licence, both placed before either completes. */
+	public function test_the_same_module_bought_on_two_orders_is_added_once_and_billed_once(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Monthly' );
+		$extras  = array(
+			'module:factory' => '1',
+			'user'           => '1',
+		);
+		$first   = $this->add_to_licence( $product, $base, $extras, false );
+		$second  = $this->add_to_licence( $product, $base, $extras, false );
+
+		$first['order']->update_status( 'completed' );
+		$second['order']->update_status( 'completed' );
+
+		$this->assertCount( 1, $this->factory_lines( $base['license_id'] ), 'Factory once.' );
+		$this->assertSame( 6800.0, $this->total( $base['subscription_id'] ), '5000 + Factory 1500 + a user 300, once.' );
+		$this->assertCount( 3, $this->items( $base['subscription_id'] ) );
+		$this->assertSame( '', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ), 'The second order is left for the shop.' );
+		$this->assertStringContainsString( 'already has Factory (added since this order was placed', $this->notes( $second['order'] ) );
+		$this->assertSame( '', (string) $second['item']->get_meta( '_wplm_entitlement_ids' ) );
+	}
+
+	public function test_the_same_module_twice_in_one_cart_for_one_licence_is_refused(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Monthly' );
+		wp_set_current_user( $base['customer'] );
+		$post = array(
+			'wplm_extras'            => array( 'module:factory' => '1' ),
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+
+		$this->assertTrue( $this->validate( $post, $product ) );
+		$key = WC()->cart->add_to_cart(
+			$product->get_id(),
+			1,
+			0,
+			array(),
+			array(
+				'wplm_extras'           => array( 'module:factory' => 1 ),
+				'wplm_addon_license_id' => $base['license_id'],
+			)
+		);
+		$this->assertNotFalse( $key );
+
+		$this->assertFalse( $this->validate( $post, $product ) );
+		$this->assertStringContainsString( 'Factory is already in your cart for your licence ending', $this->first_error() );
+		$this->assertTrue(
+			$this->validate(
+				array(
+					'wplm_extras'            => array( 'user' => '2' ),
+					'wplm_target_license_id' => (string) $base['license_id'],
+				),
+				$product
+			),
+			'Users add up: a second line of users is fine.'
+		);
+
+		// A second line that got in anyway (another tab) stops the checkout.
+		WC()->cart->add_to_cart(
+			$product->get_id(),
+			1,
+			0,
+			array(),
+			array(
+				'wplm_extras'           => array(
+					'module:factory' => 1,
+					'user'           => 1,
+				),
+				'wplm_addon_license_id' => $base['license_id'],
+			)
+		);
+		wc_clear_notices();
+		$this->checkout()->check_cart_extras();
+		$this->assertSame( 1, wc_notice_count( 'error' ) );
+		$this->assertStringContainsString( 'Factory is already in your cart', $this->first_error() );
+	}
+
+	public function test_a_held_fulfilment_claim_makes_a_concurrent_completion_a_no_op(): void {
+		global $wpdb;
+		$bought = $this->buy_new( 'Monthly', array( 'module:factory' => '1' ), null, false );
+		$id     = $bought['order']->get_id();
+		$wpdb->insert(
+			$wpdb->options,
+			array(
+				'option_name'  => 'wplm_fulfil_lock_' . $id,
+				'option_value' => (string) time(),
+				'autoload'     => 'no',
+			)
+		);
+
+		$bought['order']->update_status( 'completed' ); // Another request holds the claim.
+
+		$this->assertSame( 0, $this->licence_count( $bought['customer'] ) );
+		$this->assertSame( '', (string) wc_get_order( $id )->get_meta( '_wplm_plan_fulfilled' ) );
+
+		// The holder finishes and releases; then one completion issues one key.
+		$wpdb->delete( $wpdb->options, array( 'option_name' => 'wplm_fulfil_lock_' . $id ) );
+		$this->checkout()->fulfill_order( $id );
+		$this->checkout()->fulfill_order( $id );
+		$this->assertSame( 1, $this->licence_count( $bought['customer'] ) );
+		$this->assertNull( $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", 'wplm_fulfil_lock_' . $id ) ), 'Released.' );
+	}
+
+	public function test_a_stale_fulfilment_claim_is_taken_over(): void {
+		global $wpdb;
+		$bought = $this->buy_new( 'Monthly', array( 'module:factory' => '1' ), null, false );
+		$id     = $bought['order']->get_id();
+		$wpdb->insert(
+			$wpdb->options,
+			array(
+				'option_name'  => 'wplm_fulfil_lock_' . $id,
+				'option_value' => (string) ( time() - PlanCheckout::FULFIL_LOCK_TTL - 60 ),
+				'autoload'     => 'no',
+			)
+		);
+
+		$bought['order']->update_status( 'completed' );
+
+		$this->assertSame( 1, $this->licence_count( $bought['customer'] ), 'A request that died long ago does not block the order.' );
+		$this->assertCount( 1, $this->factory_lines( $this->result( $id )['license_id'] ) );
+	}
+
+	public function test_a_renewal_between_sale_and_completion_is_noted_and_the_add_on_follows_the_plan(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Monthly' );
+		$order   = $this->add_to_licence( $product, $base, array( 'module:factory' => '1' ), false );
+		$snap    = json_decode( (string) $order['item']->get_meta( '_wplm_extras' ), true );
+		$sold    = $this->line( $base['license_id'], 'base' )->paid_through;
+		$this->assertSame( $base['subscription_id'], $snap['target_subscription_id'] );
+		$this->assertSame( $sold, $snap['target_paid_through'] );
+
+		$sub = $this->make( SubscriptionRepository::class )->find_by_id( $base['subscription_id'] );
+		$this->make( RenewalProcessor::class )->apply_payment( $sub, null, 5000.0 );
+		$order['order']->update_status( 'completed' );
+
+		$now = $this->line( $base['license_id'], 'base' )->paid_through;
+		$this->assertNotSame( $sold, $now );
+		$this->assertSame( $now, $this->line( $base['license_id'], 'factory', 'addon' )->paid_through, 'Aligned with the plan as it is now.' );
+		$this->assertStringContainsString( 'the plan renewed after this sale (it was paid through ' . $sold . '). The add-ons are aligned with the plan and cover through ' . $now, $this->notes( $order['order'] ) );
+	}
+
+	public function test_another_subscription_or_an_overdue_plan_at_completion_fails_with_a_note(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Monthly' );
+		$order   = $this->add_to_licence( $product, $base, array( 'module:factory' => '1' ), false );
+		$snap    = json_decode( (string) $order['item']->get_meta( '_wplm_extras' ), true );
+		$snap['target_subscription_id'] = 999999;
+		$order['item']->update_meta_data( '_wplm_extras', wp_json_encode( $snap ) );
+		$order['item']->save();
+
+		$order['order']->update_status( 'completed' );
+
+		$this->assertSame( array(), $this->factory_lines( $base['license_id'] ) );
+		$this->assertStringContainsString( 'no longer billed on subscription #999999', $this->notes( $order['order'] ) );
+
+		$overdue = $this->add_to_licence( $product, $base, array( 'module:factory' => '1' ), false );
+		global $wpdb;
+		$wpdb->update( $wpdb->prefix . 'wplm_entitlements', array( 'paid_through' => EntitlementService::add_period( wp_date( 'Y-m-d' ), -3, 'day' ) ), array( 'license_id' => $base['license_id'] ) );
+		$overdue['order']->update_status( 'completed' );
+		$this->assertSame( array(), $this->factory_lines( $base['license_id'] ) );
+		$this->assertStringContainsString( 'Pay your plan\'s renewal first', $this->notes( $overdue['order'] ) );
+	}
+
+	public function test_the_base_is_billed_at_the_price_sold_even_if_the_package_changed_before_completion(): void {
+		$bought = $this->buy_new( 'Monthly with fee', array( 'module:factory' => '1' ), null, false );
+		$snap   = json_decode( (string) $bought['item']->get_meta( '_wplm_extras' ), true );
+		$this->assertEquals( 5000, $snap['base_price'] );
+		$this->assertEquals( 2000, $snap['base_signup_fee'] );
+
+		$this->set_row(
+			'packages',
+			$this->package( 'Monthly with fee' )->id,
+			array(
+				'price'      => 9999,
+				'signup_fee' => 1,
+			)
+		);
+		$bought['order']->update_status( 'completed' );
+
+		$after = $this->result( $bought['order']->get_id() );
+		$items = $this->items( $after['subscription_id'] );
+		$this->assertSame( 5000.0, $items[0]->line_total, 'The base at the price sold.' );
+		$this->assertSame( 6500.0, $this->total( $after['subscription_id'] ), 'Renewal = what the cart showed.' );
+		$this->assertEquals( 2000, $this->subscription_row( $after['subscription_id'] )['signup_fee'] );
+	}
+
+	public function test_an_addon_plan_with_stored_addons_and_extras_offers_none_and_refuses_both(): void {
+		$plan    = $this->create_plan(
+			array(
+				$this->recurring( 'FBR monthly', 'month', 1000, array( array( 'kind' => 'module', 'code' => 'fbr' ) ) ),
+			),
+			array(
+				'name'    => 'Acme add-ons (mixed)',
+				'profile' => 'acme-office',
+				'kind'    => Plan::KIND_ADDON,
+			)
+		);
+		$product = $this->create_plan_product( $plan['plan_id'] );
+		$base    = $this->customer_with( 'Monthly' );
+		wp_set_current_user( $base['customer'] );
+
+		$html = $this->render( $product );
+		$this->assertMatchesRegularExpression( '/id="wplm-pkg-none" name="wplm_package_id" value="0"\s+checked/', $html, '"None" is checked when extras are offered.' );
+		$this->assertDoesNotMatchRegularExpression( '/name="wplm_package_id" value="' . $plan['packages'][0]->id . '"\s+checked/', $html );
+
+		$both = array(
+			'wplm_package_id'        => (string) $plan['packages'][0]->id,
+			'wplm_extras'            => array( 'module:factory' => '1' ),
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		$this->assertFalse( $this->validate( $both, $product ) );
+		$this->assertSame( 'Choose either an add-on above or the add-ons ticked below, not both. Add them to the cart one at a time.', $this->first_error() );
+
+		$both['wplm_package_id'] = '0';
+		$this->assertTrue( $this->validate( $both, $product ), $this->first_error() );
+		unset( $both['wplm_extras'] );
+		$both['wplm_package_id'] = (string) $plan['packages'][0]->id;
+		$this->assertTrue( $this->validate( $both, $product ), 'The stored add-on alone still sells.' );
+	}
+
+	public function test_a_partial_refund_changes_no_line_and_says_so(): void {
+		$bought = $this->buy_new( 'Monthly', array( 'module:factory' => '1' ) );
+
+		$refund = wc_create_refund(
+			array(
+				'order_id' => $bought['order']->get_id(),
+				'amount'   => 100,
+				'reason'   => 'Goodwill',
+			)
+		);
+
+		$this->assertNotWPError( $refund );
+		$this->assertCount( 1, $this->factory_lines( $bought['license_id'] ) );
+		$this->assertSame( 6500.0, $this->total( $bought['subscription_id'] ) );
+		$this->assertStringContainsString( 'WPLM: partial refund — the licence and its add-on lines are unchanged.', $this->notes( $bought['order'] ) );
+	}
+
+	public function test_a_refund_of_a_mixed_order_words_each_licence_correctly(): void {
+		$product  = $this->addon_product();
+		$base     = $this->customer_with( 'Lifetime' );
+		$customer = $base['customer'];
+		wp_set_current_user( $customer );
+
+		$_POST = array(
+			'wplm_package_id' => (string) $this->package( 'Lifetime' )->id,
+			'wplm_extras'     => array( 'module:factory' => '1' ),
+		);
+		$this->assertTrue( apply_filters( 'woocommerce_add_to_cart_validation', true, $this->product->get_id(), 1 ) );
+		$this->assertNotFalse( WC()->cart->add_to_cart( $this->product->get_id(), 1 ) );
+		$_POST = array(
+			'wplm_extras'            => array( 'module:pos' => '0', 'user' => '2' ),
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		$this->assertTrue( apply_filters( 'woocommerce_add_to_cart_validation', true, $product->get_id(), 1 ), $this->first_error() );
+		$this->assertNotFalse( WC()->cart->add_to_cart( $product->get_id(), 1 ) );
+		$_POST = array();
+		WC()->cart->calculate_totals();
+		$order = new \WC_Order();
+		$order->set_customer_id( $customer );
+		WC()->checkout()->create_order_line_items( $order, WC()->cart );
+		$order->set_billing_email( 'customer' . $customer . '@example.org' );
+		$order->calculate_totals();
+		$order->save();
+		WC()->cart->empty_cart();
+		$order->update_status( 'completed' );
+		$this->assertSame( 2, $this->licence_count( $customer ) );
+
+		wc_get_order( $order->get_id() )->update_status( 'refunded' );
+
+		$notes = $this->notes( $order );
+		$this->assertStringContainsString( 'WPLM: refunded — 1 add-on line bought with the licence removed. The licence issued by this order is suspended.', $notes );
+		$this->assertStringContainsString( 'WPLM: refunded — 1 add-on line removed from the licence. The licence itself is unchanged.', $notes );
+		$this->assertNotSame( 'suspended', strtolower( $this->make( LicenseRepository::class )->find_by_id( $base['license_id'] )->status_label() ), 'The licence the customer already had is not suspended.' );
+		$this->assertSame( array(), $this->lines( $base['license_id'], 'addon' ) );
+	}
+
+	public function test_a_switch_to_a_plan_that_grants_an_extra_stops_billing_it(): void {
+		$richer = $this->create_plan(
+			array(
+				$this->recurring(
+					'Monthly with Factory',
+					'month',
+					6500,
+					array(
+						array( 'kind' => 'module', 'code' => 'base' ),
+						array( 'kind' => 'module', 'code' => 'distribution' ),
+						array( 'kind' => 'module', 'code' => 'factory' ),
+					)
+				),
+			),
+			array( 'profile' => 'acme-office' )
+		);
+		$bought = $this->buy_new(
+			'Monthly',
+			array(
+				'module:factory' => '1',
+				'user'           => '2',
+			)
+		);
+		$factory = $this->line( $bought['license_id'], 'factory', 'addon' );
+
+		$result = $this->make( SwitchManager::class )->switch_plan(
+			$bought['subscription_id'],
+			array(
+				'recurring_total'  => 6500,
+				'billing_interval' => 1,
+				'billing_period'   => 'month',
+				'package_id'       => $richer['packages'][0]->id,
+			)
+		);
+
+		$this->assertNotWPError( $result );
+		$this->assertSame( 7100.0, $this->total( $bought['subscription_id'] ), 'The new plan 6500 (Factory included) + 2 users × 300: Factory is not billed twice.' );
+		$this->assertCount( 2, $this->items( $bought['subscription_id'] ) );
+		$kept = $this->make( EntitlementRepository::class )->find_by_id( $factory->id );
+		$this->assertNotNull( $kept, 'The licence keeps Factory.' );
+		$this->assertSame( 'plan', $kept->source );
+		$this->assertNull( $kept->order_id );
+		$this->assertSame( $bought['subscription_id'], $kept->subscription_id, 'Renewed with the plan.' );
+
+		// A refund of the original order no longer takes Factory away: it belongs to the plan now.
+		$this->make( AddonService::class )->revert( wc_get_order( $bought['order']->get_id() ) );
+		$this->assertNotNull( $this->make( EntitlementRepository::class )->find_by_id( $factory->id ) );
+	}
+
+	public function test_the_addon_page_prices_each_licence_once_per_request(): void {
+		$addon = $this->addon_product();
+		$base  = $this->customer_with( 'Monthly' );
+		wp_set_current_user( $base['customer'] );
+		$checkout    = $this->checkout();
+		$this->calls = array();
+
+		global $product;
+		$product = $addon;
+		ob_start();
+		$checkout->render_addon_notice();
+		$checkout->render_package_options();
+		$purchasable = $checkout->plan_is_purchasable( false, $addon );
+		ob_end_clean();
+
+		$this->assertTrue( $purchasable );
+		$this->assertCount( 1, $this->calls, 'The offers for the licence are computed once, not again for the blocked list.' );
+	}
 }

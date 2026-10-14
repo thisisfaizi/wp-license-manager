@@ -61,7 +61,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   - A line with extras is forced to quantity 1.
 - **The order line keeps the sale:**
   - `_wplm_extras` (JSON: `billing`, `flow`, `items` with id, label, qty, unit_price, amount, lines
-    already × qty, term_days);
+    already × qty, term_days). It also records what the sale was made against:
+    - a new licence: `base_price` and `base_signup_fee`. The subscription is created at that price,
+      so the renewal is exactly what the cart showed, even if the licence type's price changes before
+      the order is completed;
+    - an existing licence: `target_subscription_id` and `target_paid_through` (null for lifetime);
   - `_wplm_extras_total`;
   - a visible **"Add-ons"** entry ("Factory; 2 × Extra phone").
 - **Fulfilment writes from the snapshot only:**
@@ -77,6 +81,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   - **Idempotent:** `_wplm_license_ids` marks the licence done and `_wplm_entitlement_ids` the extras;
     `_wplm_plan_fulfilled` is set only when both are. A retry does only what is missing and never issues
     a second key. An extras step that fails part-way removes every line it wrote.
+  - **One fulfilment at a time per order.** Two completions at once (a gateway callback and the return
+    page) could both see an unfulfilled line. Fulfilment now first claims the order with an atomic
+    insert of the option `wplm_fulfil_lock_{order id}`, reads the order again, and releases the claim
+    when done. A claim older than 5 minutes (a request that died) is taken over. This covers every
+    plan line, not only extras.
 - **Extras for an existing licence.** The add-ons product (plan kind `addon`) prices extras with the same
   filter (`flow = existing`, the licence's billing). It needs **no stored packages**:
   - The product is purchasable, and the licence picker and form render, when the filter offers something
@@ -85,11 +94,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   - Fulfilment checks the extras as one in-memory add-on (id 0, the add-on plan, the licence's billing),
     so every add-on rule still applies (status, trial, overdue, base module, "already has",
     requirements, `wplm_addon_eligibility`).
-  - Stored add-on packages (1.2.6) work exactly as before. When one licence gets both a package radio
-    and ticked extras on the same add-to-cart, the extras take the line.
+  - **Checked again at completion, item by item.** An extra whose module the licence now holds for the
+    same term is refused, for example when two orders for the same module were placed before either was
+    completed. The line fails with an order note and nothing is added, so the module is never billed
+    twice. Term items (packs) are exempt: they stack.
+  - **The same module twice in one cart** for one licence is refused when added, and again at checkout.
+  - **Aligned to the plan as it is at completion.** If the plan renewed between the sale and completion,
+    the extras cover through the new day, and an order note tells the shop (no proration is invented).
+    If the licence is billed on another subscription now, or is overdue, the line fails with an order
+    note.
+  - **Stored add-ons and extras on one plan:** the form adds a "None — only the add-ons ticked below"
+    choice, checked by default for a licence that is offered extras. Posting a stored add-on together
+    with extras is refused with a notice: one cart line is one or the other.
+  - Stored add-on packages (1.2.6) work exactly as before.
   - **Plan editor:** an add-on plan may be saved with no add-on types. It then warns when no plugin
     prices add-ons (`wplm_package_extras`). The plans list shows "Add-ons priced by a plugin", and the
     product **Licensing** tab lists it as "Name (add-ons priced by a plugin)".
+
+- **Tax.** Extras are part of the same order line as the licence type, so they follow the product's tax
+  class and the shop's "prices entered with tax" setting exactly like the base, at checkout and on
+  renewal invoices (which bill the subscription's recurring total on the same product).
+- **Partial refunds** change no licence line: WPLM cannot tell which extra a part refund was for. An
+  order with extras gets a note saying so. To take an extra back, remove its line on the licence screen;
+  its billing goes with it. A full refund works as described under "Changed".
 
 ### Changed
 - `AddonService::apply()` now writes through one private line writer, shared with the new
@@ -97,8 +124,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   it removes what it wrote through the service, which also detaches any subscription items.
 - **Plan switch with add-ons** (`SwitchManager::switch_plan()`). Add-on items (stored add-ons and
   extras) are carried forward:
-  - The new `recurring_total` is the new plan's own price. It is set on the plan's item, and adjustments
-    are dropped.
+  - **`$new_plan['recurring_total']` now means the new plan's OWN price, without the add-ons, on a
+    subscription that has add-on items.** On a subscription without them it is still the whole
+    recurring charge. The price is set on the plan's item, and adjustments are dropped.
+  - An add-on the new plan already grants is not billed twice. Pass `package_id` (the licence type
+    switched to) or `modules` in `$new_plan`. An add-on item whose lines are all modules the new plan
+    grants leaves the subscription. Its lines stay on the licence as plan lines (`source` plan, no
+    order) and renew with the plan, so a later refund of the original order no longer removes them.
   - The recurring total is re-derived from the items.
   - The proration charge is the new plan plus the add-ons.
   - Switching to another period or interval while add-on items exist is refused
@@ -106,10 +138,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   - Without add-on items, a switch is unchanged.
 - **Refund note.** For a licence issued with extras, a full refund still suspends (or revokes) the
   licence and removes its extras lines. The note now says so, instead of "the licence itself is
-  unchanged".
+  unchanged". An order that did both (a new licence with extras, and extras for a licence the customer
+  already had) gets one note for each. `revert()` removes only add-on lines.
 - The completed-order email no longer says a brand-new licence's extras were "added to your licence".
 - The classic checkout handler also skips lines with `_wplm_extras`.
 - `AddonService::eligible_targets()` entries carry `extras` (the offers for that licence).
+  `AddonService::blocked_targets()` accepts the eligible targets the caller already has, and the
+  product page computes both once per request.
 
 ### Deploy
 - No database change. Deploy this before Super Ledger Licensing 1.4.0, which requires WPLM 1.3.0. Plans
