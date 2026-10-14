@@ -269,6 +269,13 @@ final class Plugin {
 			)
 		);
 		$this->container->bind(
+			Services\PackageExtrasService::class,
+			fn( $c ) => new Services\PackageExtrasService(
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Services\EntitlementService::class )
+			)
+		);
+		$this->container->bind(
 			Services\AddonService::class,
 			fn( $c ) => new Services\AddonService(
 				$c->make( Services\EntitlementService::class ),
@@ -276,7 +283,8 @@ final class Plugin {
 				$c->make( Repositories\LicenseRepository::class ),
 				$c->make( Services\PlanService::class ),
 				$c->make( Licensing\ProfileRegistry::class ),
-				$c->make( Repositories\SubscriptionRepository::class )
+				$c->make( Repositories\SubscriptionRepository::class ),
+				$c->make( Services\PackageExtrasService::class )
 			)
 		);
 		$this->container->bind(

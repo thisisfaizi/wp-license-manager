@@ -119,6 +119,24 @@ class Package {
 	}
 
 	/**
+	 * How the package is billed, as package extras are priced: `month` (recurring every 1 month),
+	 * `year` (recurring every 1 year), `lifetime`, or null for anything else (one-time, other
+	 * intervals), which takes no extras. A trial does not change the key; a new purchase with a trial
+	 * is offered no extras by the caller.
+	 *
+	 * @return string|null
+	 */
+	public function billing_key(): ?string {
+		if ( self::TYPE_LIFETIME === $this->billing_type ) {
+			return 'lifetime';
+		}
+		if ( $this->is_recurring() && 1 === (int) $this->billing_interval && in_array( $this->billing_period, array( 'month', 'year' ), true ) ) {
+			return $this->billing_period;
+		}
+		return null;
+	}
+
+	/**
 	 * Convert to a plain array for REST/JSON responses.
 	 *
 	 * @return array

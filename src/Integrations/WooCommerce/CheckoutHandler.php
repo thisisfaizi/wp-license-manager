@@ -144,8 +144,9 @@ class CheckoutHandler {
 			}
 
 			// Plan/package-driven items are fulfilled by PlanCheckout — skip them
-			// here so they are not processed twice.
-			if ( $item->get_meta( '_wplm_package_id' ) || $item->get_meta( '_wplm_dynamic_package' ) ) {
+			// here so they are not processed twice. That includes lines built at purchase (1.2.7)
+			// and package extras added to an existing licence (1.3.0), which carry no package id.
+			if ( $item->get_meta( '_wplm_package_id' ) || $item->get_meta( '_wplm_dynamic_package' ) || $item->get_meta( '_wplm_extras' ) ) {
 				continue;
 			}
 

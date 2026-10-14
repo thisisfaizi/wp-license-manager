@@ -26,6 +26,15 @@ defined( 'ABSPATH' ) || exit;
  * The proration array is passed through the `wplm_switch_proration` filter so
  * merchants can override or disable it. The switch is recorded as a
  * wplm_subscription_renewals row of type 'switch'.
+ *
+ * Add-ons (1.3.0): a subscription that also bills add-ons — stored add-ons or package extras, items
+ * whose meta has `addon` — keeps billing them. The new `recurring_total` is the new plan's own price:
+ * the plan's item is set to it, a "not itemised" adjustment is dropped, the add-on items are carried
+ * forward unchanged, and the recurring total is re-derived from the items. The proration charge is the
+ * new plan plus the add-ons. Because add-ons are priced per billing period, a switch that changes the
+ * period or interval of a subscription with add-ons is refused (`wplm_switch_addons_billing`): remove
+ * the add-ons first, or re-sell them at the new period. A subscription with no add-on items switches
+ * exactly as before.
  */
 class SwitchManager {
 
@@ -103,6 +112,25 @@ class SwitchManager {
 			);
 		}
 
+		// Add-ons keep being billed: carried forward, and the total re-derived from the items.
+		$items  = $this->sub_repo->get_items( $sub->id );
+		$addons = array_values( array_filter( $items, static fn( $i ) => ! empty( $i->meta['addon'] ) ) );
+		$extra  = round( array_sum( array_map( static fn( $i ) => (float) $i->line_total, $addons ) ), 4 );
+		if ( array() !== $addons ) {
+			$interval = (int) ( $new_plan['billing_interval'] ?? $sub->billing_interval );
+			$period   = (string) ( $new_plan['billing_period'] ?? $sub->billing_period );
+			if ( $interval !== (int) $sub->billing_interval || $period !== $sub->billing_period ) {
+				return new \WP_Error(
+					'wplm_switch_addons_billing',
+					__( 'This subscription also bills add-ons priced for its current billing period. Remove the add-ons before switching to another period.', 'wp-license-manager' )
+				);
+			}
+			if ( ! isset( $new_plan['recurring_total'] ) ) {
+				$new_plan['recurring_total'] = max( 0.0, round( $sub->recurring_total - $extra, 4 ) );
+			}
+			$new_plan['addons_total'] = $extra;
+		}
+
 		// Capture the old plan for the fired action.
 		$old_plan = array(
 			'product_id'       => null, // not stored on the subscription directly
@@ -112,7 +140,10 @@ class SwitchManager {
 		);
 
 		// Compute proration and allow override via filter.
-		$calculated_proration = $this->calculate_proration( $sub, $new_plan );
+		$calculated_proration = $this->calculate_proration(
+			$sub,
+			array_merge( $new_plan, array( 'recurring_total' => (float) ( $new_plan['recurring_total'] ?? 0.0 ) + $extra ) )
+		);
 
 		/**
 		 * Filter the proration amounts for a plan switch.
@@ -148,6 +179,9 @@ class SwitchManager {
 			'billing_interval' => (int) ( $new_plan['billing_interval'] ?? $sub->billing_interval ),
 			'billing_period'   => (string) ( $new_plan['billing_period'] ?? $sub->billing_period ),
 		);
+		if ( array() !== $addons ) {
+			$update_data['recurring_total'] = $this->rewrite_plan_items( $sub->id, $items, $new_plan );
+		}
 		$this->sub_repo->update( $sub->id, $update_data );
 
 		// Immediately update the license seat limit if max_activations changed.
@@ -183,6 +217,56 @@ class SwitchManager {
 	// -------------------------------------------------------------------------
 	// Private helpers
 	// -------------------------------------------------------------------------
+
+	/**
+	 * Put the new plan's price on the plan's own item (the first item that is neither an add-on nor an
+	 * adjustment; one is added when there is none), drop adjustments, keep every add-on item, and return
+	 * the new recurring total: the sum of the items.
+	 *
+	 * @param int                                $subscription_id Subscription id.
+	 * @param \WPLM\Models\SubscriptionItem[] $items           Its items before the switch.
+	 * @param array                              $new_plan        The new plan (recurring_total = its own price).
+	 * @return float
+	 */
+	private function rewrite_plan_items( int $subscription_id, array $items, array $new_plan ): float {
+		$price = round( (float) $new_plan['recurring_total'], 4 );
+		$base  = null;
+		foreach ( $items as $item ) {
+			if ( ! empty( $item->meta['addon'] ) ) {
+				continue;
+			}
+			if ( null === $base && empty( $item->meta['adjustment'] ) ) {
+				$base = $item;
+				continue;
+			}
+			$this->sub_repo->delete_item( $item->id ); // An adjustment, or a second plan item.
+		}
+		if ( null !== $base ) {
+			$this->sub_repo->update_item(
+				$base->id,
+				array(
+					'line_total' => $price,
+					'meta'       => array_merge( $base->meta, array( 'switched' => true ) ),
+				)
+			);
+		} else {
+			$this->sub_repo->add_item(
+				$subscription_id,
+				array(
+					'product_id'   => (int) ( $new_plan['product_id'] ?? 0 ),
+					'variation_id' => ! empty( $new_plan['variation_id'] ) ? (int) $new_plan['variation_id'] : null,
+					'quantity'     => 1,
+					'line_total'   => $price,
+					'meta'         => array( 'switched' => true ),
+				)
+			);
+		}
+		$sum = 0.0;
+		foreach ( $this->sub_repo->get_items( $subscription_id ) as $item ) {
+			$sum += (float) $item->line_total;
+		}
+		return round( $sum, 4 );
+	}
 
 	/**
 	 * Calculate the proration amounts for switching from the current plan to
