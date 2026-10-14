@@ -1341,6 +1341,8 @@ class PlanCheckout {
 		// Two completions at once (a gateway callback and the return page) must not both see an
 		// unfulfilled line: claim the order first, then read it again.
 		if ( ! $this->claim_order( $order_id ) ) {
+			\WPLM\Support\Logger::error( 'PlanCheckout: order ' . $order_id . ' is already being fulfilled by another request; skipped.' );
+			$order->add_order_note( __( 'WPLM: another fulfilment of this order is in progress, so this one did nothing. If no licence or add-on appears, set the order to Completed again after 5 minutes.', 'wp-license-manager' ) );
 			return;
 		}
 		try {

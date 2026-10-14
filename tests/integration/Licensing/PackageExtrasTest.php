@@ -1394,6 +1394,7 @@ class PackageExtrasTest extends TestCase {
 
 		$this->assertSame( 0, $this->licence_count( $bought['customer'] ) );
 		$this->assertSame( '', (string) wc_get_order( $id )->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertStringContainsString( 'another fulfilment of this order is in progress', $this->notes( $bought['order'] ) );
 
 		// The holder finishes and releases; then one completion issues one key.
 		$wpdb->delete( $wpdb->options, array( 'option_name' => 'wplm_fulfil_lock_' . $id ) );
@@ -1601,15 +1602,21 @@ class PackageExtrasTest extends TestCase {
 		);
 		$factory = $this->line( $bought['license_id'], 'factory', 'addon' );
 
-		$result = $this->make( SwitchManager::class )->switch_plan(
-			$bought['subscription_id'],
-			array(
-				'recurring_total'  => 6500,
-				'billing_interval' => 1,
-				'billing_period'   => 'month',
-				'package_id'       => $richer['packages'][0]->id,
+		// Through the REST endpoint, as an integration switches a plan.
+		$request = new \WP_REST_Request( 'POST', '/wplm/v1/subscriptions/' . $bought['subscription_id'] . '/switch' );
+		$request->set_param( 'id', $bought['subscription_id'] );
+		$request->set_header( 'content-type', 'application/json' );
+		$request->set_body(
+			wp_json_encode(
+				array(
+					'recurring_total'  => 6500,
+					'billing_interval' => 1,
+					'billing_period'   => 'month',
+					'package_id'       => $richer['packages'][0]->id,
+				)
 			)
 		);
+		$result = ( new \WPLM\Rest\Controllers\SubscriptionsController( \WPLM\Plugin::get_instance()->container() ) )->switch_plan( $request );
 
 		$this->assertNotWPError( $result );
 		$this->assertSame( 7100.0, $this->total( $bought['subscription_id'] ), 'The new plan 6500 (Factory included) + 2 users × 300: Factory is not billed twice.' );

@@ -84,8 +84,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   - **One fulfilment at a time per order.** Two completions at once (a gateway callback and the return
     page) could both see an unfulfilled line. Fulfilment now first claims the order with an atomic
     insert of the option `wplm_fulfil_lock_{order id}`, reads the order again, and releases the claim
-    when done. A claim older than 5 minutes (a request that died) is taken over. This covers every
-    plan line, not only extras.
+    when done. A claim older than 5 minutes (a request that died) is taken over. A completion that finds
+    the order claimed does nothing, logs it, and leaves an order note saying to complete the order again
+    after 5 minutes if nothing appears. This covers every plan line, not only extras.
 - **Extras for an existing licence.** The add-ons product (plan kind `addon`) prices extras with the same
   filter (`flow = existing`, the licence's billing). It needs **no stored packages**:
   - The product is purchasable, and the licence picker and form render, when the filter offers something
@@ -128,7 +129,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     subscription that has add-on items.** On a subscription without them it is still the whole
     recurring charge. The price is set on the plan's item, and adjustments are dropped.
   - An add-on the new plan already grants is not billed twice. Pass `package_id` (the licence type
-    switched to) or `modules` in `$new_plan`. An add-on item whose lines are all modules the new plan
+    switched to) or `modules` in `$new_plan` (the REST switch endpoint accepts both in its body). An add-on item whose lines are all modules the new plan
     grants leaves the subscription. Its lines stay on the licence as plan lines (`source` plan, no
     order) and renew with the plan, so a later refund of the original order no longer removes them.
   - The recurring total is re-derived from the items.
