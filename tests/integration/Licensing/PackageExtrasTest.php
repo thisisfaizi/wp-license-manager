@@ -2782,4 +2782,53 @@ class PackageExtrasTest extends TestCase {
 		$this->assertEquals( $items, $this->items( $bought['addons'] ) );
 		$this->assertSame( 'addon', $this->line( $bought['license_id'], 'fbr' )->source, 'FBR stays an add-on it bills.' );
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Review fixes (2026-10-15): WPLM's own extras form
+	// ---------------------------------------------------------------------------------------------
+
+	public function test_the_fallback_scripts_only_touch_their_own_form(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		wp_set_current_user( $base['customer'] );
+
+		foreach ( array( $this->render( $this->product ), $this->render( $product ) ) as $html ) {
+			$this->assertStringContainsString( ".closest('form')", $html );
+			$this->assertStringNotContainsString( 'document.querySelectorAll', $html, 'Nothing page-wide: another product\'s form on the same page is left alone.' );
+			$this->assertStringNotContainsString( "document.getElementById('wplm-target-license')", $html );
+		}
+		$this->assertNotSame( $this->render( $this->product ), $this->render( $this->product ), 'Each form has its own id.' );
+	}
+
+	public function test_only_the_shown_licence_has_a_cycle_checked_in_the_fallback(): void {
+		$product = $this->addon_product();
+		$first   = $this->customer_with( 'Lifetime' );
+		$second  = $this->buy( $this->product, $this->package( 'Lifetime' ), $first['customer'] );
+		wp_set_current_user( $first['customer'] );
+
+		$html = $this->render( $product );
+
+		$this->assertSame( 2, substr_count( $html, 'class="wplm-extras" data-wplm-for=' ), 'Both licences take recurring add-ons.' );
+		$this->assertSame( 1, preg_match_all( '/<input [^>]*name="wplm_extras_cycle"[^>]*checked/', $html ), 'One checked radio in the form\'s one radio group.' );
+		$this->assertMatchesRegularExpression( '/id="wplm-extras-cycle-' . $first['license_id'] . '-year" name="wplm_extras_cycle" value="year" data-wplm-default="1"\s+checked/', $html, 'The shown (first) licence\'s default.' );
+		$this->assertMatchesRegularExpression( '/id="wplm-extras-cycle-' . $second['license_id'] . '-year" name="wplm_extras_cycle" value="year" data-wplm-default="1"\s*>/', $html, 'The other licence\'s default is marked, for the script to check when it is shown.' );
+	}
+
+	public function test_the_addons_page_with_nothing_chosen_asks_for_an_addon_not_a_licence_type(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		wp_set_current_user( $base['customer'] );
+
+		$this->assertFalse(
+			$this->validate(
+				array(
+					'wplm_package_id'        => '0',
+					'wplm_extras'            => array( 'user' => '0' ),
+					'wplm_target_license_id' => (string) $base['license_id'],
+				),
+				$product
+			)
+		);
+		$this->assertSame( 'Choose an add-on, or tick at least one add-on, before adding to cart.', $this->first_error() );
+	}
 }

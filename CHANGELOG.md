@@ -247,6 +247,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 - **An add-ons-only subscription cannot be switched** (`wplm_switch_addons_only`, from PHP, REST or
   `wplm_switch_subscription()`): a switch added a plan charge to it, or turned its add-ons into plan
   lines it no longer billed but still renewed.
+- **WPLM's own extras form** (shown when no plugin hooks `wplm_package_extras_form`): its scripts work
+  on their own form only, so with two products on one page, picking a licence type on one no longer
+  hides and disables the other's ticked add-ons. Only the shown licence's Monthly / Yearly choice is
+  checked when the page opens (they share one radio group), and a licence's default is checked when it
+  is shown. The add-ons product with nothing chosen says "Choose an add-on…", not "choose a license
+  type".
 
 ### Deploy
 - **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added

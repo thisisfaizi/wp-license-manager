@@ -292,12 +292,17 @@ class PlanCheckout {
 	 * The fallback's Monthly / Yearly choice for a group with recurring offers (a lifetime licence or
 	 * licence type). A forced cycle (the licence's add-ons subscription) is shown as the only option.
 	 *
-	 * @param array[]     $offers The group's offers.
-	 * @param int         $key    Package or licence id.
-	 * @param string|null $forced The forced cycle.
+	 * Every group's radios share one name in the form (a disabled fieldset does not split a radio
+	 * group), so only the selected group's default is checked; the script checks a group's default
+	 * when it is shown ({@see render_extras_fallback()}).
+	 *
+	 * @param array[]     $offers   The group's offers.
+	 * @param int         $key      Package or licence id.
+	 * @param string|null $forced   The forced cycle.
+	 * @param bool        $selected Whether the group is the one shown when the page opens.
 	 * @return void
 	 */
-	private function render_cycle_choice( array $offers, int $key, ?string $forced ): void {
+	private function render_cycle_choice( array $offers, int $key, ?string $forced, bool $selected = true ): void {
 		$recurring = array_values( array_filter( $offers, static fn( $o ) => null !== ( $o['recurring'] ?? null ) ) );
 		if ( array() === $recurring ) {
 			return;
@@ -312,10 +317,11 @@ class PlanCheckout {
 		foreach ( $cycles as $cycle ) {
 			$input = 'wplm-extras-cycle-' . $key . '-' . $cycle;
 			printf(
-				'<label for="%1$s" style="margin-right:12px;"><input type="radio" id="%1$s" name="wplm_extras_cycle" value="%2$s" %3$s> %4$s</label>',
+				'<label for="%1$s" style="margin-right:12px;"><input type="radio" id="%1$s" name="wplm_extras_cycle" value="%2$s"%3$s %4$s> %5$s</label>',
 				esc_attr( $input ),
 				esc_attr( $cycle ),
-				checked( $default, $cycle, false ),
+				$default === $cycle ? ' data-wplm-default="1"' : '',
+				checked( $selected && $default === $cycle, true, false ),
 				esc_html( $labels[ $cycle ] )
 			);
 		}
@@ -359,7 +365,9 @@ class PlanCheckout {
 		if ( array() === $groups ) {
 			return;
 		}
-		echo '<div class="wplm-extras-fallback" data-wplm-flow="' . esc_attr( $data['flow'] ) . '">';
+		// Each product's form is its own: a page may show several (a shortcode, a page builder).
+		$uid = wp_unique_id( 'wplm-extras-' );
+		echo '<div id="' . esc_attr( $uid ) . '" class="wplm-extras-fallback" data-wplm-flow="' . esc_attr( $data['flow'] ) . '">';
 		foreach ( $groups as $key => $offers ) {
 			$on = (int) $key === $selected;
 			printf(
@@ -369,7 +377,7 @@ class PlanCheckout {
 				$on ? '' : ' disabled'
 			);
 			echo '<legend style="font-weight:600;">' . esc_html__( 'Add-ons', 'wp-license-manager' ) . '</legend>';
-			$this->render_cycle_choice( $offers, (int) $key, $existing ? ( $data['cycle_by_license'][ (int) $key ] ?? null ) : null );
+			$this->render_cycle_choice( $offers, (int) $key, $existing ? ( $data['cycle_by_license'][ (int) $key ] ?? null ) : null, $on );
 			foreach ( $offers as $offer ) {
 				$input = 'wplm-extra-' . (int) $key . '-' . sanitize_html_class( str_replace( ':', '-', $offer['id'] ) );
 				$name  = 'wplm_extras[' . $offer['id'] . ']';
@@ -407,19 +415,27 @@ class PlanCheckout {
 		?>
 		<script>
 		(function(){
+			var root = document.getElementById('<?php echo esc_js( $uid ); ?>');
+			if ( ! root ) { return; }
+			var form = root.closest('form') || root.parentNode;
 			var existing = <?php echo $existing ? 'true' : 'false'; ?>;
 			function show(key){
-				document.querySelectorAll('.wplm-extras').forEach(function(set){
+				root.querySelectorAll('.wplm-extras').forEach(function(set){
 					var on = set.getAttribute('data-wplm-for') === String(key);
 					set.hidden = !on;
 					set.disabled = !on;
+					if ( on ) {
+						var cycles = set.querySelectorAll('input[name="wplm_extras_cycle"]');
+						var picked = Array.prototype.some.call(cycles, function(r){ return r.checked; });
+						cycles.forEach(function(r){ if ( !picked && r.hasAttribute('data-wplm-default') ) { r.checked = true; } });
+					}
 				});
 			}
 			if ( existing ) {
-				var sel = document.getElementById('wplm-target-license');
+				var sel = form.querySelector('select[name="wplm_target_license_id"]');
 				if ( sel ) { sel.addEventListener('change', function(){ show(sel.value); }); }
 			} else {
-				document.querySelectorAll('input[name="wplm_package_id"]').forEach(function(radio){
+				form.querySelectorAll('input[name="wplm_package_id"]').forEach(function(radio){
 					radio.addEventListener('change', function(){ if ( radio.checked ) { show(radio.value); } });
 				});
 			}
@@ -446,7 +462,8 @@ class PlanCheckout {
 		$wanted   = isset( $_GET['wplm_license'] ) ? absint( wp_unslash( $_GET['wplm_license'] ) ) : 0;
 		$selected = isset( $targets[ $wanted ] ) ? $wanted : (int) array_key_first( $targets );
 
-		echo '<div class="wplm-packages wplm-addon" style="margin:16px 0;">';
+		$uid = wp_unique_id( 'wplm-addon-' );
+		echo '<div id="' . esc_attr( $uid ) . '" class="wplm-packages wplm-addon" style="margin:16px 0;">';
 		echo '<p style="margin-bottom:8px;"><label for="wplm-target-license" style="font-weight:600;">' . esc_html__( 'Add to licence', 'wp-license-manager' ) . '</label><br>';
 		echo '<select id="wplm-target-license" name="wplm_target_license_id">';
 		foreach ( $targets as $id => $target ) {
@@ -552,18 +569,20 @@ class PlanCheckout {
 		?>
 		<script>
 		(function(){
-			var sel = document.getElementById('wplm-target-license');
+			var root = document.getElementById('<?php echo esc_js( $uid ); ?>');
+			var form = root ? ( root.closest('form') || root.parentNode ) : null;
+			var sel  = form ? form.querySelector('select[name="wplm_target_license_id"]') : null;
 			if ( ! sel ) { return; }
 			sel.addEventListener('change', function(){
 				var first = null;
-				document.querySelectorAll('.wplm-addon-package').forEach(function(label){
+				form.querySelectorAll('.wplm-addon-package').forEach(function(label){
 					var on = (' ' + label.getAttribute('data-wplm-licences') + ' ').indexOf(' ' + sel.value + ' ') !== -1;
 					var input = label.querySelector('input');
 					label.hidden = !on;
 					input.disabled = !on;
 					if ( !on ) { input.checked = false; } else if ( !first ) { first = input; }
 				});
-				if ( first && !document.querySelector('.wplm-addon-package input:checked') ) { first.checked = true; }
+				if ( first && !form.querySelector('.wplm-addon-package input:checked') ) { first.checked = true; }
 			});
 		})();
 		</script>
@@ -871,6 +890,11 @@ class PlanCheckout {
 
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
 		$package_id = isset( $_POST['wplm_package_id'] ) ? absint( wp_unslash( $_POST['wplm_package_id'] ) ) : 0;
+		if ( ! $package_id && $plan->is_addon() ) {
+			// The add-ons page with nothing chosen: it has no licence types to ask for.
+			wc_add_notice( __( 'Choose an add-on, or tick at least one add-on, before adding to cart.', 'wp-license-manager' ), 'error' );
+			return false;
+		}
 		if ( ! $package_id || null === $this->find_package( $plan, $package_id ) ) {
 			wc_add_notice( __( 'Please choose a license type before adding to cart.', 'wp-license-manager' ), 'error' );
 			return false;
