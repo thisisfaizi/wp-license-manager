@@ -241,11 +241,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 - **A draft (or pending, or private) plan product is not for sale.** WPLM made every product with a
   plan purchasable, whatever its status, so a product created as a draft for review could be bought
   through `?add-to-cart=`. WooCommerce's own rule now holds: published, or a user who can edit it.
+- **The database upgrade runs on the first request of any kind** (`init`), not only admin, REST and
+  cron; opening an add-ons subscription runs it first if it has still not run. A storefront order
+  completed right after the update no longer fails to open its add-ons subscription.
 
 ### Deploy
 - **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added
-  automatically on the first admin page load after the update, and existing rows are unchanged. Until
-  then, subscriptions are still created and the add-ons lookups return nothing instead of querying the
+  automatically on the first request after the update, and existing rows are unchanged. Until then,
+  subscriptions are still created and the add-ons lookups return nothing instead of querying the
   missing column.
 - Deploy this before Super Ledger Licensing 1.4.0, which requires WPLM 1.3.0. Plans built at purchase
   (1.2.7) and their orders keep working.

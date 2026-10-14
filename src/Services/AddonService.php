@@ -503,6 +503,13 @@ class AddonService {
 		if ( ! in_array( $cycle, PackageExtrasService::CYCLES, true ) ) {
 			throw new \RuntimeException( 'unknown add-ons billing cycle' );
 		}
+		// The link to the licence lives in a column the 1.3.0 upgrade adds: make sure it has run.
+		if ( ! SubscriptionRepository::has_addons_column() ) {
+			\WPLM\Plugin::get_instance()->maybe_upgrade_db();
+			if ( ! SubscriptionRepository::has_addons_column() ) {
+				throw new \RuntimeException( 'the WP License Manager 1.3.0 database upgrade has not run yet (open any admin page, then retry)' );
+			}
+		}
 		$next  = ( new \DateTimeImmutable( '@' . ( $now ?? time() ) ) )->modify( '+1 ' . $cycle )->format( 'Y-m-d H:i:s' );
 		$token = null;
 		if ( class_exists( '\WC_Payment_Tokens' ) ) {

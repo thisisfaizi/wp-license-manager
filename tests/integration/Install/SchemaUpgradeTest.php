@@ -231,4 +231,33 @@ class SchemaUpgradeTest extends TestCase {
 
 		$wpdb->delete( $p . 'subscriptions', array( 'id' => $sub->id ) );
 	}
+
+	/**
+	 * A storefront order completed before any admin, REST or cron request ran the 1.3.0 upgrade still
+	 * gets its add-ons subscription: the upgrade runs on every request (it is a version check), and
+	 * opening an add-ons subscription runs it first if it has not.
+	 */
+	public function test_an_addons_subscription_opened_before_the_1_3_0_upgrade_runs_it_first(): void {
+		global $wpdb;
+		$this->assertNotFalse( has_action( 'init', array( Plugin::get_instance(), 'maybe_upgrade_db' ) ), 'Every request checks the schema version.' );
+
+		$p = $wpdb->prefix . 'wplm_';
+		$wpdb->query( "ALTER TABLE {$p}subscriptions DROP INDEX addons_license_id, DROP COLUMN addons_license_id" );
+		update_option( 'wplm_db_version', '1.2.2' );
+		$wpdb->query( 'COMMIT' );
+
+		$license     = new \WPLM\Models\License();
+		$license->id = 424242;
+		$order       = new \WC_Order();
+		$order->set_customer_id( 1 );
+		$order->set_currency( 'PKR' );
+		$sub = $this->make( \WPLM\Services\AddonService::class )->create_addons_subscription( $license, $order, 'month' );
+
+		$this->assertSame( '', $wpdb->last_error );
+		$this->assertTrue( $this->has_column( 'subscriptions', 'addons_license_id' ) );
+		$this->assertSame( 424242, $sub->addons_license_id, 'Linked to its licence.' );
+		$this->assertTrue( $sub->is_addons_only() );
+
+		$wpdb->delete( $p . 'subscriptions', array( 'id' => $sub->id ) );
+	}
 }

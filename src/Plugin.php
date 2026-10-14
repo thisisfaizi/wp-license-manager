@@ -442,12 +442,12 @@ final class Plugin {
 		// "unexpected output during activation" warning (plugins_loaded fires
 		// inside the activation request before the activation hook runs).
 		add_action( 'admin_init', array( $this, 'maybe_upgrade_db' ) );
-		// A licence server is mostly REST and cron traffic; an update must not wait for someone
-		// to open wp-admin before its schema exists.
+		// A licence server is mostly REST, cron and storefront traffic; an update must not wait for
+		// someone to open wp-admin before its schema exists (a shop order completed first would
+		// otherwise miss it). Every request checks: one cached option compared with a constant. In the
+		// activation request `init` has already run when this file is loaded, so it never runs there.
 		add_action( 'rest_api_init', array( $this, 'maybe_upgrade_db' ), 1 );
-		if ( wp_doing_cron() ) {
-			add_action( 'init', array( $this, 'maybe_upgrade_db' ), 1 );
-		}
+		add_action( 'init', array( $this, 'maybe_upgrade_db' ), 1 );
 
 		// i18n.
 		add_action( 'init', array( $this, 'load_textdomain' ) );
