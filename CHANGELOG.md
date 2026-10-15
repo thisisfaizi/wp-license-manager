@@ -96,9 +96,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     so every add-on rule still applies (status, trial, overdue, base module, "already has",
     requirements, `wplm_addon_eligibility`).
   - **Checked again at completion, item by item.** An extra whose module the licence now holds for the
-    same term is refused, for example when two orders for the same module were placed before either was
-    completed. The line fails with an order note and nothing is added, so the module is never billed
-    twice. Term items (packs) are exempt: they stack.
+    same term is refused, for example when two orders for the same module were both paid before either
+    was completed (placed before this check, or a gateway that reports a payment on its own). The line
+    fails with an order note and nothing is added, so the module is never added twice. Term items
+    (packs) are exempt: they stack.
+  - **A module a paid order not completed yet adds is held before payment.** Add to cart, checkout
+    and an order paid later refuse extras or a stored add-on whose module a paid order of the customer's
+    (on hold, processing, or completed with its add-ons still to be added) already adds to the licence:
+    "Your paid order #12, not completed yet, already adds Factory to your licence ending ABCD" (for a
+    completed one: "… is still adding …, please contact us"). Both were charged before, and the second
+    was refused at completion for a refund by hand. An order not paid yet holds nothing (the first one
+    paid wins); a line already added, taken back or refunded in full holds nothing. Not counted at
+    completion: there the first order completed adds the module (`AddonService::unfulfilled_addon_modules()`).
   - **The same module twice in one cart** for one licence is refused when added, and again at checkout.
   - **Aligned to the plan as it is at completion.** If the plan renewed between the sale and completion,
     the extras cover through the new day, and an order note tells the shop (no proration is invented).
@@ -265,9 +274,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   an existing licence could no longer be added. Every such line, whatever its billing, is checked as
   fulfilment checks it: the licence still takes add-ons priced like these, it has not since got a
   module they add (another order of the customer's, completed first — before, the stale order was
-  charged in full and then refused at fulfilment), and the add-on checks pass (the licence's status,
-  its plan not overdue). A licence type's line is issued as a new licence whatever licence id an older
-  order left on it, so it is never checked as an add-on. A stored add-on is checked at its quantity. Monthly / yearly add-ons for a
+  charged in full and then refused at fulfilment), no paid order of the customer's not completed yet
+  adds one, and the add-on checks pass (the licence's status, its plan not overdue). A licence type's
+  line is issued as a new licence whatever licence id an older order left on it, so it is never
+  checked as an add-on. A stored add-on is checked at its quantity. Monthly / yearly add-ons for a
   lifetime licence are also refused when they could no longer be added: the licence's add-ons subscription
   now bills the other cycle, a paid order of the customer's will open it on the other cycle, the
   add-ons subscription it was sold against billed and has ended, or the add-ons subscription cannot

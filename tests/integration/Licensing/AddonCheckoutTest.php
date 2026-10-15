@@ -849,4 +849,67 @@ class AddonCheckoutTest extends TestCase {
 	private function notes_of( \WC_Order $order ): string {
 		return implode( "\n", array_map( static fn( $n ) => $n->content, wc_get_order_notes( array( 'order_id' => $order->get_id() ) ) ) );
 	}
+
+	/** A stored add-on order for a licence, not paid yet. */
+	private function addon_order( string $name, array $base ): \WC_Order {
+		$order = wc_create_order( array( 'customer_id' => $base['customer'] ) );
+		$item  = $order->get_item( $order->add_product( $this->addon_product, 1 ) );
+		$item->add_meta_data( '_wplm_package_id', $this->addon( $name )->id, true );
+		$item->add_meta_data( '_wplm_addon_license_id', $base['license_id'], true );
+		$item->save();
+		$order->set_payment_method( 'bacs' );
+		$order->set_billing_email( 'customer' . $base['customer'] . '@example.org' );
+		$order->calculate_totals();
+		$order->save();
+		return $order;
+	}
+
+	public function test_a_stored_addon_is_refused_before_payment_while_a_paid_order_not_completed_yet_adds_it(): void {
+		$base  = $this->customer_with( 'month' );
+		$stale = $this->addon_order( 'FBR monthly', $base );
+		$stale->update_status( 'failed' );
+		$paid = $this->addon_order( 'FBR monthly', $base );
+		$paid->update_status( 'on-hold' ); // A bank transfer awaiting the shop.
+
+		wc_clear_notices();
+		do_action( 'woocommerce_before_pay_action', wc_get_order( $stale->get_id() ) );
+		$notices = wc_get_notices( 'error' );
+		$errors  = new \WP_Error();
+		do_action( 'woocommerce_checkout_validate_order_before_payment', wc_get_order( $stale->get_id() ), $errors );
+		wc_clear_notices();
+
+		$this->assertNotEmpty( $notices, 'Never charged twice for one add-on.' );
+		$this->assertStringContainsString( 'paid order #' . $paid->get_order_number() . ', not completed yet, already adds FBR', (string) ( $notices[0]['notice'] ?? '' ) );
+		$this->assertTrue( $errors->has_errors() );
+
+		// Add to cart, and the checkout's check of the cart.
+		wc_load_cart();
+		WC()->cart->empty_cart();
+		wp_set_current_user( $base['customer'] );
+		$_POST['wplm_target_license_id'] = (string) $base['license_id'];
+		$_POST['wplm_package_id']        = (string) $this->addon( 'FBR monthly' )->id;
+		wc_clear_notices();
+		$this->assertFalse( $this->checkout()->validate_add_to_cart( true, $this->addon_product->get_id(), 1 ) );
+		$_POST['wplm_package_id'] = (string) $this->addon( 'Extra user monthly' )->id;
+		wc_clear_notices();
+		$this->assertTrue( $this->checkout()->validate_add_to_cart( true, $this->addon_product->get_id(), 1 ), 'A limit adds up: never held.' );
+		unset( $_POST['wplm_package_id'], $_POST['wplm_target_license_id'] );
+		$this->assertNotFalse(
+			WC()->cart->add_to_cart(
+				$this->addon_product->get_id(),
+				1,
+				0,
+				array(),
+				array(
+					'wplm_package_id'       => $this->addon( 'FBR monthly' )->id,
+					'wplm_addon_license_id' => $base['license_id'],
+				)
+			)
+		);
+		wc_clear_notices();
+		$this->checkout()->check_cart_addons();
+		$this->assertSame( 1, wc_notice_count( 'error' ), 'The checkout stops.' );
+		WC()->cart->empty_cart();
+		wc_clear_notices();
+	}
 }

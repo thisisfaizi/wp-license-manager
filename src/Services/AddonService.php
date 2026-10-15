@@ -596,8 +596,39 @@ class AddonService {
 	 * @return array{order: \WC_Order, cycle: string}|null The oldest such order and its cycle.
 	 */
 	public function unfulfilled_addons_cycle( License $license, int $skip_order = 0, bool $paid_only = false ): ?array {
+		$unpaid = null;
+		foreach ( $this->unfulfilled_addon_lines( $license, $skip_order, $paid_only ) as $line ) {
+			$snapshot = json_decode( (string) $line['item']->get_meta( '_wplm_extras' ), true );
+			$cycle    = is_array( $snapshot ) ? ( $snapshot['cycle'] ?? null ) : null;
+			if ( ! in_array( $cycle, PackageExtrasService::CYCLES, true ) ) {
+				continue;
+			}
+			$found = array(
+				'order' => $line['order'],
+				'cycle' => $cycle,
+			);
+			if ( $line['paid'] ) {
+				return $found;
+			}
+			$unpaid = $unpaid ?? $found;
+		}
+		return $unpaid;
+	}
+
+	/**
+	 * The add-on lines for a licence that orders of its owner are still to write, oldest order first:
+	 * orders pending payment or failed (unless `$paid_only`), on hold, processing, or completed with
+	 * their add-ons not all added. A line already added, taken back, or refunded in full is not one, nor
+	 * a line fulfilment would not add to the licence ({@see adds_to_licence()}).
+	 *
+	 * @param License $license    The licence.
+	 * @param int     $skip_order An order not to count, 0 for none.
+	 * @param bool    $paid_only  Only orders paid for (or awaiting the shop's confirmation).
+	 * @return array<int, array{order: \WC_Order, item: \WC_Order_Item_Product, paid: bool}>
+	 */
+	private function unfulfilled_addon_lines( License $license, int $skip_order, bool $paid_only ): array {
 		if ( ! function_exists( 'wc_get_orders' ) || (int) $license->user_id <= 0 ) {
-			return null;
+			return array();
 		}
 		$paid   = array( 'on-hold', 'processing', 'completed' );
 		$orders = wc_get_orders(
@@ -610,7 +641,7 @@ class AddonService {
 				'order'       => 'ASC',
 			)
 		);
-		$unpaid = null;
+		$found  = array();
 		foreach ( $orders as $order ) {
 			if ( ! $order instanceof \WC_Order || $order->get_id() === $skip_order
 				|| ( 'completed' === $order->get_status() && '1' === (string) $order->get_meta( '_wplm_plan_fulfilled' ) ) ) {
@@ -619,25 +650,17 @@ class AddonService {
 			foreach ( $order->get_items() as $item ) {
 				if ( ! $item instanceof \WC_Order_Item_Product || (int) $item->get_meta( '_wplm_addon_license_id' ) !== (int) $license->id
 					|| '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $item->get_meta( '_wplm_addon_reverted' )
-					|| self::refunded_in_full( $order, $item ) ) {
+					|| self::refunded_in_full( $order, $item ) || ! $this->adds_to_licence( $item ) ) {
 					continue;
 				}
-				$snapshot = json_decode( (string) $item->get_meta( '_wplm_extras' ), true );
-				$cycle    = is_array( $snapshot ) ? ( $snapshot['cycle'] ?? null ) : null;
-				if ( ! in_array( $cycle, PackageExtrasService::CYCLES, true ) ) {
-					continue;
-				}
-				$found = array(
+				$found[] = array(
 					'order' => $order,
-					'cycle' => $cycle,
+					'item'  => $item,
+					'paid'  => in_array( $order->get_status(), $paid, true ),
 				);
-				if ( in_array( $order->get_status(), $paid, true ) ) {
-					return $found;
-				}
-				$unpaid = $unpaid ?? $found;
 			}
 		}
-		return $unpaid;
+		return $found;
 	}
 
 	/**
@@ -664,6 +687,170 @@ class AddonService {
 		}
 		$plan = $this->plan( $package->plan_id );
 		return null !== $plan && $plan->is_addon();
+	}
+
+	/**
+	 * The modules paid orders of a licence's owner will add to it when completed (or added again, for a
+	 * completed one awaiting a retry): each with the oldest such order. Monthly / yearly extras for a
+	 * lifetime licence join its add-ons subscription; `$addons_subscription = false` leaves them out,
+	 * as a stored add-on's "already has" check does not count that subscription's lines. Term items
+	 * (packs) and dated one-time packs are never counted: they stack.
+	 *
+	 * @param License $license             The licence.
+	 * @param int     $skip_order          An order not to count (the one being paid for now), 0 for none.
+	 * @param bool    $addons_subscription Count modules that join the licence's add-ons subscription.
+	 * @return array<string, \WC_Order> Module code => order.
+	 */
+	public function unfulfilled_addon_modules( License $license, int $skip_order = 0, bool $addons_subscription = true ): array {
+		$modules = array();
+		foreach ( $this->unfulfilled_addon_lines( $license, $skip_order, true ) as $line ) {
+			$item       = $line['item'];
+			$package_id = (int) $item->get_meta( '_wplm_package_id' );
+			if ( $package_id > 0 ) {
+				$package = $this->package( $package_id );
+				$codes   = null !== $package ? self::package_module_codes( $package ) : array();
+			} else {
+				$snapshot = json_decode( (string) $item->get_meta( '_wplm_extras' ), true );
+				$items    = is_array( $snapshot ) && is_array( $snapshot['items'] ?? null ) ? $snapshot['items'] : array();
+				$cycle    = is_array( $snapshot ) ? ( $snapshot['cycle'] ?? null ) : null;
+				$codes    = $addons_subscription || ! in_array( $cycle, PackageExtrasService::CYCLES, true ) ? self::items_module_codes( $items ) : array();
+			}
+			foreach ( $codes as $code ) {
+				$modules[ $code ] = $modules[ $code ] ?? $line['order'];
+			}
+		}
+		return $modules;
+	}
+
+	/**
+	 * Why extras for a licence cannot be sold now: a module they add is already being added by a paid
+	 * order of the customer's not completed yet ({@see unfulfilled_addon_modules()}) — both would be
+	 * charged, and the second refused at fulfilment. Null when none is.
+	 *
+	 * @param License $license    The licence.
+	 * @param array[] $items      The extras (items with `term_days` and `lines`).
+	 * @param int     $skip_order An order not to count (the one being paid for now), 0 for none.
+	 * @return \WP_Error|null
+	 */
+	public function extras_unfulfilled_problem( License $license, array $items, int $skip_order = 0 ): ?\WP_Error {
+		$codes = self::items_module_codes( $items );
+		if ( array() === $codes ) {
+			return null;
+		}
+		$pending = array_intersect_key( $this->unfulfilled_addon_modules( $license, $skip_order ), array_flip( $codes ) );
+		return array() === $pending ? null : $this->unfulfilled_error( $license, $pending );
+	}
+
+	/**
+	 * {@see extras_unfulfilled_problem()} for a stored add-on, as its own "already has" check reads it:
+	 * a package that adds a limit is never refused for its modules, and a module-only one is refused
+	 * when every module it adds is held or being added by a paid order not completed yet.
+	 *
+	 * @param License $license    The licence.
+	 * @param Package $package    The add-on.
+	 * @param int     $skip_order An order not to count (the one being paid for now), 0 for none.
+	 * @return \WP_Error|null
+	 */
+	public function package_unfulfilled_problem( License $license, Package $package, int $skip_order = 0 ): ?\WP_Error {
+		$codes = self::package_module_codes( $package );
+		foreach ( $package->entitlements as $template ) {
+			if ( Entitlement::KIND_MODULE !== ( $template['kind'] ?? '' ) ) {
+				return null;
+			}
+		}
+		if ( array() === $codes ) {
+			return null;
+		}
+		$pending = array_intersect_key( $this->unfulfilled_addon_modules( $license, $skip_order, false ), array_flip( $codes ) );
+		if ( array() === $pending || array() !== array_diff( $codes, array_keys( $pending ), $this->package_held_modules( $license ) ) ) {
+			return null;
+		}
+		return $this->unfulfilled_error( $license, $pending );
+	}
+
+	/**
+	 * The modules a licence holds as a stored add-on's "already has" check reads them: a lifetime line,
+	 * or a line on the subscription that bills the licence.
+	 *
+	 * @param License $license The licence.
+	 * @return string[]
+	 */
+	private function package_held_modules( License $license ): array {
+		$profile = $this->profiles->get( $license->profile );
+		if ( null === $profile ) {
+			return array();
+		}
+		$lines = $this->entitlements->lines( $license->id );
+		$sub   = $this->billing( $license, $profile, $lines )['subscription'] ?? null;
+		$held  = array();
+		foreach ( $lines as $line ) {
+			if ( Entitlement::KIND_MODULE === $line->kind && ( null === $line->paid_through || ( null !== $sub && $line->subscription_id === $sub->id ) ) ) {
+				$held[] = $line->code;
+			}
+		}
+		return array_values( array_unique( $held ) );
+	}
+
+	/**
+	 * "Your paid order #12, not completed yet, already adds Factory to your licence ending ABCD."
+	 *
+	 * @param License                  $license The licence.
+	 * @param array<string, \WC_Order> $pending Module code => the order adding it.
+	 * @return \WP_Error
+	 */
+	private function unfulfilled_error( License $license, array $pending ): \WP_Error {
+		$order   = reset( $pending );
+		$codes   = array_keys( array_filter( $pending, static fn( $o ) => $o->get_id() === $order->get_id() ) );
+		$profile = $this->profiles->get( $license->profile );
+		$names   = implode( ', ', null !== $profile ? array_map( array( $profile, 'code_label' ), $codes ) : $codes );
+		$message = 'completed' === $order->get_status()
+			/* translators: 1: order number, 2: module names, 3: licence label (licence ending ABCD) */
+			? __( 'Your order #%1$s is still adding %2$s to your %3$s. Please contact us.', 'wp-license-manager' )
+			/* translators: 1: order number, 2: module names, 3: licence label (licence ending ABCD) */
+			: __( 'Your paid order #%1$s, not completed yet, already adds %2$s to your %3$s.', 'wp-license-manager' );
+		return $this->error( 'addons_unfulfilled', sprintf( $message, $order->get_order_number(), $names, self::licence_label( $license ) ) );
+	}
+
+	/**
+	 * The modules extras add for the plan's term: module lines of every item that is not a term item
+	 * (a pack, which stacks).
+	 *
+	 * @param array[] $items Extras items (`term_days`, `lines`).
+	 * @return string[]
+	 */
+	private static function items_module_codes( array $items ): array {
+		$codes = array();
+		foreach ( $items as $extra ) {
+			if ( ! is_array( $extra ) || ( isset( $extra['term_days'] ) && null !== $extra['term_days'] ) ) {
+				continue;
+			}
+			foreach ( (array) ( $extra['lines'] ?? array() ) as $line ) {
+				if ( is_array( $line ) && Entitlement::KIND_MODULE === ( $line['kind'] ?? '' ) ) {
+					$codes[] = (string) $line['code'];
+				}
+			}
+		}
+		return array_values( array_unique( $codes ) );
+	}
+
+	/**
+	 * The modules a stored add-on adds for the licence's term; none for a dated one-time pack (it
+	 * stacks).
+	 *
+	 * @param Package $package The add-on.
+	 * @return string[]
+	 */
+	private static function package_module_codes( Package $package ): array {
+		if ( Package::TYPE_ONETIME === $package->billing_type && (int) $package->valid_for_days > 0 ) {
+			return array();
+		}
+		$codes = array();
+		foreach ( $package->entitlements as $template ) {
+			if ( Entitlement::KIND_MODULE === ( $template['kind'] ?? '' ) ) {
+				$codes[] = (string) $template['code'];
+			}
+		}
+		return array_values( array_unique( $codes ) );
 	}
 
 	/**
@@ -701,9 +888,10 @@ class AddonService {
 	 * checkout) must not be paid now: add-ons on it for an existing licence that could no longer be
 	 * added when it is completed. Every such line is checked as fulfilment will check it
 	 * ({@see line_payment_problem()}): the licence still takes them, it has not since got a module they
-	 * add (another order), and the add-on checks pass. A licence type's line is issued as a new licence,
-	 * so it is not checked, whatever licence id it carries ({@see adds_to_licence()}). Monthly / yearly
-	 * add-ons for a lifetime licence
+	 * add (another order), no paid order of the customer's not completed yet adds one
+	 * ({@see unfulfilled_addon_modules()}), and the add-on checks pass. A licence type's line is issued
+	 * as a new licence, so it is not checked, whatever licence id it carries ({@see adds_to_licence()}).
+	 * Monthly / yearly add-ons for a lifetime licence
 	 * must also still fit its add-ons: not billed on the other cycle now (its add-ons subscription's,
 	 * or a paid order's that will open it), not on another subscription than the one they were sold
 	 * against, and one that can take them ({@see addons_join_problem()}). Checked before payment, as
@@ -784,7 +972,11 @@ class AddonService {
 					return __( 'The add-on bought is no longer sold.', 'wp-license-manager' );
 				}
 				$ok = $this->check_for_user( (int) $order->get_customer_id(), $license, $package, (int) $item->get_quantity() );
-				return is_wp_error( $ok ) ? $ok->get_error_message() : null;
+				if ( is_wp_error( $ok ) ) {
+					return $ok->get_error_message();
+				}
+				$pending = $this->package_unfulfilled_problem( $license, $package, $order->get_id() );
+				return null !== $pending ? $pending->get_error_message() : null;
 			}
 			$json = (string) $item->get_meta( '_wplm_extras' );
 			if ( '' === $json ) {
@@ -1559,6 +1751,12 @@ class AddonService {
 		$ok = $this->check_for_user( (int) $order->get_customer_id(), $license, $this->extras_package( $plan, $ctx['billing'], $snapshot['items'] ), 1, $now );
 		if ( is_wp_error( $ok ) ) {
 			throw new \RuntimeException( $ok->get_error_message() );
+		}
+		// Before payment only: at fulfilment the first order completed adds the module, and the other is
+		// refused by the "already has" check above. Counted here, two paid orders would refuse each other.
+		$pending = $before_payment ? $this->extras_unfulfilled_problem( $license, $snapshot['items'], $order->get_id() ) : null;
+		if ( null !== $pending ) {
+			throw new \RuntimeException( $pending->get_error_message() );
 		}
 		$billing = $this->billing( $license, $ctx['profile'], $this->entitlements->lines( $license->id ) );
 		$sub     = 'recurring' === $billing['type'] ? $billing['subscription'] : null;

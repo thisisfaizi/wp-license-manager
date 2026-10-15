@@ -947,7 +947,12 @@ class PlanCheckout {
 		if ( null === $license || null === $pkg ) {
 			return new \WP_Error( 'wplm_addon_no_licence', __( 'Choose which of your licences to add this to.', 'wp-license-manager' ) );
 		}
-		return $this->addons()->check_for_user( $user_id, $license, $pkg, $qty );
+		$ok = $this->addons()->check_for_user( $user_id, $license, $pkg, $qty );
+		if ( is_wp_error( $ok ) ) {
+			return $ok;
+		}
+		// A paid order not completed yet already adds its modules: both would be charged.
+		return $this->addons()->package_unfulfilled_problem( $license, $pkg ) ?? true;
 	}
 
 	/**
@@ -1332,6 +1337,11 @@ class PlanCheckout {
 			// Monthly / yearly add-ons join the licence's add-ons subscription: refused now, before
 			// payment, when they could not be added (or would never renew).
 			$problem = null !== $chosen['cycle'] ? $this->addons()->addons_join_problem( $license ) : null;
+			if ( null !== $problem ) {
+				return $problem;
+			}
+			// A paid order not completed yet already adds one of its modules: both would be charged.
+			$problem = $this->addons()->extras_unfulfilled_problem( $license, $chosen['items'] );
 			if ( null !== $problem ) {
 				return $problem;
 			}

@@ -1486,6 +1486,15 @@ class PackageExtrasTest extends TestCase {
 
 		$this->assertSame( array(), $this->factory_lines( $base['license_id'] ) );
 		$this->assertStringContainsString( 'no longer billed on subscription #999999', $this->notes( $order['order'] ) );
+		// Until the shop refunds that line, it still holds Factory: a new order for it is refused.
+		wp_set_current_user( $base['customer'] );
+		$factory = array(
+			'wplm_extras'            => array( 'module:factory' => '1' ),
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		$this->assertFalse( $this->validate( $factory, $product ) );
+		$this->assertStringContainsString( 'is still adding Factory', $this->first_error() );
+		$this->refund_line( wc_get_order( $order['order']->get_id() ), $order['item'] );
 
 		$overdue = $this->add_to_licence( $product, $base, array( 'module:factory' => '1' ), false );
 		global $wpdb;
@@ -3762,8 +3771,142 @@ class PackageExtrasTest extends TestCase {
 	}
 
 	// ---------------------------------------------------------------------------------------------
-	// Final review, round 5 (2026-10-15)
+	// Final review, round 5 (2026-10-15): a paid order not completed yet holds its modules before
+	// payment; a licence type's stray licence id never blocks payment
 	// ---------------------------------------------------------------------------------------------
+
+	public function test_an_order_paid_later_is_refused_while_a_paid_order_not_completed_yet_adds_its_monthly_module(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$fbr     = array(
+			'wplm_extras'            => array( 'module:fbr' => '1' ),
+			'wplm_extras_cycle'      => 'month',
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		$first   = $this->buy_through_cart( $product, $fbr, $base['customer'], false );
+		wc_get_order( $first['order']->get_id() )->update_status( 'failed' );
+		$second = $this->buy_through_cart( $product, $fbr, $base['customer'], false );
+		$this->assertSame( '', $this->pay_later( $first['order'] )[0], 'An unpaid order holds nothing: the first one paid wins.' );
+		wc_get_order( $second['order']->get_id() )->update_status( 'on-hold' ); // A bank transfer awaiting the shop.
+
+		list( $page, $errors ) = $this->pay_later( $first['order'] );
+
+		$this->assertStringContainsString( 'paid order #' . $second['order']->get_order_number() . ', not completed yet, already adds FBR', $page, 'Never charged twice for one module.' );
+		$this->assertStringContainsString( 'order #' . $first['order']->get_order_number() . ' adds add-ons', $page );
+		$this->assertTrue( $errors->has_errors(), 'The block checkout\'s order-pay too.' );
+
+		// The shop refunds that order's line in full: the first order is payable again.
+		$this->refund_line( wc_get_order( $second['order']->get_id() ), $second['item'] );
+		$this->assertSame( '', $this->pay_later( $first['order'] )[0] );
+	}
+
+	public function test_an_order_paid_later_is_refused_while_a_paid_order_not_completed_yet_adds_its_lifetime_module(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$factory = array(
+			'wplm_extras'            => array( 'module:factory' => '1' ),
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		$first   = $this->buy_through_cart( $product, $factory, $base['customer'], false );
+		wc_get_order( $first['order']->get_id() )->update_status( 'failed' );
+		$second = $this->buy_through_cart( $product, $factory, $base['customer'], false );
+		wc_get_order( $second['order']->get_id() )->update_status( 'processing' );
+
+		list( $page, $errors ) = $this->pay_later( $first['order'] );
+
+		$this->assertStringContainsString( 'already adds Factory', $page );
+		$this->assertTrue( $errors->has_errors() );
+
+		// Completed, and its write failed (awaiting a retry): it still holds Factory.
+		$this->break_next = true;
+		wc_get_order( $second['order']->get_id() )->update_status( 'completed' );
+		$this->assertSame( '', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertCount( 0, $this->addon_lines( $base['license_id'], 'factory' ) );
+		list( $page, $errors ) = $this->pay_later( $first['order'] );
+		$this->assertStringContainsString( 'order #' . $second['order']->get_order_number() . ' is still adding Factory', $page );
+		$this->assertTrue( $errors->has_errors() );
+
+		// One that adds something else is paid as usual.
+		$user = $this->buy_through_cart(
+			$product,
+			array(
+				'wplm_extras'            => array( 'user' => '1' ),
+				'wplm_target_license_id' => (string) $base['license_id'],
+			),
+			$base['customer'],
+			false
+		);
+		list( $page, $errors ) = $this->pay_later( $user['order'] );
+		$this->assertSame( '', $page );
+		$this->assertFalse( $errors->has_errors() );
+	}
+
+	public function test_add_to_cart_and_checkout_refuse_a_module_a_paid_order_not_completed_yet_adds(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$factory = array(
+			'wplm_extras'            => array( 'module:factory' => '1' ),
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		$first   = $this->buy_through_cart( $product, $factory, $base['customer'], false );
+		wp_set_current_user( $base['customer'] );
+		$this->assertTrue( $this->validate( $factory, $product ), 'Unpaid, it holds nothing.' );
+
+		// In the cart before the first order is paid; checkout then stops.
+		foreach ( $factory as $field => $value ) {
+			$_POST[ $field ] = $value;
+		}
+		$this->assertNotFalse( WC()->cart->add_to_cart( $product->get_id(), 1 ) );
+		foreach ( array_keys( $factory ) as $field ) {
+			unset( $_POST[ $field ] );
+		}
+		wc_get_order( $first['order']->get_id() )->update_status( 'on-hold' );
+		wc_clear_notices();
+		$this->checkout()->check_cart_extras();
+		$this->assertStringContainsString( 'paid order #' . $first['order']->get_order_number() . ', not completed yet, already adds Factory', $this->first_error() );
+		WC()->cart->empty_cart();
+
+		$this->assertFalse( $this->validate( $factory, $product ), 'Never charged twice for one module.' );
+		$this->assertStringContainsString( 'already adds Factory', $this->first_error() );
+		$this->assertTrue(
+			$this->validate(
+				array(
+					'wplm_extras'            => array( 'user' => '1' ),
+					'wplm_target_license_id' => (string) $base['license_id'],
+				),
+				$product
+			),
+			'A limit adds up: never held.'
+		);
+		wc_clear_notices();
+
+		// Completed: the licence has it.
+		wc_get_order( $first['order']->get_id() )->update_status( 'completed' );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'factory' ) );
+		$this->assertFalse( $this->validate( $factory, $product ) );
+	}
+
+	public function test_two_paid_orders_for_one_module_still_add_it_once_at_completion(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$factory = array(
+			'wplm_extras'            => array( 'module:factory' => '1' ),
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		// Both paid before this check existed (or a gateway that reports payment on its own).
+		$first  = $this->buy_through_cart( $product, $factory, $base['customer'], false );
+		$second = $this->buy_through_cart( $product, $factory, $base['customer'], false );
+		wc_get_order( $first['order']->get_id() )->update_status( 'on-hold' );
+		wc_get_order( $second['order']->get_id() )->update_status( 'on-hold' );
+
+		wc_get_order( $first['order']->get_id() )->update_status( 'completed' );
+		wc_get_order( $second['order']->get_id() )->update_status( 'completed' );
+
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'factory' ), 'The first completed adds it: they never refuse each other.' );
+		$this->assertSame( '1', (string) wc_get_order( $first['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertSame( '', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertStringContainsString( 'already has Factory', $this->notes( wc_get_order( $second['order']->get_id() ) ) );
+	}
 
 	/** An unpaid order with a licence type's line carrying a licence id, as orders before 1.3.0 could. */
 	private function licence_type_order_with_a_licence_id( int $customer, int $license_id ): \WC_Order {
