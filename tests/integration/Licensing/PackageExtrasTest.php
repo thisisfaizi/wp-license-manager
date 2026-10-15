@@ -3689,4 +3689,27 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( 'nothing can be added to it', $page );
 		$this->assertTrue( $errors->has_errors() );
 	}
+
+	public function test_refunding_both_orders_on_an_unbilled_addons_subscription_ends_it(): void {
+		list( $first, $second, $opened, $base ) = $this->second_order_cut_off_on_an_unbilled_addons_subscription();
+		wc_get_order( $first['order']->get_id() )->update_status( 'refunded' );
+		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'], 'B\'s line is on it: it stays open.' );
+
+		wc_get_order( $second['order']->get_id() )->update_status( 'refunded' );
+
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'], 'Nothing on it, never billed: it ends.' );
+		$licence = $this->make( \WPLM\Repositories\LicenseRepository::class )->find_by_id( $base['license_id'] );
+		$this->assertNull( $this->make( AddonService::class )->addons_cycle( $licence ), 'The customer chooses the cycle again.' );
+		$yearly = $this->buy_through_cart(
+			wc_get_product( $second['item']->get_product_id() ),
+			array(
+				'wplm_extras'            => array( 'seat-plan' => '1' ),
+				'wplm_extras_cycle'      => 'year',
+				'wplm_target_license_id' => (string) $base['license_id'],
+			),
+			$base['customer'],
+			false
+		);
+		$this->assertSame( 'year', json_decode( (string) $yearly['item']->get_meta( '_wplm_extras' ), true )['cycle'] );
+	}
 }

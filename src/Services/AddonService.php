@@ -2005,6 +2005,7 @@ class AddonService {
 			'issued' => false,
 			'added'  => false,
 		);
+		$on_subs = array(); // Subscriptions the removed lines were on.
 
 		foreach ( $order->get_items() as $item ) {
 			if ( ! $item instanceof \WC_Order_Item_Product ) {
@@ -2020,7 +2021,8 @@ class AddonService {
 				$line = $this->lines->find_by_id( (int) $id );
 				// Only add-on lines: one a plan switch moved into the plan (source plan) stays.
 				if ( null !== $line && 'addon' === $line->source && $this->entitlements->delete_line( $line->id ) ) {
-					$issued += 'issued' === $kind ? 1 : 0;
+					$on_subs[] = (int) $line->subscription_id;
+					$issued   += 'issued' === $kind ? 1 : 0;
 					$added  += 'added' === $kind ? 1 : 0;
 				}
 			}
@@ -2046,6 +2048,7 @@ class AddonService {
 			$license = $this->licenses->find_by_id( $line->license_id );
 			$kind    = null !== $license && $order->get_id() === $license->order_id ? 'issued' : 'added';
 			if ( $this->entitlements->delete_line( $line->id ) ) {
+				$on_subs[]        = (int) $line->subscription_id;
 				$issued          += 'issued' === $kind ? 1 : 0;
 				$added           += 'added' === $kind ? 1 : 0;
 				$touched[ $kind ] = true;
@@ -2053,17 +2056,21 @@ class AddonService {
 		}
 
 		// An add-ons subscription the order opened but never billed (its add-ons were never written)
-		// ends with the order: a later purchase must not join it with its old dates. Never one that holds
-		// lines: another order sold against it wrote them (its request cut off before their item was
-		// attached), and they are paid for and renew on it.
+		// ends with the order: a later purchase must not join it with its old dates. So does one never
+		// billed that this order's removed lines were on (it joined one another order opened, which was
+		// refunded first): left pending with nothing on it, it would decide the licence's cycle for good.
+		// Never one that holds lines: another order sold against it wrote them (its request cut off
+		// before their item was attached), and they are paid for and renew on it.
 		foreach ( $order->get_items() as $item ) {
-			if ( ! $item instanceof \WC_Order_Item_Product ) {
-				continue;
+			if ( $item instanceof \WC_Order_Item_Product ) {
+				$on_subs[] = (int) $item->get_meta( '_wplm_addons_subscription_id' );
 			}
-			$opened = $this->subscriptions->find_by_id( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
-			if ( null !== $opened && $opened->is_addons_only() && 'pending' === $opened->status && array() === $this->subscriptions->get_items( $opened->id )
-				&& array() === $this->lines->get_by_subscription( $opened->id ) ) {
-				$this->subscription_service()->cancel( $opened->id );
+		}
+		foreach ( array_unique( array_filter( $on_subs ) ) as $sub_id ) {
+			$unbilled = $this->subscriptions->find_by_id( $sub_id );
+			if ( null !== $unbilled && $unbilled->is_addons_only() && 'pending' === $unbilled->status && array() === $this->subscriptions->get_items( $unbilled->id )
+				&& array() === $this->lines->get_by_subscription( $unbilled->id ) ) {
+				$this->subscription_service()->cancel( $unbilled->id );
 			}
 		}
 
