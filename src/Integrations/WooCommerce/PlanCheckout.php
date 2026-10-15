@@ -1983,8 +1983,10 @@ class PlanCheckout {
 		// written.
 		$addons         = null;
 		$addons_through = null;
+		$joined         = false;
 		if ( null !== ( $snapshot['cycle'] ?? null ) ) {
 			$addons         = $this->licence_addons_subscription( $order, $item, $license, (string) $snapshot['cycle'] );
+			$joined         = 'pending' !== $addons->status; // Already billing: its period did not start now.
 			$addons         = $this->addons()->open_addons_period( $addons );
 			$addons_through = $this->addons()->addons_paid_through( $addons );
 		}
@@ -2008,6 +2010,16 @@ class PlanCheckout {
 			}
 		}
 		$this->addons()->apply_extras( $order, $item, $license, $snapshot['items'], $sub, $through, null, $addons, $addons_through );
+		if ( $joined ) {
+			$order->add_order_note(
+				sprintf(
+					/* translators: 1: subscription id, 2: paid-through day */
+					__( 'WPLM: these add-ons joined the licence\'s add-ons subscription #%1$d, which was already billing: they are paid through %2$s and renew with it. They were paid for a full period: refund the difference by hand if that was not intended.', 'wp-license-manager' ),
+					$addons->id,
+					(string) $addons_through
+				)
+			);
+		}
 	}
 
 	/**

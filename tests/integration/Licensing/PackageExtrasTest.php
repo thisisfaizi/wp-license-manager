@@ -4163,4 +4163,33 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( array(), $this->items( $other->id ) );
 		$this->assertStringContainsString( 'billed on subscription #' . $other->id . ' every year', $this->notes( wc_get_order( $first['order']->get_id() ) ) );
 	}
+	public function test_a_new_purchase_whose_recurring_extras_await_a_retry_holds_their_cycle(): void {
+		$first = $this->new_purchase_awaiting_its_extras( 'Lifetime', array(), 'month' );
+		$this->make( SubscriptionRepository::class )->update( $first['addons'], array( 'status' => 'cancelled' ) );
+		$license = $this->make( LicenseRepository::class )->find_by_id( $first['license_id'] );
+		$addons  = $this->make( AddonService::class );
+
+		$pending = $addons->unfulfilled_addons_cycle( $license );
+		$this->assertSame( 'month', $pending['cycle'] ?? null, 'Its cycle is the licence\'s until it is added.' );
+		$this->assertSame( $first['order']->get_id(), $pending['order']->get_id() );
+		$this->assertSame( 'month', $addons->offered_cycle( $license ) );
+	}
+
+	public function test_a_retry_that_joins_an_add_ons_subscription_already_billing_says_so(): void {
+		$first = $this->new_purchase_awaiting_its_extras( 'Lifetime', array(), 'month' );
+		$subs  = $this->make( SubscriptionRepository::class );
+		$subs->update( $first['addons'], array( 'status' => 'cancelled' ) );
+		$license = $this->make( LicenseRepository::class )->find_by_id( $first['license_id'] );
+		$other   = $this->make( AddonService::class )->create_addons_subscription( $license, wc_get_order( $first['order']->get_id() ), 'month', time() - 25 * DAY_IN_SECONDS );
+		$subs->update( $other->id, array( 'status' => 'active' ) );
+		$through = $this->make( AddonService::class )->addons_paid_through( $subs->find_by_id( $other->id ) );
+
+		$this->complete_again( $first['order'] );
+
+		$fbr = $this->addon_lines( $first['license_id'], 'fbr' );
+		$this->assertCount( 1, $fbr );
+		$this->assertSame( $other->id, (int) $fbr[0]->subscription_id );
+		$this->assertSame( $through, $fbr[0]->paid_through, 'Billing is left as it is.' );
+		$this->assertStringContainsString( 'joined the licence\'s add-ons subscription #' . $other->id . ', which was already billing: they are paid through ' . $through, $this->notes( wc_get_order( $first['order']->get_id() ) ) );
+	}
 }
