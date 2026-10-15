@@ -346,22 +346,14 @@ class SelfServiceRenewal {
 	// Private helpers
 	// -------------------------------------------------------------------------
 
+	/** Mark a renewal order (shared with the card path: {@see RenewalProcessor::stamp_renewal_order()}). */
 	private function stamp_renewal( \WC_Order $order, Subscription $sub ): void {
-		$order->update_meta_data( '_wplm_is_renewal', '1' );
-		$order->update_meta_data( '_wplm_subscription_id', (string) $sub->id );
-		$order->update_meta_data( '_wplm_renewal_term_days', (string) $this->term_days( $sub ) );
-		$order->update_meta_data( '_wplm_renewal_cycle', $this->cycle_key( $sub ) );
+		$this->renewals->stamp_renewal_order( $order, $sub );
 	}
 
-	/** The paid-through date (UTC) that identifies the cycle being renewed. */
+	/** The paid-through date (UTC) that identifies the cycle being renewed ({@see RenewalProcessor::cycle_key()}). */
 	private function cycle_key( Subscription $sub ): string {
-		if ( null !== $sub->license_id ) {
-			$license = $this->license_service->get_by_id( $sub->license_id );
-			if ( null !== $license && null !== $license->expires_at ) {
-				return (string) $license->expires_at;
-			}
-		}
-		return (string) ( $sub->next_payment ?? gmdate( 'Y-m-d H:i:s' ) );
+		return $this->renewals->cycle_key( $sub );
 	}
 
 	/**
@@ -476,16 +468,5 @@ class SelfServiceRenewal {
 		}
 
 		return 0;
-	}
-
-	/** Approximate billing term in days, stored as order meta for display only. */
-	private function term_days( Subscription $sub ): int {
-		$map = array(
-			'day'   => 1,
-			'week'  => 7,
-			'month' => 30,
-			'year'  => 365,
-		);
-		return (int) $sub->billing_interval * ( $map[ $sub->billing_period ] ?? 30 );
 	}
 }

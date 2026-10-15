@@ -181,6 +181,15 @@ class RenewalProcessor {
 		 */
 		$order_id = (int) apply_filters( 'wplm_create_renewal_order', 0, $sub );
 
+		// Marked as a renewal the way an invoice is, so completing it again after a refund applies it
+		// again. Marked applied in the same save: a completed status saved with it never applies it twice.
+		$order = $order_id > 0 ? wc_get_order( $order_id ) : null;
+		if ( $order instanceof \WC_Order ) {
+			$this->stamp_renewal_order( $order, $sub );
+			$order->update_meta_data( '_wplm_renewal_applied', '1' );
+			$order->save();
+		}
+
 		$renewal = $this->apply_payment( $sub, $order_id > 0 ? $order_id : null, $sub->recurring_total, (string) ( $result['txn'] ?? '' ) );
 
 		/**
@@ -300,6 +309,61 @@ class RenewalProcessor {
 		$renewal->status          = 'success';
 
 		return $renewal;
+	}
+
+	// -------------------------------------------------------------------------
+	// Renewal orders
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Mark an order as carrying a renewal of a subscription — a renewal invoice, a "Renew now" order or
+	 * the order a card charge is recorded on: `_wplm_is_renewal`, `_wplm_subscription_id`,
+	 * `_wplm_renewal_term_days` and `_wplm_renewal_cycle` (the cycle it renews, read before anything
+	 * moves). Completing such an order applies its payment once ({@see
+	 * \WPLM\Integrations\WooCommerce\SelfServiceRenewal::handle_completed_order()}). The caller saves.
+	 *
+	 * @param \WC_Order     $order The order.
+	 * @param Subscription $sub   The subscription it renews.
+	 * @return void
+	 */
+	public function stamp_renewal_order( \WC_Order $order, Subscription $sub ): void {
+		$order->update_meta_data( '_wplm_is_renewal', '1' );
+		$order->update_meta_data( '_wplm_subscription_id', (string) $sub->id );
+		$order->update_meta_data( '_wplm_renewal_term_days', (string) $this->term_days( $sub ) );
+		$order->update_meta_data( '_wplm_renewal_cycle', $this->cycle_key( $sub ) );
+	}
+
+	/**
+	 * The paid-through date (UTC) that identifies the cycle being renewed: a classic licence's expiry,
+	 * else the subscription's next payment.
+	 *
+	 * @param Subscription $sub The subscription.
+	 * @return string UTC datetime.
+	 */
+	public function cycle_key( Subscription $sub ): string {
+		if ( null !== $sub->license_id ) {
+			$license = $this->license_service->get_by_id( $sub->license_id );
+			if ( null !== $license && null !== $license->expires_at ) {
+				return (string) $license->expires_at;
+			}
+		}
+		return (string) ( $sub->next_payment ?? gmdate( 'Y-m-d H:i:s' ) );
+	}
+
+	/**
+	 * Approximate billing term in days, stored as order meta for display only.
+	 *
+	 * @param Subscription $sub The subscription.
+	 * @return int
+	 */
+	public function term_days( Subscription $sub ): int {
+		$map = array(
+			'day'   => 1,
+			'week'  => 7,
+			'month' => 30,
+			'year'  => 365,
+		);
+		return (int) $sub->billing_interval * ( $map[ $sub->billing_period ] ?? 30 );
 	}
 
 	// -------------------------------------------------------------------------

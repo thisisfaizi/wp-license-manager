@@ -943,7 +943,7 @@ class RenewalRollbackTest extends TestCase {
 		$e0 = $this->utc( -MINUTE_IN_SECONDS );
 		$this->set_row( 'subscriptions', $bought['subscription_id'], array( 'payment_token_id' => $token->get_id(), 'next_payment' => $e0 ) );
 		$this->set_row( 'licenses', $bought['license_id'], array( 'expires_at' => $e0 ) );
-		// A gateway module builds the order the charge is recorded on (no `_wplm_is_renewal`).
+		// A gateway module builds the order the charge is recorded on; WPLM marks it as a renewal.
 		$created = 0;
 		add_filter(
 			'wplm_create_renewal_order',
@@ -961,7 +961,10 @@ class RenewalRollbackTest extends TestCase {
 
 		$this->assertGreaterThan( 0, $created );
 		$order = wc_get_order( $created );
-		$this->assertSame( '', (string) $order->get_meta( '_wplm_is_renewal' ) );
+		$this->assertSame( '1', (string) $order->get_meta( '_wplm_is_renewal' ), 'Marked as a renewal, like an invoice.' );
+		$this->assertSame( (string) $bought['subscription_id'], (string) $order->get_meta( '_wplm_subscription_id' ) );
+		$this->assertSame( '30', (string) $order->get_meta( '_wplm_renewal_term_days' ) );
+		$this->assertSame( $e0, (string) $order->get_meta( '_wplm_renewal_cycle' ), 'The cycle it renewed, read before anything moved.' );
 		$this->assertSame( '1', (string) $order->get_meta( '_wplm_renewal_applied' ), 'The card path stamps its order too.' );
 		$e1 = gmdate( 'Y-m-d H:i:s', strtotime( $e0 . ' UTC +1 month' ) );
 		$this->assertSame( $e1, $this->license_row( $bought['license_id'] )['expires_at'] );
@@ -1182,5 +1185,89 @@ class RenewalRollbackTest extends TestCase {
 
 		$this->assertSame( 'active', $this->subscription_row( $sub_id )['status'], 'Paid again: active again.' );
 		$this->assertSame( $this->all( $from, $this->next_month( $p0 ) ), $this->through( $sub_id ), 'Extended once.' );
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Card (cron) renewal orders carry the renewal flags
+	// ---------------------------------------------------------------------------------------------
+
+	/** A classic licence on a stored card, due now, charged once by the cron; returns its order id. */
+	private function card_renewed( array &$bought, array &$created, bool $pending = false ): int {
+		$bought = $this->buy_classic();
+		if ( $pending ) {
+			$customer = (int) $this->subscription_row( $bought['subscription_id'] )['user_id'];
+			add_filter(
+				'wplm_create_renewal_order',
+				static function ( $id ) use ( $customer, &$created ) {
+					unset( $id );
+					$order = wc_create_order( array( 'customer_id' => $customer ) );
+					$order->set_total( 1000 );
+					$order->save();
+					$created[] = $order->get_id();
+					return $order->get_id();
+				},
+				5
+			);
+		}
+		$this->card_due( $bought, $created );
+		$e0 = $this->utc( -MINUTE_IN_SECONDS );
+		$this->set_row( 'subscriptions', $bought['subscription_id'], array( 'next_payment' => $e0 ) );
+		$this->set_row( 'licenses', $bought['license_id'], array( 'expires_at' => $e0 ) );
+		$bought['e0'] = $e0;
+		do_action( 'wplm_process_renewals' );
+		$this->assertCount( 1, $this->charges );
+		return (int) end( $created );
+	}
+
+	public function test_a_refunded_card_renewal_completed_again_extends_exactly_once(): void {
+		$bought   = array();
+		$created  = array();
+		$order_id = $this->card_renewed( $bought, $created );
+		$e1       = gmdate( 'Y-m-d H:i:s', strtotime( $bought['e0'] . ' UTC +1 month' ) );
+		$this->assertSame( $e1, $this->license_row( $bought['license_id'] )['expires_at'] );
+		$order = $this->refund( wc_get_order( $order_id ) );
+		$this->assertSame( $bought['e0'], $this->license_row( $bought['license_id'] )['expires_at'] );
+		$this->assertSame( 'on-hold', $this->subscription_row( $bought['subscription_id'] )['status'] );
+
+		$order->update_status( 'completed' );
+		do_action( 'woocommerce_order_status_completed', $order_id, wc_get_order( $order_id ) ); // Re-saved: never twice.
+
+		$this->assertSame( $e1, $this->license_row( $bought['license_id'] )['expires_at'], 'Extended again, exactly once.' );
+		$this->assertSame( $e1, $this->subscription_row( $bought['subscription_id'] )['next_payment'] );
+		$this->assertSame( 'active', $this->subscription_row( $bought['subscription_id'] )['status'] );
+		$this->assertSame( '1', (string) wc_get_order( $order_id )->get_meta( '_wplm_renewal_applied' ) );
+		$this->assertCount( 1, $this->charges, 'Completing it charges nothing.' );
+	}
+
+	public function test_a_card_renewal_order_completed_again_without_a_refund_extends_once(): void {
+		$bought   = array();
+		$created  = array();
+		$order_id = $this->card_renewed( $bought, $created, true );
+		$e1       = gmdate( 'Y-m-d H:i:s', strtotime( $bought['e0'] . ' UTC +1 month' ) );
+		$this->assertSame( $e1, $this->license_row( $bought['license_id'] )['expires_at'] );
+
+		// The gateway confirms the payment later, and an admin re-saves the order.
+		wc_get_order( $order_id )->update_status( 'completed' );
+		do_action( 'woocommerce_order_status_completed', $order_id, wc_get_order( $order_id ) );
+
+		$this->assertSame( $e1, $this->license_row( $bought['license_id'] )['expires_at'], 'Applied once, by the charge.' );
+		$this->assertSame( $e1, $this->subscription_row( $bought['subscription_id'] )['next_payment'] );
+	}
+
+	public function test_a_card_renewal_order_made_before_the_renewal_flags_still_rolls_back(): void {
+		$bought   = array();
+		$created  = array();
+		$order_id = $this->card_renewed( $bought, $created );
+		$order    = wc_get_order( $order_id );
+		foreach ( array( '_wplm_is_renewal', '_wplm_subscription_id', '_wplm_renewal_term_days', '_wplm_renewal_cycle' ) as $key ) {
+			$order->delete_meta_data( $key );
+		}
+		$order->save();
+
+		$order = $this->refund( $order );
+
+		$this->assertSame( $bought['e0'], $this->license_row( $bought['license_id'] )['expires_at'], 'Rolled back from its snapshot, as before.' );
+		$this->assertCount( 1, $this->rolled );
+		$this->assertSame( '', (string) $order->get_meta( '_wplm_is_renewal' ), 'Left as it is.' );
 	}
 }
