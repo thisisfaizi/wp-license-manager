@@ -10,6 +10,7 @@
 namespace WPLM\Tests\Integration\Licensing;
 
 use WPLM\Admin\LicenceAdminActions;
+use WPLM\Integrations\WooCommerce\AddonSettlement;
 use WPLM\Integrations\WooCommerce\PlanCheckout;
 use WPLM\Integrations\WooCommerce\SelfServiceRenewal;
 use WPLM\Licensing\ProfileRegistry;
@@ -911,5 +912,32 @@ class AddonCheckoutTest extends TestCase {
 		$this->assertSame( 1, wc_notice_count( 'error' ), 'The checkout stops.' );
 		WC()->cart->empty_cart();
 		wc_clear_notices();
+	}
+
+	public function test_a_stored_addon_refused_for_good_is_marked_settled_and_holds_nothing(): void {
+		$base  = $this->customer_with( 'month' );
+		$stale = $this->addon_order( 'FBR monthly', $base );
+		$stale->update_status( 'processing' ); // Paid; its FBR is held for it.
+		$this->buy_addon( $this->addon( 'FBR monthly' ), $base['customer'], $base['license_id'] ); // FBR added by another order since.
+		$total = $this->total( $base['subscription_id'] );
+		wc_get_order( $stale->get_id() )->update_status( 'completed' );
+
+		$stale   = wc_get_order( $stale->get_id() );
+		$refusal = implode( "\n", array_filter( explode( "\n", $this->notes_of( $stale ) ), static fn( $n ) => false !== strpos( $n, 'already has FBR' ) ) );
+		$this->assertStringContainsString( 'A retry cannot add it: refund this line, or use Mark add-ons settled.', $refusal );
+		$this->assertStringNotContainsString( 'Completed again', $refusal, 'A retry never cures "already has".' );
+		$this->assertSame( '', (string) $stale->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertArrayHasKey( 'fbr', $this->service()->unfulfilled_addon_modules( $base['license'] ) );
+
+		$admin  = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$result = ( new AddonSettlement( $this->service() ) )->settle( $stale->get_id(), array( $this->the_item( $stale )->get_id() ), $admin, 'Credited on the next invoice' );
+
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$stale = wc_get_order( $stale->get_id() );
+		$this->assertSame( '1', (string) $stale->get_meta( '_wplm_plan_fulfilled' ), 'Its only line is done.' );
+		$this->assertSame( array(), $this->service()->unfulfilled_addon_modules( $base['license'] ), 'FBR is no longer held.' );
+		$this->assertCount( 1, array_filter( $this->lines( $base['license_id'] ), static fn( $l ) => 'fbr' === $l->code ), 'Nothing written.' );
+		$this->assertSame( $total, $this->total( $base['subscription_id'] ), 'Nothing billed.' );
+		$this->assertStringContainsString( 'marked settled by', $this->notes_of( $stale ) );
 	}
 }

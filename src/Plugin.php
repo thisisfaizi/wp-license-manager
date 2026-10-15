@@ -548,6 +548,11 @@ final class Plugin {
 			$this->container->make( Services\AddonService::class )
 		) )->register();
 
+		// "Mark add-ons settled" on the order screen: closes add-on lines fulfilment refused for good.
+		( new Integrations\WooCommerce\AddonSettlement(
+			$this->container->make( Services\AddonService::class )
+		) )->register();
+
 		// Customer self-service renewal: create order → pay → license extended on completed.
 		$this->container->make( Integrations\WooCommerce\SelfServiceRenewal::class )->register();
 	}

@@ -51,6 +51,7 @@ Client software (desktop apps, plugins, SaaS) calls the REST API to enforce lice
 * Licensing tab on any product: assign a subscription plan, or enable simple one-time licensing.
 * Auto-issue and deliver keys on order completion; resend on demand.
 * Customer "My Account" portal for keys, devices, and subscriptions.
+* Mark add-ons settled: on the order screen, close an add-on line that could not be added (the licence already has it, its add-ons subscription ended) once you have dealt with the customer. Nothing is added, billed or refunded; the line stops holding its modules and is never added later.
 
 = REST API & developer tools =
 
@@ -96,6 +97,10 @@ Each license payload is signed with Ed25519. The public key is exposed at `GET /
 The signing private key, encryption key, and HMAC secrets are stored as non-autoloaded options (or as `wp-config.php` constants if you prefer). Only the Ed25519 public key is ever exposed.
 
 == Changelog ==
+
+= 1.3.0 =
+* New: package extras at purchase and for an existing licence (see CHANGELOG.md for the full list).
+* New: Mark add-ons settled on the WooCommerce order screen (posts storage and HPOS) for add-on lines refused at fulfilment; refusal notes a retry cannot cure now say to refund the line or mark it settled instead of completing the order again.
 
 = 1.0.8 =
 * Fixed: device deactivation failed with a database error ("Unknown column 'deactivated_at'") because the `wplm_machines` table was missing that column — devices could not be deactivated and clients received a corrupted response. The column is now part of the schema and is added automatically to existing installs on upgrade.

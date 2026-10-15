@@ -495,7 +495,7 @@ class AddonService {
 		}
 		return sprintf(
 			/* translators: 1: licence label, 2: module names */
-			__( '%1$s already has %2$s (added since this order was placed, e.g. by another order). Nothing was added; refund the add-ons\' part of this line by hand (the licence stays as it is)', 'wp-license-manager' ),
+			__( '%1$s already has %2$s (added since this order was placed, e.g. by another order). Nothing was added, and the licence stays as it is', 'wp-license-manager' ),
 			ucfirst( self::licence_label( $license ) ),
 			implode( ', ', array_map( array( $profile, 'code_label' ), array_values( array_unique( $held ) ) ) )
 		);
@@ -695,7 +695,7 @@ class AddonService {
 			}
 			foreach ( $order->get_items() as $item ) {
 				if ( ! $item instanceof \WC_Order_Item_Product || '' !== (string) $item->get_meta( '_wplm_entitlement_ids' )
-					|| '1' === (string) $item->get_meta( '_wplm_addon_reverted' ) ) {
+					|| self::released( $item ) ) {
 					continue;
 				}
 				$extras = $this->licence_bought_with_extras( $item, $license );
@@ -982,7 +982,7 @@ class AddonService {
 		$cannot = __( 'They could not be added now, so this order cannot be paid: cancel it, and place a new order if you still want them.', 'wp-license-manager' );
 		foreach ( $order->get_items() as $item ) {
 			if ( ! $item instanceof \WC_Order_Item_Product || (int) $item->get_meta( '_wplm_addon_license_id' ) <= 0
-				|| '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $item->get_meta( '_wplm_addon_reverted' )
+				|| '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || self::released( $item )
 				|| self::refunded_in_full( $order, $item ) || ! $this->adds_to_licence( $item ) ) {
 				continue;
 			}
@@ -1347,10 +1347,10 @@ class AddonService {
 			if ( $sub->is_addons_only() && in_array( $sub->status, array( 'cancelled', 'expired' ), true ) ) {
 				// Recorded there, they would lapse at their paid-through day and never renew.
 				\WPLM\Support\Logger::error( sprintf( 'AddonService: order %d left add-on lines %s on licence %d unrecorded, on add-ons subscription %d, which has ended; nothing was changed.', $order->get_id(), implode( ', ', $left ), $license->id, $sub->id ) );
-				throw new \RuntimeException(
+				throw new AddonRefusal(
 					sprintf(
 						/* translators: 1: line ids, 2: licence label, 3: subscription id */
-						__( 'an earlier attempt added lines #%1$s to %2$s and was cut off before recording them. They are on add-ons subscription #%3$d, which has ended, so they would never renew. Nothing was changed and nothing was added; the lines stay on the licence until the day they are paid through. To have this line added and billed on the licence\'s add-ons subscription, remove those lines on the licence screen', 'wp-license-manager' ),
+						__( 'an earlier attempt added lines #%1$s to %2$s and was cut off before recording them. They are on add-ons subscription #%3$d, which has ended, so they would never renew. Nothing was changed and nothing was added; the lines stay on the licence until the day they are paid through', 'wp-license-manager' ),
 						implode( ', #', $left ),
 						self::licence_label( $license ),
 						$sub->id
@@ -1471,7 +1471,7 @@ class AddonService {
 			$theirs = false;
 			foreach ( $order->get_items() as $other ) {
 				if ( ! $other instanceof \WC_Order_Item_Product || $other->get_id() === $item->get_id()
-					|| '' !== (string) $other->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $other->get_meta( '_wplm_addon_reverted' )
+					|| '' !== (string) $other->get_meta( '_wplm_entitlement_ids' ) || self::released( $other )
 					|| self::refunded_in_full( $order, $other ) ) {
 					continue; // A line refunded in full is never added: nothing left over is its.
 				}
@@ -1489,10 +1489,10 @@ class AddonService {
 			}
 		}
 		\WPLM\Support\Logger::error( sprintf( 'AddonService: order %d left add-on lines %s on licence %d unrecorded, and they are not exactly what its line adds; nothing was changed.', $order->get_id(), implode( ', ', $left ), $license->id ) );
-		return new \RuntimeException(
+		return new AddonRefusal(
 			sprintf(
 				/* translators: 1: line ids, 2: licence label */
-				__( 'an earlier attempt was cut off part-way: it left add-on lines #%1$s on %2$s without recording them, and they are not all this line adds. Nothing was changed and nothing was added; those lines stay on the licence until someone removes them. To finish, remove those lines on the licence screen and set the order to Completed again: the whole line is then added', 'wp-license-manager' ),
+				__( 'an earlier attempt was cut off part-way: it left add-on lines #%1$s on %2$s without recording them, and they are not all this line adds. Nothing was changed and nothing was added; those lines stay on the licence until someone removes them on the licence screen', 'wp-license-manager' ),
 				implode( ', #', $left ),
 				self::licence_label( $license )
 			)
@@ -1812,13 +1812,13 @@ class AddonService {
 				}
 			}
 			if ( array() !== $held ) {
-				throw new \RuntimeException(
+				throw new AddonRefusal(
 					sprintf(
 						$before_payment
 							/* translators: 1: licence label, 2: module names */
 							? __( '%1$s already has %2$s (added since this order was placed, e.g. by another order)', 'wp-license-manager' )
 							/* translators: 1: licence label, 2: module names */
-							: __( '%1$s already has %2$s (added since this order was placed, e.g. by another order). Nothing was added; refund this line or remove it from the order', 'wp-license-manager' ),
+							: __( '%1$s already has %2$s (added since this order was placed, e.g. by another order). Nothing was added', 'wp-license-manager' ),
 						ucfirst( self::licence_label( $license ) ),
 						implode( ', ', array_unique( $held ) )
 					)
@@ -1827,7 +1827,7 @@ class AddonService {
 		}
 		$ok = $this->check_for_user( (int) $order->get_customer_id(), $license, $this->extras_package( $plan, $ctx['billing'], $snapshot['items'] ), 1, $now );
 		if ( is_wp_error( $ok ) ) {
-			throw new \RuntimeException( $ok->get_error_message() );
+			throw self::refusal( $ok );
 		}
 		// Before payment only: at fulfilment the first order completed adds the module, and the other is
 		// refused by the "already has" check above. Counted here, two paid orders would refuse each other.
@@ -1841,7 +1841,7 @@ class AddonService {
 
 		$sold_sub = $snapshot['target_subscription_id'] ?? null;
 		if ( null !== $sold_sub && ( null === $sub || (int) $sold_sub !== (int) $sub->id ) ) {
-			throw new \RuntimeException(
+			throw new AddonRefusal(
 				sprintf(
 					$before_payment
 						/* translators: %d: subscription id */
@@ -1876,7 +1876,7 @@ class AddonService {
 				// held no dates to align with: these were priced a full cycle, as with none at all.
 				$gone = $this->ended_unbilled( (int) $sold );
 				if ( ! $gone ) {
-					throw new \RuntimeException(
+					throw new AddonRefusal(
 						/* translators: %d: subscription id */
 						sprintf( __( 'the licence\'s add-ons are no longer billed on subscription #%d, which these add-ons were sold against. Nothing was added', 'wp-license-manager' ), (int) $sold )
 					);
@@ -1897,7 +1897,7 @@ class AddonService {
 		}
 		$addons = $this->open_addons_period( $addons, $now );
 		if ( $cycle !== $addons->billing_period || 1 !== (int) $addons->billing_interval ) {
-			throw new \RuntimeException(
+			throw new AddonRefusal(
 				/* translators: 1: subscription id, 2: cycle */
 				sprintf( __( 'the licence\'s add-ons are billed on subscription #%1$d every %2$s; these were priced otherwise. Nothing was added', 'wp-license-manager' ), $addons->id, $addons->billing_period )
 			);
@@ -2007,7 +2007,7 @@ class AddonService {
 
 		$ok = $this->check_for_user( (int) $order->get_customer_id(), $license, $package, (int) $item->get_quantity(), $now );
 		if ( is_wp_error( $ok ) ) {
-			throw new \RuntimeException( $ok->get_error_message() );
+			throw self::refusal( $ok );
 		}
 
 		$profile = $this->profiles->get( $license->profile );
@@ -2844,5 +2844,109 @@ class AddonService {
 	/** A refusal with a customer-facing message. */
 	private function error( string $code, string $message ): \WP_Error {
 		return new \WP_Error( 'wplm_addon_' . $code, $message );
+	}
+
+	/**
+	 * The exception fulfilment throws for an add-on check that failed: an {@see AddonRefusal} when the
+	 * licence already has what the line adds (no retry cures that), else a plain one (a retry may).
+	 *
+	 * @param \WP_Error $error The failed check.
+	 * @return \RuntimeException
+	 */
+	private static function refusal( \WP_Error $error ): \RuntimeException {
+		return 'wplm_addon_already_has' === $error->get_error_code()
+			? new AddonRefusal( $error->get_error_message() )
+			: new \RuntimeException( $error->get_error_message() );
+	}
+
+	// -------------------------------------------------------------------------
+	// Settled by the shop
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Whether an order line's add-ons were taken back, so they are never added and hold nothing: WPLM
+	 * reverted them (the order was refunded, `_wplm_addon_reverted`), or the shop marked them settled
+	 * (`_wplm_addon_settled`, {@see \WPLM\Integrations\WooCommerce\AddonSettlement}). A line refunded in
+	 * full is checked separately ({@see refunded_in_full()}).
+	 *
+	 * @param \WC_Order_Item $item The order line.
+	 * @return bool
+	 */
+	public static function released( \WC_Order_Item $item ): bool {
+		return '1' === (string) $item->get_meta( '_wplm_addon_reverted' ) || self::settled( $item );
+	}
+
+	/**
+	 * Whether the shop marked an order line's add-ons settled (`_wplm_addon_settled`).
+	 *
+	 * @param \WC_Order_Item $item The order line.
+	 * @return bool
+	 */
+	public static function settled( \WC_Order_Item $item ): bool {
+		$meta = $item->get_meta( '_wplm_addon_settled' );
+		return is_string( $meta ) ? '' !== $meta : ! empty( $meta );
+	}
+
+	/**
+	 * Whether the shop may mark an order line's add-ons settled: its order is completed, and its add-ons
+	 * are still to be added — not added, taken back, or refunded in full — on a line that adds to a
+	 * licence: package extras or a stored add-on for a licence the customer already has
+	 * ({@see adds_to_licence()}), or the extras of a licence bought with them, once that licence is
+	 * issued (only the extras are settled: a licence still to be issued never is).
+	 *
+	 * @param \WC_Order     $order The order.
+	 * @param \WC_Order_Item $item  Its line.
+	 * @return bool
+	 */
+	public function settleable( \WC_Order $order, \WC_Order_Item $item ): bool {
+		if ( ! $item instanceof \WC_Order_Item_Product || 'completed' !== $order->get_status()
+			|| '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || self::released( $item )
+			|| self::refunded_in_full( $order, $item ) || '' !== (string) $item->get_meta( '_wplm_dynamic_package' ) ) {
+			return false;
+		}
+		if ( $this->adds_to_licence( $item ) ) {
+			return (int) $item->get_meta( '_wplm_addon_license_id' ) > 0;
+		}
+		$ids = json_decode( (string) $item->get_meta( '_wplm_license_ids' ), true );
+		return '' !== (string) $item->get_meta( '_wplm_extras' ) && is_array( $ids ) && array() !== $ids;
+	}
+
+	/**
+	 * Whether fulfilment has nothing left to do for any line of an order, read as
+	 * {@see \WPLM\Integrations\WooCommerce\PlanCheckout::fulfill_order()} reads each line, without writing
+	 * anything: a package built at purchase with its licence issued; package extras for an existing
+	 * licence, or a stored add-on, added or taken back (reverted, settled, refunded in full); a licence
+	 * type with its licence issued and, bought with extras, those added or taken back. A line that is not
+	 * a WPLM package is not fulfilment's. A stored package that no longer exists is never done.
+	 *
+	 * @param \WC_Order $order The order.
+	 * @return bool
+	 */
+	public function order_lines_done( \WC_Order $order ): bool {
+		foreach ( $order->get_items() as $item ) {
+			if ( ! $item instanceof \WC_Order_Item_Product ) {
+				continue;
+			}
+			$issued     = '' !== (string) $item->get_meta( '_wplm_license_ids' );
+			$added      = '' !== (string) $item->get_meta( '_wplm_entitlement_ids' );
+			$extras     = (string) $item->get_meta( '_wplm_extras' );
+			$taken_back = $added || self::released( $item ) || self::refunded_in_full( $order, $item );
+			if ( '' !== (string) $item->get_meta( '_wplm_dynamic_package' ) ) {
+				$done = $issued;
+			} elseif ( (int) $item->get_meta( '_wplm_package_id' ) <= 0 ) {
+				$done = '' === $extras || $taken_back;
+			} elseif ( null === $this->package( (int) $item->get_meta( '_wplm_package_id' ) ) ) {
+				$done = '' === $extras ? ( $issued || $added ) : ( $issued && $taken_back );
+				$done = $done || ( ! $issued && self::released( $item ) );
+			} elseif ( $this->adds_to_licence( $item ) ) {
+				$done = $taken_back;
+			} else {
+				$done = '' === $extras ? ( $issued || $added ) : ( $issued && $taken_back );
+			}
+			if ( ! $done ) {
+				return false;
+			}
+		}
+		return true;
 	}
 }

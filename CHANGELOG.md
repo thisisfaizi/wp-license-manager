@@ -182,6 +182,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   order with extras gets a note saying so. To take an extra back, remove its line on the licence screen;
   its billing goes with it. A full refund works as described under "Changed".
 
+- **Mark add-ons settled** (the WooCommerce order screen, posts storage and HPOS alike). An add-on line
+  refused at fulfilment for good used to stay open forever: the order was never marked fulfilled, the
+  line kept holding its modules and its monthly / yearly cycle against the customer's next purchase
+  ("Your order #N is still adding …, please contact us"), and a partial refund did not release it. Now:
+  - a line whose add-ons are still to be added on a **completed** order (package extras or a stored
+    add-on for a licence the customer already had, or the extras of a licence bought with them once
+    that licence is issued) gets a **Mark add-ons settled** tick in the order's items, and the order a
+    **Mark add-ons settled** order action with an optional note. Needs `manage_woocommerce` and the
+    form's nonce.
+  - Settling stamps the line `_wplm_addon_settled` (JSON: `by` user id, `at` UTC, `note`) and adds an
+    order note ("add-ons on line "X" marked settled by Y: note"). It writes no line, changes no
+    subscription and moves no money.
+  - A settled line holds nothing anywhere (product page, add to cart, checkout, order-pay, the Store
+    API) and is never added later, however often the order is completed again: it reads as taken back,
+    exactly like a refunded one (`AddonService::released()`). Once every line of the order is done, the
+    order is marked fulfilled (`_wplm_plan_fulfilled`).
+  - Settling twice changes nothing and adds no second note. It claims the order's fulfilment lock, so
+    it never races a completion.
+
 ### Changed
 - `AddonService::apply()` now writes through one private line writer, shared with the new
   `AddonService::apply_extras()` and `AddonService::apply_extras_to_licence()`. If it fails part-way,
@@ -222,8 +241,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   that are another line's of the order (still to be recorded, same licence) — exactly what it adds, or
   the first of its lines and not the first of this line's — are left to that line, which deals with
   them in its turn. Lines from an attempt cut off part-way through writing a line are left as they are
-  and that line is refused with a note naming them, for the owner (remove them, complete again: the
-  whole line is written); its sibling lines are written as usual, and none is written twice. Every path: new licence with extras,
+  and that line is refused with a note naming them, for the owner (refund the line or mark its add-ons
+  settled; nothing is removed); its sibling lines are written as usual, and none is written twice. Every path: new licence with extras,
   extras for an existing licence, stored add-ons (`AddonService::adopt_unstamped()`).
 - **An add-ons subscription's first period starts when its add-ons are written**, not when it was
   opened: a pending one that bills nothing yet gets next payment = now + 1 cycle before its lines are
@@ -320,6 +339,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   checked when the page opens (they share one radio group), and a licence's default is checked when it
   is shown. The add-ons product with nothing chosen says "Choose an add-on…", not "choose a license
   type".
+
+- **Refusal notes no longer tell the shop to retry what a retry cannot cure.** When the licence already
+  has a module the line adds, the subscription the add-ons were sold against no longer bills them, they
+  were priced on another cycle than the licence's add-ons are now billed, or an earlier attempt left
+  lines on the licence for the owner, fulfilment throws `WPLM\Services\AddonRefusal` and the order note
+  ends "A retry cannot add them: refund this line, or use Mark add-ons settled." (for a new licence's
+  extras: "refund the add-ons' part of this line"), never "set the order to Completed again". Refusals a
+  retry can cure (another order adding to the licence right now, a failed write, a paused or overdue
+  add-ons subscription) still say to complete the order again.
 
 ### Deploy
 - **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added

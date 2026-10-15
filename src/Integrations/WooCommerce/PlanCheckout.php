@@ -14,6 +14,7 @@ use WPLM\Models\License;
 use WPLM\Models\Package;
 use WPLM\Models\Plan;
 use WPLM\Models\Subscription;
+use WPLM\Services\AddonRefusal;
 use WPLM\Services\AddonService;
 use WPLM\Services\EntitlementService;
 use WPLM\Services\GeneratorService;
@@ -1782,7 +1783,7 @@ class PlanCheckout {
 				continue;
 			}
 			$licence_done = '' !== (string) $item->get_meta( '_wplm_license_ids' );
-			$extras_done  = '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $item->get_meta( '_wplm_addon_reverted' )
+			$extras_done  = '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || AddonService::released( $item )
 				|| ( '' !== $extras && AddonService::refunded_in_full( $order, $item ) );
 			if ( '' === $extras ) {
 				// Already issued (or added) on an earlier attempt: never issue a second licence.
@@ -1791,6 +1792,9 @@ class PlanCheckout {
 				}
 			} elseif ( $licence_done && $extras_done ) {
 				continue; // The licence and its extras: both done on an earlier attempt.
+			}
+			if ( ! $licence_done && AddonService::released( $item ) ) {
+				continue; // An add-on line taken back (refunded, or settled by the shop): never added, even if its add-on is gone.
 			}
 			$pkg = $this->lookup_package( $package_id );
 			if ( null === $pkg ) {
@@ -1823,8 +1827,11 @@ class PlanCheckout {
 					\WPLM\Support\Logger::error( 'PlanCheckout: add-on failed for package ' . $package_id . ' — ' . $e->getMessage() );
 					$order->add_order_note(
 						sprintf(
-							/* translators: 1: add-on name, 2: error message */
-							__( 'WPLM: the add-on "%1$s" could not be added — %2$s. Fix the cause, then set the order to Completed again to retry.', 'wp-license-manager' ),
+							$e instanceof AddonRefusal
+								/* translators: 1: add-on name, 2: error message */
+								? __( 'WPLM: the add-on "%1$s" could not be added — %2$s. A retry cannot add it: refund this line, or use Mark add-ons settled.', 'wp-license-manager' )
+								/* translators: 1: add-on name, 2: error message */
+								: __( 'WPLM: the add-on "%1$s" could not be added — %2$s. Fix the cause, then set the order to Completed again to retry.', 'wp-license-manager' ),
 							$pkg->name,
 							$e->getMessage()
 						)
@@ -1944,8 +1951,11 @@ class PlanCheckout {
 			\WPLM\Support\Logger::error( 'PlanCheckout: add-ons failed for package ' . $pkg->id . ' (order item ' . $item->get_id() . ') — ' . $e->getMessage() );
 			$order->add_order_note(
 				sprintf(
-					/* translators: 1: package name, 2: error message */
-					__( 'WPLM: the licence for "%1$s" was issued, but its add-ons could not be added — %2$s. Fix the cause, then set the order to Completed again: only the add-ons are added, no second key is issued.', 'wp-license-manager' ),
+					$e instanceof AddonRefusal
+						/* translators: 1: package name, 2: error message */
+						? __( 'WPLM: the licence for "%1$s" was issued, but its add-ons could not be added — %2$s. A retry cannot add them: refund the add-ons\' part of this line, or use Mark add-ons settled.', 'wp-license-manager' )
+						/* translators: 1: package name, 2: error message */
+						: __( 'WPLM: the licence for "%1$s" was issued, but its add-ons could not be added — %2$s. Fix the cause, then set the order to Completed again: only the add-ons are added, no second key is issued.', 'wp-license-manager' ),
 					$pkg->name,
 					$e->getMessage()
 				)
@@ -1974,7 +1984,7 @@ class PlanCheckout {
 		}
 		$held = $this->addons()->new_licence_extras_problem( $license, $snapshot['items'] );
 		if ( null !== $held ) {
-			throw new \RuntimeException( $held );
+			throw new AddonRefusal( $held );
 		}
 
 		// Recurring add-ons on a lifetime licence (v2): one add-ons-only subscription, created once
@@ -2043,7 +2053,7 @@ class PlanCheckout {
 		$addons = $this->addons()->addons_subscription( $license );
 		if ( null !== $addons ) {
 			if ( $cycle !== $addons->billing_period || 1 !== (int) $addons->billing_interval ) {
-				throw new \RuntimeException(
+				throw new AddonRefusal(
 					/* translators: 1: subscription id, 2: cycle */
 					sprintf( __( 'the licence\'s add-ons are billed on subscription #%1$d every %2$s; these were priced otherwise. Nothing was added', 'wp-license-manager' ), $addons->id, $addons->billing_period )
 				);
@@ -2094,8 +2104,11 @@ class PlanCheckout {
 			\WPLM\Support\Logger::error( 'PlanCheckout: add-ons failed for order item ' . $item->get_id() . ' — ' . $e->getMessage() );
 			$order->add_order_note(
 				sprintf(
-					/* translators: 1: what was bought, 2: error message */
-					__( 'WPLM: the add-ons "%1$s" could not be added — %2$s. Fix the cause, then set the order to Completed again to retry.', 'wp-license-manager' ),
+					$e instanceof AddonRefusal
+						/* translators: 1: what was bought, 2: error message */
+						? __( 'WPLM: the add-ons "%1$s" could not be added — %2$s. A retry cannot add them: refund this line, or use Mark add-ons settled.', 'wp-license-manager' )
+						/* translators: 1: what was bought, 2: error message */
+						: __( 'WPLM: the add-ons "%1$s" could not be added — %2$s. Fix the cause, then set the order to Completed again to retry.', 'wp-license-manager' ),
 					(string) $item->get_meta( __( 'Add-ons', 'wp-license-manager' ) ),
 					$e->getMessage()
 				)
@@ -2106,7 +2119,8 @@ class PlanCheckout {
 
 	/**
 	 * Whether an add-on line was taken back, so fulfilment adds nothing for it and counts it done: WPLM
-	 * reverted it (the order was refunded), or the shop refunded the line in full
+	 * reverted it (the order was refunded), the shop marked its add-ons settled
+	 * ({@see AddonSettlement}), or the shop refunded the line in full
 	 * ({@see AddonService::refunded_in_full()}) — the add-ons were never paid for. Never opens an add-ons
 	 * subscription for it. A refunded line passed over is noted on the order.
 	 *
@@ -2116,7 +2130,7 @@ class PlanCheckout {
 	 * @return bool
 	 */
 	private function taken_back( \WC_Order $order, $item, string $what ): bool {
-		if ( '1' === (string) $item->get_meta( '_wplm_addon_reverted' ) ) {
+		if ( $item instanceof \WC_Order_Item && AddonService::released( $item ) ) {
 			return true;
 		}
 		if ( ! $item instanceof \WC_Order_Item_Product || ! AddonService::refunded_in_full( $order, $item ) ) {
