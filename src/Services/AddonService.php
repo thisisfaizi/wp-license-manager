@@ -2361,6 +2361,24 @@ class AddonService {
 		}
 	}
 
+	/**
+	 * After an order is cancelled (or trashed): an add-ons subscription a line of it opened and never
+	 * added to ({@see end_unbilled_addons_subscription()}: never billed, nothing on it) ends with it, as it
+	 * would with a refund. Left pending, it would decide the licence's add-ons cycle for good, and a later
+	 * purchase would join it. Nothing the order added is taken back: a cancelled order is not a refund.
+	 *
+	 * @param \WC_Order $order The order.
+	 * @return void
+	 */
+	public function end_abandoned_addons_subscriptions( \WC_Order $order ): void {
+		foreach ( $order->get_items() as $item ) {
+			if ( $item instanceof \WC_Order_Item_Product && (int) $item->get_meta( '_wplm_addons_subscription_id' ) > 0
+				&& '' === (string) $item->get_meta( '_wplm_entitlement_ids' ) ) {
+				$this->end_unbilled_addons_subscription( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
+			}
+		}
+	}
+
 	// -------------------------------------------------------------------------
 	// Billing
 	// -------------------------------------------------------------------------

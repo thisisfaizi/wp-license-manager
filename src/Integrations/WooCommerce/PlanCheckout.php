@@ -168,6 +168,10 @@ class PlanCheckout {
 
 		// A partial refund changes no licence line: say so on an order with extras.
 		add_action( 'woocommerce_order_partially_refunded', array( $this, 'note_partial_refund' ), 10, 2 );
+		// A cancelled or trashed order ends an add-ons subscription it opened and never billed.
+		add_action( 'woocommerce_order_status_cancelled', array( $this, 'end_abandoned_addons' ), 10, 1 );
+		add_action( 'woocommerce_trash_order', array( $this, 'end_abandoned_addons' ), 10, 1 );
+		add_action( 'wp_trash_post', array( $this, 'end_trashed_order_addons' ), 10, 1 ); // The orders list, posts storage.
 	}
 
 	// -------------------------------------------------------------------------
@@ -2102,6 +2106,34 @@ class PlanCheckout {
 				$order->add_order_note( __( 'WPLM: partial refund — the licence and its add-on lines are unchanged. If an add-on should go, remove its line on the licence screen (its billing goes with it).', 'wp-license-manager' ) );
 				return;
 			}
+		}
+	}
+
+	/**
+	 * `woocommerce_order_status_cancelled` and `woocommerce_trash_order`: an add-ons subscription the
+	 * order opened and never billed ends ({@see AddonService::end_abandoned_addons_subscriptions()}).
+	 * Nothing the order added is taken back.
+	 *
+	 * @param int $order_id Order id.
+	 * @return void
+	 */
+	public function end_abandoned_addons( $order_id ): void {
+		$order = wc_get_order( (int) $order_id );
+		if ( $order instanceof \WC_Order ) {
+			$this->addons()->end_abandoned_addons_subscriptions( $order );
+		}
+	}
+
+	/**
+	 * `wp_trash_post`: an order trashed from the orders list on posts storage, which never fires
+	 * `woocommerce_trash_order` ({@see end_abandoned_addons()}).
+	 *
+	 * @param int $post_id Post id.
+	 * @return void
+	 */
+	public function end_trashed_order_addons( $post_id ): void {
+		if ( 'shop_order' === get_post_type( (int) $post_id ) ) {
+			$this->end_abandoned_addons( (int) $post_id );
 		}
 	}
 

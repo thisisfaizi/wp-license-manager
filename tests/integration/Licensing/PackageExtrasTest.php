@@ -3772,7 +3772,8 @@ class PackageExtrasTest extends TestCase {
 
 	// ---------------------------------------------------------------------------------------------
 	// Final review, round 5 (2026-10-15): a paid order not completed yet holds its modules before
-	// payment; a licence type's stray licence id never blocks payment
+	// payment; a cancelled order ends its unbilled add-ons subscription; a licence type's stray licence
+	// id never blocks payment
 	// ---------------------------------------------------------------------------------------------
 
 	public function test_an_order_paid_later_is_refused_while_a_paid_order_not_completed_yet_adds_its_monthly_module(): void {
@@ -3906,6 +3907,90 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( '1', (string) wc_get_order( $first['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
 		$this->assertSame( '', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
 		$this->assertStringContainsString( 'already has Factory', $this->notes( wc_get_order( $second['order']->get_id() ) ) );
+	}
+
+	public function test_cancelling_an_order_whose_addons_were_never_written_ends_its_unbilled_addons_subscription(): void {
+		$this->add_seat_plan_offer();
+		$product          = $this->addon_product();
+		$base             = $this->customer_with( 'Lifetime' );
+		$this->break_next = true;
+		$first            = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$opened           = (int) \WC_Order_Factory::get_order_item( $first['item']->get_id() )->get_meta( '_wplm_addons_subscription_id' );
+		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'] );
+
+		wc_get_order( $first['order']->get_id() )->update_status( 'cancelled' );
+
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'], 'Never billed, nothing on it: it ends with the order.' );
+		$licence = $this->make( LicenseRepository::class )->find_by_id( $base['license_id'] );
+		$this->assertNull( $this->make( AddonService::class )->addons_cycle( $licence ), 'The customer chooses the cycle again.' );
+		$this->assertNull( $this->make( AddonService::class )->offered_cycle( $licence ) );
+		$yearly = $this->buy_through_cart(
+			$product,
+			array(
+				'wplm_extras'            => array( 'seat-plan' => '1' ),
+				'wplm_extras_cycle'      => 'year',
+				'wplm_target_license_id' => (string) $base['license_id'],
+			),
+			$base['customer']
+		);
+		$this->assertSame( 'year', json_decode( (string) $yearly['item']->get_meta( '_wplm_extras' ), true )['cycle'] );
+		$addons = $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] );
+		$this->assertNotSame( $opened, $addons->id );
+		$this->assertSame( 'year', $addons->billing_period );
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'], 'Cancelled, never deleted.' );
+	}
+
+	public function test_trashing_an_order_whose_addons_were_never_written_ends_its_unbilled_addons_subscription(): void {
+		$product          = $this->addon_product();
+		$base             = $this->customer_with( 'Lifetime' );
+		$this->break_next = true;
+		$first            = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$opened           = (int) \WC_Order_Factory::get_order_item( $first['item']->get_id() )->get_meta( '_wplm_addons_subscription_id' );
+		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'] );
+
+		wc_get_order( $first['order']->get_id() )->delete( false );
+
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'] );
+	}
+
+	public function test_trashing_an_order_from_the_orders_list_on_posts_storage_ends_its_unbilled_addons_subscription(): void {
+		if ( \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled() ) {
+			$this->markTestSkipped( 'Posts storage only: the orders list trashes the post.' );
+		}
+		$product          = $this->addon_product();
+		$base             = $this->customer_with( 'Lifetime' );
+		$this->break_next = true;
+		$first            = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$opened           = (int) \WC_Order_Factory::get_order_item( $first['item']->get_id() )->get_meta( '_wplm_addons_subscription_id' );
+		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'] );
+
+		wp_trash_post( $first['order']->get_id() );
+
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'] );
+	}
+
+	public function test_cancelling_the_order_that_opened_an_addons_subscription_never_ends_it_while_another_orders_lines_are_on_it(): void {
+		list( $first, $second, $opened, $base ) = $this->second_order_cut_off_on_an_unbilled_addons_subscription();
+
+		wc_get_order( $first['order']->get_id() )->update_status( 'cancelled' );
+
+		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'], 'B\'s paid line is on it: it stays open.' );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'seats' ), 'Nothing removed.' );
+		$this->complete_again( $second['order'] );
+		$this->assertSame( 'active', $this->subscription_row( $opened )['status'] );
+	}
+
+	public function test_cancelling_an_order_whose_addons_were_added_changes_nothing(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$first   = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$addons  = $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] );
+		$this->assertSame( 'active', $addons->status );
+
+		wc_get_order( $first['order']->get_id() )->update_status( 'cancelled' );
+
+		$this->assertSame( 'active', $this->subscription_row( $addons->id )['status'] );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'fbr' ), 'A cancelled order is not a refund: nothing is taken back.' );
 	}
 
 	/** An unpaid order with a licence type's line carrying a licence id, as orders before 1.3.0 could. */

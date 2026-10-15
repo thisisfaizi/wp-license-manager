@@ -236,7 +236,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   it; refunding that order too then cancels it once nothing is on it (it is cancelled whichever order
   is refunded last), so a never-billed add-ons subscription no longer fixes the licence's cycle for
   good. The same holds when the shop refunds in full only the line that opened it, not yet added (a
-  partial refund: the order stays completed). A retry never records add-on lines on an add-ons subscription that has ended (cancelled or
+  partial refund: the order stays completed), and when the shop sets the order to Cancelled or trashes
+  it (`woocommerce_order_status_cancelled`, `woocommerce_trash_order`, and `wp_trash_post` for the
+  orders list on posts storage): a cancelled order takes nothing
+  back from the licence, it only ends that never-billed subscription
+  (`AddonService::end_abandoned_addons_subscriptions()`). Cancelled, never deleted. A retry never records add-on lines on an add-ons subscription that has ended (cancelled or
   expired): they would never renew, so the line is refused with a note for the owner and nothing is
   changed. Another order sold against it while it was pending is no longer
   stranded: its add-ons join the licence's current add-ons subscription, or open a new one, with an
