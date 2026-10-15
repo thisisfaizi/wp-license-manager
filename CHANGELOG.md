@@ -219,8 +219,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 - **A cancelled, expired or ending add-ons subscription is never reused** on a retry: a new one is
   opened (`AddonService::reusable_addons_subscription()`). A write rolled back part-way no longer
   cancels the add-ons subscription it was about to bill.
-- **A refund cancels an add-ons subscription the order opened but never billed** (pending, no items),
-  whatever kind of line opened it. Another order sold against it while it was pending is no longer
+- **A refund cancels an add-ons subscription the order opened but never billed** (pending, no items,
+  no lines), whatever kind of line opened it. One holding another order's lines (written on it, that
+  order's request cut off before their item was attached) stays open, and that order's retry starts
+  it. A retry never records add-on lines on an add-ons subscription that has ended (cancelled or
+  expired): they would never renew, so the line is refused with a note for the owner and nothing is
+  changed. Another order sold against it while it was pending is no longer
   stranded: its add-ons join the licence's current add-ons subscription, or open a new one, with an
   order note — it had no dates to align with, so it was priced a full cycle either way. Add-ons sold
   against an add-ons subscription that billed and then ended are still refused.

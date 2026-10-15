@@ -902,6 +902,19 @@ class AddonService {
 			if ( null === $sub ) {
 				return self::refused( $refuse() );
 			}
+			if ( $sub->is_addons_only() && in_array( $sub->status, array( 'cancelled', 'expired' ), true ) ) {
+				// Recorded there, they would lapse at their paid-through day and never renew.
+				\WPLM\Support\Logger::error( sprintf( 'AddonService: order %d left add-on lines %s on licence %d unrecorded, on add-ons subscription %d, which has ended; nothing was changed.', $order->get_id(), implode( ', ', $left ), $license->id, $sub->id ) );
+				throw new \RuntimeException(
+					sprintf(
+						/* translators: 1: line ids, 2: licence label, 3: subscription id */
+						__( 'an earlier attempt added lines #%1$s to %2$s and was cut off before recording them. They are on add-ons subscription #%3$d, which has ended, so they would never renew. Nothing was changed and nothing was added; the lines stay on the licence until the day they are paid through. To have this line added and billed on the licence\'s add-ons subscription, remove those lines on the licence screen', 'wp-license-manager' ),
+						implode( ', #', $left ),
+						self::licence_label( $license ),
+						$sub->id
+					)
+				);
+			}
 			$ids = array_map( static fn( Entitlement $l ) => (int) $l->id, $unit_lines );
 			sort( $ids );
 			$found = null;
@@ -1786,13 +1799,16 @@ class AddonService {
 		}
 
 		// An add-ons subscription the order opened but never billed (its add-ons were never written)
-		// ends with the order: a later purchase must not join it with its old dates.
+		// ends with the order: a later purchase must not join it with its old dates. Never one that holds
+		// lines: another order sold against it wrote them (its request cut off before their item was
+		// attached), and they are paid for and renew on it.
 		foreach ( $order->get_items() as $item ) {
 			if ( ! $item instanceof \WC_Order_Item_Product ) {
 				continue;
 			}
 			$opened = $this->subscriptions->find_by_id( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
-			if ( null !== $opened && $opened->is_addons_only() && 'pending' === $opened->status && array() === $this->subscriptions->get_items( $opened->id ) ) {
+			if ( null !== $opened && $opened->is_addons_only() && 'pending' === $opened->status && array() === $this->subscriptions->get_items( $opened->id )
+				&& array() === $this->lines->get_by_subscription( $opened->id ) ) {
 				$this->subscription_service()->cancel( $opened->id );
 			}
 		}

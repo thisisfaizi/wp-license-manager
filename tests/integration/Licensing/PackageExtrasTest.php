@@ -2537,6 +2537,65 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( 'no longer billed on subscription #' . $addons->id, $this->notes( $order ) );
 	}
 
+	/**
+	 * Order A opened add-ons subscription S and its write failed; order B, sold against S, wrote its
+	 * lines on S and the request died before its subscription item was attached (S still pending).
+	 *
+	 * @return array{0: array, 1: array, 2: int, 3: array} A, B, S, the licence's customer.
+	 */
+	private function second_order_cut_off_on_an_unbilled_addons_subscription(): array {
+		$this->add_seat_plan_offer();
+		$product          = $this->addon_product();
+		$base             = $this->customer_with( 'Lifetime' );
+		$this->break_next = true;
+		$first            = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$opened           = (int) \WC_Order_Factory::get_order_item( $first['item']->get_id() )->get_meta( '_wplm_addons_subscription_id' );
+		$second           = $this->add_to_licence( $product, $base, array( 'seat-plan' => '1' ) );
+		$this->assertSame( $opened, (int) $this->addon_lines( $base['license_id'], 'seats' )[0]->subscription_id );
+		// The crash: B's line is on S, its item never attached, S never started.
+		$repo = $this->make( SubscriptionRepository::class );
+		foreach ( $repo->get_items( $opened ) as $sub_item ) {
+			$repo->delete_item( $sub_item->id );
+		}
+		$repo->update( $opened, array( 'recurring_total' => 0 ) );
+		$this->set_row( 'subscriptions', $opened, array( 'status' => 'pending' ) );
+		$this->lose_the_stamp( $second['item'] );
+		$this->unfulfil( $second['order'] );
+		return array( $first, $second, $opened, $base );
+	}
+
+	public function test_refunding_the_order_that_opened_an_addons_subscription_never_ends_it_while_another_orders_lines_are_on_it(): void {
+		list( $first, $second, $opened, $base ) = $this->second_order_cut_off_on_an_unbilled_addons_subscription();
+
+		wc_get_order( $first['order']->get_id() )->update_status( 'refunded' );
+		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'], 'B\'s paid line is on it: it stays open.' );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'seats' ) );
+
+		$this->complete_again( $second['order'] );
+
+		$this->assertSame( '1', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertSame( 'active', $this->subscription_row( $opened )['status'], 'It renews B\'s add-on.' );
+		$this->assertCount( 1, $this->items( $opened ) );
+		$this->assertSame( 300.0, $this->total( $opened ) );
+		$this->assertSame( $opened, $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] )->id );
+	}
+
+	public function test_a_retry_never_records_addons_on_an_addons_subscription_that_has_ended(): void {
+		list( , $second, $opened, $base ) = $this->second_order_cut_off_on_an_unbilled_addons_subscription();
+		$seats                            = $this->addon_lines( $base['license_id'], 'seats' );
+		$this->set_row( 'subscriptions', $opened, array( 'status' => 'cancelled' ) );
+
+		$this->complete_again( $second['order'] );
+
+		$order = wc_get_order( $second['order']->get_id() );
+		$this->assertSame( '', (string) $order->get_meta( '_wplm_plan_fulfilled' ), 'Never reported as done: the add-on would never renew.' );
+		$this->assertSame( '', (string) \WC_Order_Factory::get_order_item( $second['item']->get_id() )->get_meta( '_wplm_entitlement_ids' ) );
+		$this->assertCount( 0, $this->items( $opened ), 'Nothing attached to the ended subscription.' );
+		$this->assertSame( array( $seats[0]->id ), array_map( static fn( $l ) => $l->id, $this->addon_lines( $base['license_id'], 'seats' ) ), 'Nothing removed, nothing written again.' );
+		$this->assertStringContainsString( 'add-ons subscription #' . $opened . ', which has ended', $this->notes( $order ) );
+		$this->assertStringNotContainsString( 'nothing was added or billed twice', $this->notes( $order ) );
+	}
+
 	public function test_the_first_addons_period_starts_when_the_addons_are_written_not_when_the_subscription_was_opened(): void {
 		$this->break_next = true;
 		$bought           = $this->lifetime_with_fbr( 'month' );
