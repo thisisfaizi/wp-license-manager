@@ -3055,6 +3055,103 @@ class PackageExtrasTest extends TestCase {
 		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'seats' ) );
 	}
 
+	public function test_a_failed_order_still_holds_the_licences_addons_cycle(): void {
+		$this->add_seat_plan_offer();
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$first   = $this->buy_through_cart(
+			$product,
+			array(
+				'wplm_extras'            => array( 'module:fbr' => '1' ),
+				'wplm_extras_cycle'      => 'month',
+				'wplm_target_license_id' => (string) $base['license_id'],
+			),
+			$base['customer'],
+			false
+		);
+		// The payment failed: the customer can still pay it from My account.
+		wc_get_order( $first['order']->get_id() )->update_status( 'failed' );
+		$this->assertTrue( wc_get_order( $first['order']->get_id() )->needs_payment() );
+
+		wp_set_current_user( $base['customer'] );
+		$this->assertFalse(
+			$this->validate(
+				array(
+					'wplm_extras'            => array( 'seat-plan' => '1' ),
+					'wplm_extras_cycle'      => 'year',
+					'wplm_target_license_id' => (string) $base['license_id'],
+				),
+				$product
+			)
+		);
+		$this->assertStringContainsString( 'order #' . $first['order']->get_order_number() . ', not completed yet', $this->first_error() );
+	}
+
+	/**
+	 * Pay for an order as WooCommerce's order-pay page and the Store API do: true when nothing refused it.
+	 *
+	 * @return array{0: string, 1: \WP_Error} The order-pay page's first error, the Store API's errors.
+	 */
+	private function pay_later( \WC_Order $order ): array {
+		wc_clear_notices();
+		do_action( 'woocommerce_before_pay_action', wc_get_order( $order->get_id() ) );
+		$page   = $this->first_error();
+		$errors = new \WP_Error();
+		do_action( 'woocommerce_checkout_validate_order_before_payment', wc_get_order( $order->get_id() ), $errors );
+		wc_clear_notices();
+		return array( $page, $errors );
+	}
+
+	public function test_an_order_paid_later_is_refused_payment_when_its_addons_could_no_longer_be_added(): void {
+		$this->add_seat_plan_offer();
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$target  = array( 'wplm_target_license_id' => (string) $base['license_id'] );
+		$first   = $this->buy_through_cart( $product, array( 'wplm_extras' => array( 'module:fbr' => '1' ), 'wplm_extras_cycle' => 'month' ) + $target, $base['customer'], false );
+		// Out of the way while a yearly order opens the licence's add-ons subscription, then payable again
+		// (an order placed before this release, or set back by hand).
+		wc_get_order( $first['order']->get_id() )->update_status( 'cancelled' );
+		$this->buy_through_cart( $product, array( 'wplm_extras' => array( 'seat-plan' => '1' ), 'wplm_extras_cycle' => 'year' ) + $target, $base['customer'] );
+		$addons = $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] );
+		$this->assertSame( 'year', $addons->billing_period );
+		wc_get_order( $first['order']->get_id() )->update_status( 'failed' );
+
+		list( $page, $errors ) = $this->pay_later( $first['order'] );
+		$this->assertStringContainsString( 'billed every year', $page, 'Never charged for add-ons that could not be added.' );
+		$this->assertStringContainsString( 'order #' . $first['order']->get_order_number(), $page );
+		$this->assertTrue( $errors->has_errors(), 'The block checkout\'s order-pay too.' );
+
+		// On the add-ons subscription's cycle: paid as usual.
+		$same = $this->buy_through_cart( $product, array( 'wplm_extras' => array( 'module:fbr' => '1' ), 'wplm_extras_cycle' => 'year' ) + $target, $base['customer'], false );
+		list( $page, $errors ) = $this->pay_later( $same['order'] );
+		$this->assertSame( '', $page );
+		$this->assertFalse( $errors->has_errors() );
+
+		// Sold against an add-ons subscription that billed and has ended: it could not be added either.
+		$this->make( SubscriptionService::class )->cancel( $addons->id );
+		list( $page ) = $this->pay_later( $same['order'] );
+		$this->assertStringContainsString( 'subscription #' . $addons->id, $page );
+	}
+
+	public function test_an_order_paid_later_is_refused_while_another_paid_order_holds_the_other_cycle(): void {
+		$this->add_seat_plan_offer();
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$target  = array( 'wplm_target_license_id' => (string) $base['license_id'] );
+		$first   = $this->buy_through_cart( $product, array( 'wplm_extras' => array( 'module:fbr' => '1' ), 'wplm_extras_cycle' => 'month' ) + $target, $base['customer'], false );
+		wc_get_order( $first['order']->get_id() )->update_status( 'cancelled' );
+		$yearly = $this->buy_through_cart( $product, array( 'wplm_extras' => array( 'seat-plan' => '1' ), 'wplm_extras_cycle' => 'year' ) + $target, $base['customer'], false );
+		wc_get_order( $first['order']->get_id() )->update_status( 'failed' );
+		// Both unpaid: whichever is paid first decides.
+		$this->assertSame( '', $this->pay_later( $first['order'] )[0] );
+		$this->assertSame( '', $this->pay_later( $yearly['order'] )[0] );
+
+		wc_get_order( $yearly['order']->get_id() )->update_status( 'processing' );
+		list( $page ) = $this->pay_later( $first['order'] );
+		$this->assertStringContainsString( 'order #' . $yearly['order']->get_order_number(), $page );
+		$this->assertStringContainsString( 'billed every year', $page );
+	}
+
 	// ---------------------------------------------------------------------------------------------
 	// Review fixes (2026-10-15): one request at a time adds to a licence
 	// ---------------------------------------------------------------------------------------------

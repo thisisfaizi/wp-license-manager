@@ -152,6 +152,11 @@ class PlanCheckout {
 		// Persist the package on the order line item.
 		add_action( 'woocommerce_checkout_create_order_line_item', array( $this, 'save_order_line_item' ), 10, 4 );
 
+		// An order paid later (My account → Pay, the order-pay page, the block checkout's) is checked
+		// again before payment: its monthly / yearly add-ons may no longer be addable.
+		add_action( 'woocommerce_before_pay_action', array( $this, 'check_order_pay' ), 10, 1 );
+		add_action( 'woocommerce_checkout_validate_order_before_payment', array( $this, 'check_order_before_payment' ), 10, 2 );
+
 		// Fulfilment: Completed only. Payment alone (Processing) does not issue a
 		// licence — the shop confirms the order first. Priority 5, because WooCommerce
 		// sends the completed-order email on this hook at 10 and that email carries the
@@ -1369,6 +1374,41 @@ class PlanCheckout {
 			$id = absint( $wp->query_vars['order-pay'] ?? 0 );
 		}
 		return $id;
+	}
+
+	/**
+	 * `woocommerce_before_pay_action` (the classic order-pay form): an error notice stops the payment —
+	 * WooCommerce takes it only while no error notice is queued.
+	 *
+	 * @param mixed $order The order being paid for.
+	 * @return void
+	 */
+	public function check_order_pay( $order ): void {
+		if ( ! $order instanceof \WC_Order ) {
+			return;
+		}
+		$problem = $this->addons()->payment_problem( $order );
+		if ( null !== $problem ) {
+			wc_add_notice( $problem->get_error_message(), 'error' );
+		}
+	}
+
+	/**
+	 * `woocommerce_checkout_validate_order_before_payment` (Store API: the block checkout, and its
+	 * order-pay): an error stops the payment.
+	 *
+	 * @param mixed $order  The order.
+	 * @param mixed $errors Errors to add to.
+	 * @return void
+	 */
+	public function check_order_before_payment( $order, $errors ): void {
+		if ( ! $order instanceof \WC_Order || ! $errors instanceof \WP_Error ) {
+			return;
+		}
+		$problem = $this->addons()->payment_problem( $order );
+		if ( null !== $problem ) {
+			$errors->add( $problem->get_error_code(), $problem->get_error_message() );
+		}
 	}
 
 	/**

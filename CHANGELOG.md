@@ -241,14 +241,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   licence are refused at add to cart and at checkout: the second could be charged but never added.
 - **One cycle per licence across orders, too.** A lifetime licence with no add-ons subscription yet
   takes the cycle of an order of its owner whose monthly / yearly add-ons are still to be written
-  (pending payment, on hold — a bank transfer awaiting the shop — processing, or completed and awaiting
-  a retry; `AddonService::unfulfilled_addons_cycle()`). The product page offers that cycle
+  (pending payment, failed — still payable from My account — on hold — a bank transfer awaiting the
+  shop — processing, or completed and awaiting a retry; a paid one before one not paid yet;
+  `AddonService::unfulfilled_addons_cycle()`). The product page offers that cycle
   (`cycle_by_license`, `AddonService::offered_cycle()`), and add to cart and checkout refuse the other
   one, naming the order: "choose the same, or cancel that order first" (for a completed order still
   awaiting its add-ons: "choose the same, or contact us"). The fallback form's note under a fixed cycle
   now says so too. The order being paid for now
   (`order_awaiting_payment`, the order-pay page) does not count. Before, both orders were accepted and
   the second was paid for and could never be added.
+- **An order paid later is checked again before payment.** My account → Pay, the order-pay page
+  (`woocommerce_before_pay_action`) and the block checkout's order-pay
+  (`woocommerce_checkout_validate_order_before_payment`) refuse payment of an order whose monthly /
+  yearly add-ons for a lifetime licence could no longer be added: the licence's add-ons subscription
+  now bills the other cycle, a paid order of the customer's will open it on the other cycle, the
+  add-ons subscription it was sold against billed and has ended, or the add-ons subscription cannot
+  take them (`AddonService::payment_problem()`). A gateway that reports a payment on its own (a late
+  notification) cannot be stopped: such an order is still refused at fulfilment, with a note, for a
+  refund by hand.
 - **One request at a time adds to a licence.** Adding add-ons or extras to an existing licence now
   checks and writes under a per-licence lock (option `wplm_addons_lock_{licence id}`, taken over after
   5 minutes), so two orders completed at once cannot both pass the "already has" check or both open

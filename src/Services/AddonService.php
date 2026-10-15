@@ -582,29 +582,34 @@ class AddonService {
 
 	/**
 	 * An order of the licence's owner, paid or not yet, whose monthly / yearly add-ons for the licence
-	 * are still to be written: pending payment, on hold (a bank transfer awaiting the shop), processing,
-	 * or completed with its add-ons not added (awaiting a retry). Its add-ons open — or join — the
-	 * licence's one add-ons subscription when it is completed, on its cycle, so until then that cycle
-	 * is the licence's: an order on the other cycle could be paid for and never added.
+	 * are still to be written: pending payment, failed (the customer can still pay it from My account),
+	 * on hold (a bank transfer awaiting the shop), processing, or completed with its add-ons not added
+	 * (awaiting a retry). Its add-ons open — or join — the licence's one add-ons subscription when it is
+	 * completed, on its cycle, so until then that cycle is the licence's: an order on the other cycle
+	 * could be paid for and never added. A paid one (on hold, processing, completed) comes before one
+	 * not paid yet, which may never be.
 	 *
 	 * @param License $license    The lifetime licence.
 	 * @param int     $skip_order An order not to count (the one being paid for now), 0 for none.
+	 * @param bool    $paid_only  Count only orders paid for (or awaiting the shop's confirmation).
 	 * @return array{order: \WC_Order, cycle: string}|null The oldest such order and its cycle.
 	 */
-	public function unfulfilled_addons_cycle( License $license, int $skip_order = 0 ): ?array {
+	public function unfulfilled_addons_cycle( License $license, int $skip_order = 0, bool $paid_only = false ): ?array {
 		if ( ! function_exists( 'wc_get_orders' ) || (int) $license->user_id <= 0 ) {
 			return null;
 		}
+		$paid   = array( 'on-hold', 'processing', 'completed' );
 		$orders = wc_get_orders(
 			array(
 				'customer_id' => (int) $license->user_id,
-				'status'      => array( 'pending', 'on-hold', 'processing', 'completed' ),
+				'status'      => $paid_only ? $paid : array_merge( array( 'pending', 'failed' ), $paid ),
 				'type'        => 'shop_order',
 				'limit'       => -1,
 				'orderby'     => 'date',
 				'order'       => 'ASC',
 			)
 		);
+		$unpaid = null;
 		foreach ( $orders as $order ) {
 			if ( ! $order instanceof \WC_Order || $order->get_id() === $skip_order
 				|| ( 'completed' === $order->get_status() && '1' === (string) $order->get_meta( '_wplm_plan_fulfilled' ) ) ) {
@@ -617,12 +622,70 @@ class AddonService {
 				}
 				$snapshot = json_decode( (string) $item->get_meta( '_wplm_extras' ), true );
 				$cycle    = is_array( $snapshot ) ? ( $snapshot['cycle'] ?? null ) : null;
-				if ( in_array( $cycle, PackageExtrasService::CYCLES, true ) ) {
-					return array(
-						'order' => $order,
-						'cycle' => $cycle,
-					);
+				if ( ! in_array( $cycle, PackageExtrasService::CYCLES, true ) ) {
+					continue;
 				}
+				$found = array(
+					'order' => $order,
+					'cycle' => $cycle,
+				);
+				if ( in_array( $order->get_status(), $paid, true ) ) {
+					return $found;
+				}
+				$unpaid = $unpaid ?? $found;
+			}
+		}
+		return $unpaid;
+	}
+
+	/**
+	 * Why an order not paid yet (paid later: from My account, the order-pay page or the block
+	 * checkout) must not be paid now: monthly / yearly add-ons on it for a lifetime licence that could
+	 * no longer be added when it is completed — the licence's add-ons are now billed on the other cycle
+	 * (its add-ons subscription's, or a paid order's that will open it), on another subscription than
+	 * the one they were sold against, or could not take them ({@see addons_join_problem()}). Checked
+	 * before payment, as add to cart and checkout check a new order: a customer is never charged for
+	 * add-ons that could not then be added.
+	 *
+	 * @param \WC_Order $order The order.
+	 * @return \WP_Error|null
+	 */
+	public function payment_problem( \WC_Order $order ): ?\WP_Error {
+		foreach ( $order->get_items() as $item ) {
+			if ( ! $item instanceof \WC_Order_Item_Product || (int) $item->get_meta( '_wplm_addon_license_id' ) <= 0
+				|| '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $item->get_meta( '_wplm_addon_reverted' ) ) {
+				continue;
+			}
+			$snapshot = json_decode( (string) $item->get_meta( '_wplm_extras' ), true );
+			$cycle    = is_array( $snapshot ) ? ( $snapshot['cycle'] ?? null ) : null;
+			$license  = $this->licenses->find_by_id( (int) $item->get_meta( '_wplm_addon_license_id' ) );
+			if ( ! in_array( $cycle, PackageExtrasService::CYCLES, true ) || null === $license ) {
+				continue;
+			}
+			/* translators: 1: order number, 2: licence label (licence ending ABCD), 3: billing schedule (every month) */
+			$what   = sprintf( __( 'Your order #%1$s adds monthly / yearly add-ons to your %2$s, billed %3$s.', 'wp-license-manager' ), $order->get_order_number(), self::licence_label( $license ), self::schedule( 1, $cycle ) );
+			$cannot = __( 'They could not be added now, so this order cannot be paid: cancel it, and place a new order if you still want them.', 'wp-license-manager' );
+			$addons = $this->addons_subscription( $license );
+			$sold   = $snapshot['addons_subscription_id'] ?? null;
+			if ( null !== $sold && ( null === $addons || (int) $sold !== (int) $addons->id ) && ! $this->ended_unbilled( (int) $sold ) ) {
+				/* translators: %d: subscription id */
+				return $this->error( 'addons_pay_sold_sub', $what . ' ' . sprintf( __( 'They were sold against subscription #%d, which no longer bills them.', 'wp-license-manager' ), (int) $sold ) . ' ' . $cannot );
+			}
+			if ( null !== $addons ) {
+				if ( 1 !== (int) $addons->billing_interval || $cycle !== $addons->billing_period ) {
+					/* translators: %s: billing schedule (every year) */
+					return $this->error( 'addons_pay_cycle', $what . ' ' . sprintf( __( 'That licence\'s monthly / yearly add-ons are now billed %s.', 'wp-license-manager' ), self::schedule( (int) $addons->billing_interval, $addons->billing_period ) ) . ' ' . $cannot );
+				}
+				$problem = $this->addons_subscription_problem( $addons );
+				if ( null !== $problem ) {
+					return $this->error( 'addons_pay_join', $what . ' ' . $problem->get_error_message() );
+				}
+				continue;
+			}
+			$other = $this->unfulfilled_addons_cycle( $license, $order->get_id(), true );
+			if ( null !== $other && $other['cycle'] !== $cycle ) {
+				/* translators: 1: order number, 2: billing schedule (every year) */
+				return $this->error( 'addons_pay_cycle', $what . ' ' . sprintf( __( 'Your paid order #%1$s adds them billed %2$s, and one licence\'s monthly / yearly add-ons are billed one way.', 'wp-license-manager' ), $other['order']->get_order_number(), self::schedule( 1, $other['cycle'] ) ) . ' ' . $cannot );
 			}
 		}
 		return null;
