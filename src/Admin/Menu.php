@@ -653,7 +653,8 @@ class Menu {
 	public function page_subscriptions(): void {
 		$table = new Screens\SubscriptionListTable(
 			$this->container->make( \WPLM\Repositories\SubscriptionRepository::class ),
-			$this->container->make( \WPLM\Repositories\RenewalRepository::class )
+			$this->container->make( \WPLM\Repositories\RenewalRepository::class ),
+			$this->container->make( \WPLM\Services\Subscriptions\SubscriptionService::class )
 		);
 		// Handle inline pause/resume/cancel-from-edit GET actions before rendering.
 		$table->handle_inline_actions();

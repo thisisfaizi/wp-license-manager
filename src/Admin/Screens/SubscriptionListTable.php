@@ -11,6 +11,7 @@ defined( 'ABSPATH' ) || exit;
 
 use WPLM\Repositories\RenewalRepository;
 use WPLM\Repositories\SubscriptionRepository;
+use WPLM\Services\Subscriptions\SubscriptionService;
 
 if ( ! class_exists( 'WP_List_Table' ) ) {
 	require_once ABSPATH . 'wp-admin/includes/class-wp-list-table.php';
@@ -26,6 +27,9 @@ class SubscriptionListTable extends \WP_List_Table {
 
 	/** @var RenewalRepository */
 	private RenewalRepository $renewal_repo;
+
+	/** @var SubscriptionService The one status path: Pause, Resume and Cancel go through it. */
+	private SubscriptionService $service;
 
 	/**
 	 * Translated subscription-status labels keyed by status slug.
@@ -46,12 +50,14 @@ class SubscriptionListTable extends \WP_List_Table {
 	}
 
 	/**
-	 * @param SubscriptionRepository $repo
-	 * @param RenewalRepository      $renewal_repo
+	 * @param SubscriptionRepository   $repo
+	 * @param RenewalRepository        $renewal_repo
+	 * @param SubscriptionService|null $service      Status changes (default: the plugin's).
 	 */
-	public function __construct( SubscriptionRepository $repo, RenewalRepository $renewal_repo ) {
+	public function __construct( SubscriptionRepository $repo, RenewalRepository $renewal_repo, ?SubscriptionService $service = null ) {
 		$this->repo         = $repo;
 		$this->renewal_repo = $renewal_repo;
+		$this->service      = $service ?? \WPLM\Plugin::get_instance()->container()->make( SubscriptionService::class );
 		parent::__construct(
 			array(
 				'singular' => 'subscription',
@@ -279,8 +285,8 @@ class SubscriptionListTable extends \WP_List_Table {
 		// Handle cancel row action.
 		if ( 'cancel' === $action && $id > 0 ) {
 			check_admin_referer( 'wplm_cancel_subscription_' . $id );
-			$this->repo->update_status( $id, 'cancelled' );
-			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&cancelled=1' ) );
+			$done = $this->change_status( 'cancel', $id );
+			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&' . ( $done ? 'cancelled=1' : 'failed=1' ) ) );
 			exit;
 		}
 
@@ -290,7 +296,7 @@ class SubscriptionListTable extends \WP_List_Table {
 			$ids = array_map( 'absint', (array) ( $_REQUEST['subscription'] ?? array() ) );
 			foreach ( $ids as $sid ) {
 				if ( $sid > 0 ) {
-					$this->repo->update_status( $sid, 'cancelled' );
+					$this->change_status( 'cancel', $sid );
 				}
 			}
 			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&bulk_cancelled=' . count( $ids ) ) );
@@ -311,6 +317,11 @@ class SubscriptionListTable extends \WP_List_Table {
 			if ( ! empty( $_GET['saved'] ) ) :
 				?>
 				<div class="notice notice-success is-dismissible"><p><?php esc_html_e( 'Subscription updated.', 'wp-license-manager' ); ?></p></div>
+				<?php
+			endif;
+			if ( ! empty( $_GET['failed'] ) ) :
+				?>
+				<div class="notice notice-error is-dismissible"><p><?php esc_html_e( 'The subscription was not changed: its status no longer allows it. Reload and try again.', 'wp-license-manager' ); ?></p></div>
 				<?php
 			endif;
 			// phpcs:enable
@@ -364,6 +375,12 @@ class SubscriptionListTable extends \WP_List_Table {
 			</p>
 
 			<?php
+			// phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			if ( ! empty( $_GET['failed'] ) ) :
+				?>
+			<div class="notice notice-error is-dismissible"><p><?php esc_html_e( 'The subscription was not changed: its status no longer allows it. Reload and try again.', 'wp-license-manager' ); ?></p></div>
+				<?php
+			endif;
 			// phpcs:ignore WordPress.Security.NonceVerification.Recommended
 			if ( ! empty( $_GET['saved'] ) ) :
 				?>
@@ -663,38 +680,56 @@ class SubscriptionListTable extends \WP_List_Table {
 	// Inline action handlers called from render_page() before edit routing
 	// -------------------------------------------------------------------------
 
-	/** Handle pause/resume actions from the edit screen action buttons. */
+	/**
+	 * Handle the Pause / Resume / Cancel buttons of the edit screen. Each goes through
+	 * {@see SubscriptionService} — the path the REST API and My Account use — so the webhooks
+	 * (`subscription.paused`, `subscription.resumed`, `subscription.cancelled`), emails and the licence
+	 * sync happen exactly as everywhere else.
+	 */
 	public function handle_inline_actions(): bool {
 		// phpcs:disable WordPress.Security.NonceVerification.Recommended
 		$action = sanitize_text_field( wp_unslash( $_GET['action'] ?? '' ) );
 		$id     = absint( $_GET['id'] ?? 0 );
 		// phpcs:enable
 
-		if ( ! $id ) {
+		$nonces = array(
+			'pause'            => 'wplm_pause_subscription_',
+			'resume'           => 'wplm_resume_subscription_',
+			'cancel_from_edit' => 'wplm_cancel_subscription_',
+		);
+		if ( ! $id || ! isset( $nonces[ $action ] ) ) {
 			return false;
 		}
-
-		if ( 'pause' === $action ) {
-			check_admin_referer( 'wplm_pause_subscription_' . $id );
-			$this->repo->update_status( $id, 'on-hold' );
-			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&action=edit&id=' . $id . '&saved=1' ) );
-			exit;
+		check_admin_referer( $nonces[ $action ] . $id );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You do not have permission to do this.', 'wp-license-manager' ) );
 		}
 
-		if ( 'resume' === $action ) {
-			check_admin_referer( 'wplm_resume_subscription_' . $id );
-			$this->repo->update_status( $id, 'active' );
-			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&action=edit&id=' . $id . '&saved=1' ) );
-			exit;
-		}
+		$done = $this->change_status( 'cancel_from_edit' === $action ? 'cancel' : $action, $id );
+		wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&action=edit&id=' . $id . ( $done ? '&saved=1' : '&failed=1' ) ) );
+		exit;
+	}
 
-		if ( 'cancel_from_edit' === $action ) {
-			check_admin_referer( 'wplm_cancel_subscription_' . $id );
-			$this->repo->update_status( $id, 'cancelled' );
-			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&action=edit&id=' . $id . '&saved=1' ) );
-			exit;
+	/**
+	 * Pause, resume or cancel (at once) one subscription through {@see SubscriptionService}.
+	 *
+	 * @param string $action pause|resume|cancel.
+	 * @param int    $id     Subscription id.
+	 * @return bool False when its status does not allow it (or it is gone): nothing changed.
+	 */
+	private function change_status( string $action, int $id ): bool {
+		try {
+			switch ( $action ) {
+				case 'pause':
+					return $this->service->pause( $id );
+				case 'resume':
+					return $this->service->resume( $id );
+				case 'cancel':
+					return $this->service->cancel( $id );
+			}
+		} catch ( \RuntimeException $e ) {
+			unset( $e );
 		}
-
 		return false;
 	}
 }
