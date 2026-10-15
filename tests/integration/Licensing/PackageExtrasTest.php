@@ -3792,7 +3792,7 @@ class PackageExtrasTest extends TestCase {
 
 		list( $page, $errors ) = $this->pay_later( $first['order'] );
 
-		$this->assertStringContainsString( 'paid order #' . $second['order']->get_order_number() . ', not completed yet, already adds FBR', $page, 'Never charged twice for one module.' );
+		$this->assertStringContainsString( 'Your order #' . $second['order']->get_order_number() . ', not completed yet, already adds FBR', $page, 'Never charged twice for one module.' );
 		$this->assertStringContainsString( 'order #' . $first['order']->get_order_number() . ' adds add-ons', $page );
 		$this->assertTrue( $errors->has_errors(), 'The block checkout\'s order-pay too.' );
 
@@ -3864,7 +3864,7 @@ class PackageExtrasTest extends TestCase {
 		wc_get_order( $first['order']->get_id() )->update_status( 'on-hold' );
 		wc_clear_notices();
 		$this->checkout()->check_cart_extras();
-		$this->assertStringContainsString( 'paid order #' . $first['order']->get_order_number() . ', not completed yet, already adds Factory', $this->first_error() );
+		$this->assertStringContainsString( 'Your order #' . $first['order']->get_order_number() . ', not completed yet, already adds Factory', $this->first_error() );
 		WC()->cart->empty_cart();
 
 		$this->assertFalse( $this->validate( $factory, $product ), 'Never charged twice for one module.' );

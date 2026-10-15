@@ -879,7 +879,7 @@ class AddonCheckoutTest extends TestCase {
 		wc_clear_notices();
 
 		$this->assertNotEmpty( $notices, 'Never charged twice for one add-on.' );
-		$this->assertStringContainsString( 'paid order #' . $paid->get_order_number() . ', not completed yet, already adds FBR', (string) ( $notices[0]['notice'] ?? '' ) );
+		$this->assertStringContainsString( 'Your order #' . $paid->get_order_number() . ', not completed yet, already adds FBR', (string) ( $notices[0]['notice'] ?? '' ) );
 		$this->assertTrue( $errors->has_errors() );
 
 		// Add to cart, and the checkout's check of the cart.

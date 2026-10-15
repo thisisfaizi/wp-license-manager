@@ -792,7 +792,8 @@ class AddonService {
 	}
 
 	/**
-	 * "Your paid order #12, not completed yet, already adds Factory to your licence ending ABCD."
+	 * "Your order #12, not completed yet, already adds Factory to your licence ending ABCD. …" An order
+	 * on hold may be a bank transfer never paid: the customer cannot cancel it, so the shop is asked to.
 	 *
 	 * @param License                  $license The licence.
 	 * @param array<string, \WC_Order> $pending Module code => the order adding it.
@@ -807,7 +808,7 @@ class AddonService {
 			/* translators: 1: order number, 2: module names, 3: licence label (licence ending ABCD) */
 			? __( 'Your order #%1$s is still adding %2$s to your %3$s. Please contact us.', 'wp-license-manager' )
 			/* translators: 1: order number, 2: module names, 3: licence label (licence ending ABCD) */
-			: __( 'Your paid order #%1$s, not completed yet, already adds %2$s to your %3$s.', 'wp-license-manager' );
+			: __( 'Your order #%1$s, not completed yet, already adds %2$s to your %3$s. Wait for it to be completed, or ask us to cancel it.', 'wp-license-manager' );
 		return $this->error( 'addons_unfulfilled', sprintf( $message, $order->get_order_number(), $names, self::licence_label( $license ) ) );
 	}
 

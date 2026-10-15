@@ -103,11 +103,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   - **A module a paid order not completed yet adds is held before payment.** Add to cart, checkout
     and an order paid later refuse extras or a stored add-on whose module a paid order of the customer's
     (on hold, processing, or completed with its add-ons still to be added) already adds to the licence:
-    "Your paid order #12, not completed yet, already adds Factory to your licence ending ABCD" (for a
-    completed one: "… is still adding …, please contact us"). Both were charged before, and the second
-    was refused at completion for a refund by hand. An order not paid yet holds nothing (the first one
-    paid wins); a line already added, taken back or refunded in full holds nothing. Not counted at
-    completion: there the first order completed adds the module (`AddonService::unfulfilled_addon_modules()`).
+    "Your order #12, not completed yet, already adds Factory to your licence ending ABCD. Wait for it to
+    be completed, or ask us to cancel it" (an order on hold may be a bank transfer never paid, which the
+    customer cannot cancel; for a completed one: "… is still adding …, please contact us"). Both were
+    charged before, and the second was refused at completion for a refund by hand. An order not paid
+    yet holds nothing (the first one paid wins); a line already added, taken back or refunded in full
+    holds nothing. Not counted at completion: there the first order completed adds the module
+    (`AddonService::unfulfilled_addon_modules()`).
   - **The same module twice in one cart** for one licence is refused when added, and again at checkout.
   - **Aligned to the plan as it is at completion.** If the plan renewed between the sale and completion,
     the extras cover through the new day, and an order note tells the shop (no proration is invented).
