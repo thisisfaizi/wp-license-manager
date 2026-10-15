@@ -287,11 +287,12 @@ class RenewalRollbackTest extends TestCase {
 		$order = $this->renew( $bought['subscription_id'] );
 		$this->assertSame( 1, (int) $this->license_row( $bought['license_id'] )['status'] );
 
-		$this->refund( $order );
+		$order = $this->refund( $order );
 
 		$row = $this->license_row( $bought['license_id'] );
 		$this->assertSame( $lapsed, $row['expires_at'] );
 		$this->assertSame( 3, (int) $row['status'], 'Past its grace again: expired, as validation would mark it.' );
+		$this->assertStringContainsString( 'unless the subscription is put on hold or cancelled, the renewal cron sends the customer a new renewal invoice on its next run', $this->notes( $order ), 'A manual payer is invoiced again.' );
 		$key = $this->make( LicenseService::class )->get_by_id( $bought['license_id'] )->license_key;
 		$this->assertSame( 'expired', $this->make( LicenseService::class )->validate( $key )['code'] );
 	}

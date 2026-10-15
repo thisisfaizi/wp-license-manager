@@ -406,7 +406,7 @@ class RenewalProcessor {
 			$order->add_order_note(
 				sprintf(
 					/* translators: 1: line ids, 2: subscription id, 3: their paid-through date */
-					__( 'WPLM: renewal refunded, but line %1$s joined subscription #%2$d after this renewal, paid through %3$s. Moving the other lines back would leave them out of step with it, so nothing was changed. Set its dates by hand (or settle the add-on), then set the order to Completed and Refunded again.', 'wp-license-manager' ),
+					__( 'WPLM: renewal refunded, but line %1$s joined subscription #%2$d after this renewal, paid through %3$s. Moving the other lines back would leave them out of step with it, so nothing was changed. Set the lines\' dates by hand, or set them in step and then set the order to Completed (nothing is extended again) and Refunded again.', 'wp-license-manager' ),
 					implode( ', ', array_map( static fn( $id ) => '#' . $id, array_keys( $joined ) ) ),
 					$sub_id,
 					max( $joined )
