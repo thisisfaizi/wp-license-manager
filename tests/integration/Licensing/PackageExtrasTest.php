@@ -1487,6 +1487,8 @@ class PackageExtrasTest extends TestCase {
 
 		$this->assertSame( array(), $this->factory_lines( $base['license_id'] ) );
 		$this->assertStringContainsString( 'no longer billed on subscription #999999', $this->notes( $order['order'] ) );
+		$this->assertStringContainsString( 'A retry cannot add them: refund this line, or use Mark add-ons settled.', $this->note_with( $order['order'], 'no longer billed on subscription #999999' ), 'A retry cannot cure it.' );
+		$this->assertStringNotContainsString( 'Completed again', $this->note_with( $order['order'], 'no longer billed on subscription #999999' ) );
 		// Until the shop refunds that line, it still holds Factory: a new order for it is refused.
 		wp_set_current_user( $base['customer'] );
 		$factory = array(
@@ -1503,6 +1505,7 @@ class PackageExtrasTest extends TestCase {
 		$overdue['order']->update_status( 'completed' );
 		$this->assertSame( array(), $this->factory_lines( $base['license_id'] ) );
 		$this->assertStringContainsString( 'Pay your plan\'s renewal first', $this->notes( $overdue['order'] ) );
+		$this->assertStringContainsString( 'set the order to Completed again to retry', $this->note_with( $overdue['order'], 'Pay your plan' ), 'Paying the renewal cures it.' );
 	}
 
 	public function test_the_base_is_billed_at_the_price_sold_even_if_the_package_changed_before_completion(): void {
@@ -2455,6 +2458,8 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( '', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
 		$this->assertStringContainsString( 'cut off part-way', $this->notes( $order ) );
 		$this->assertStringContainsString( '#' . $factory->id, $this->notes( $order ) );
+		$this->assertStringContainsString( 'A retry cannot add them: refund the add-ons\' part of this line, or use Mark add-ons settled.', $this->note_with( $order, 'cut off part-way' ), 'A retry cannot cure it.' );
+		$this->assertStringNotContainsString( 'Completed again', $this->note_with( $order, 'cut off part-way' ) );
 	}
 
 	public function test_a_line_retried_beside_another_lines_unrecorded_addons_leaves_them_to_that_line(): void {
@@ -2604,6 +2609,8 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( '', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
 		$this->assertCount( 0, $this->addon_lines( $base['license_id'], 'seats' ) );
 		$this->assertStringContainsString( 'no longer billed on subscription #' . $addons->id, $this->notes( $order ) );
+		$this->assertStringContainsString( 'A retry cannot add them: refund this line, or use Mark add-ons settled.', $this->note_with( $order, 'no longer billed on subscription #' ), 'A retry cannot cure it.' );
+		$this->assertStringNotContainsString( 'Completed again', $this->note_with( $order, 'no longer billed on subscription #' ) );
 	}
 
 	/**
@@ -2662,6 +2669,8 @@ class PackageExtrasTest extends TestCase {
 		$this->assertCount( 0, $this->items( $opened ), 'Nothing attached to the ended subscription.' );
 		$this->assertSame( array( $seats[0]->id ), array_map( static fn( $l ) => $l->id, $this->addon_lines( $base['license_id'], 'seats' ) ), 'Nothing removed, nothing written again.' );
 		$this->assertStringContainsString( 'add-ons subscription #' . $opened . ', which has ended', $this->notes( $order ) );
+		$this->assertStringContainsString( 'A retry cannot add them: refund this line, or use Mark add-ons settled.', $this->note_with( $order, ', which has ended' ), 'A retry cannot cure it.' );
+		$this->assertStringNotContainsString( 'Completed again', $this->note_with( $order, ', which has ended' ) );
 		$this->assertStringNotContainsString( 'nothing was added or billed twice', $this->notes( $order ) );
 	}
 
@@ -4163,6 +4172,9 @@ class PackageExtrasTest extends TestCase {
 		$this->assertCount( 0, $this->addon_lines( $first['license_id'], 'fbr' ) );
 		$this->assertSame( array(), $this->items( $other->id ) );
 		$this->assertStringContainsString( 'billed on subscription #' . $other->id . ' every year', $this->notes( wc_get_order( $first['order']->get_id() ) ) );
+		$refusal = $this->note_with( wc_get_order( $first['order']->get_id() ), ' every year; these were priced otherwise' );
+		$this->assertStringContainsString( 'A retry cannot add them: refund the add-ons\' part of this line, or use Mark add-ons settled.', $refusal, 'A retry cannot cure it.' );
+		$this->assertStringNotContainsString( 'Completed again', $refusal );
 	}
 	public function test_a_new_purchase_whose_recurring_extras_await_a_retry_holds_their_cycle(): void {
 		$first = $this->new_purchase_awaiting_its_extras( 'Lifetime', array(), 'month' );
@@ -4371,9 +4383,14 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( array(), $this->make( AddonService::class )->unfulfilled_addon_modules( $license ) );
 		$this->assertSame( $status, (int) $this->license_row( $first['license_id'] )['status'], 'The licence is untouched.' );
 		$this->assertSame( array( $first['license_id'] ), json_decode( (string) $this->fresh_item( $first['item'] )->get_meta( '_wplm_license_ids' ), true ) );
+
+		// Even with the order's fulfilled mark gone, completing it again never adds the settled extras.
+		$this->unfulfil( $order );
 		$this->complete_again( $order );
 		$this->assertCount( 1, $this->addon_lines( $first['license_id'], 'factory' ), 'Never added twice.' );
 		$this->assertSame( 1, $this->licence_count( $first['customer'] ), 'No second key.' );
+		$this->assertSame( '', (string) $this->fresh_item( $first['item'] )->get_meta( '_wplm_entitlement_ids' ) );
+		$this->assertSame( '1', (string) wc_get_order( $order->get_id() )->get_meta( '_wplm_plan_fulfilled' ), 'Every line is done.' );
 	}
 
 	public function test_only_a_shop_manager_with_the_forms_nonce_can_settle_and_only_lines_awaiting_their_addons(): void {

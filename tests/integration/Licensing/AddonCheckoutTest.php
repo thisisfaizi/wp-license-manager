@@ -939,5 +939,18 @@ class AddonCheckoutTest extends TestCase {
 		$this->assertCount( 1, array_filter( $this->lines( $base['license_id'] ), static fn( $l ) => 'fbr' === $l->code ), 'Nothing written.' );
 		$this->assertSame( $total, $this->total( $base['subscription_id'] ), 'Nothing billed.' );
 		$this->assertStringContainsString( 'marked settled by', $this->notes_of( $stale ) );
+
+		// Even with the order's fulfilled mark gone, completing it again never adds the settled add-on.
+		$stale->delete_meta_data( '_wplm_plan_fulfilled' );
+		$stale->save();
+		$items = count( $this->items( $base['subscription_id'] ) );
+		$stale->update_status( 'processing' );
+		wc_get_order( $stale->get_id() )->update_status( 'completed' );
+
+		$this->assertCount( 1, array_filter( $this->lines( $base['license_id'] ), static fn( $l ) => 'fbr' === $l->code ), 'Never added.' );
+		$this->assertCount( $items, $this->items( $base['subscription_id'] ), 'Never billed.' );
+		$this->assertSame( $total, $this->total( $base['subscription_id'] ) );
+		$this->assertSame( '', (string) $this->the_item( wc_get_order( $stale->get_id() ) )->get_meta( '_wplm_entitlement_ids' ) );
+		$this->assertSame( '1', (string) wc_get_order( $stale->get_id() )->get_meta( '_wplm_plan_fulfilled' ), 'Its only line is done.' );
 	}
 }
