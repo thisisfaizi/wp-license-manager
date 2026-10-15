@@ -563,6 +563,64 @@ class LicenseService {
 	}
 
 	/**
+	 * Take back what a refunded renewal added to a classic licence's term: move its expiry back by
+	 * exactly what the renewal moved it, `from` → `to` — to `from` itself while it still ends at `to`;
+	 * else by the renewal's period when it continued from the old end (`to` is `from` + `$interval_spec`),
+	 * or by the time it moved. A later renewal that moved it further stays: the expiry is shifted, never
+	 * overwritten. Nothing changes when the licence is gone, a profile licence,
+	 * perpetual, or ends before `to` (moved back already, or by hand) — so running it twice moves it back
+	 * once. A licence the renewal started timing (`from` null: it had no expiry) gets no expiry again,
+	 * only while it still ends exactly at `to`. Through update(), so the offline token is re-signed.
+	 *
+	 * Fires `wplm_license_term_extended` with the earlier expiry as the new one.
+	 *
+	 * @param int         $id            Licence id.
+	 * @param string|null $from          Its expiry before the renewal (UTC), null when it had none.
+	 * @param string      $to            The expiry the renewal set (UTC).
+	 * @param string      $interval_spec The renewal's period, e.g. "P1M" ('' when unknown).
+	 * @return array{from: string, to: string|null}|null Its expiry before and after, or null when unchanged.
+	 */
+	public function roll_back_term( int $id, ?string $from, string $to, string $interval_spec = '' ): ?array {
+		$license = $this->license_repo->find_by_id( $id );
+		if ( null === $license || null !== $license->profile || null === $license->expires_at ) {
+			return null;
+		}
+		$current = strtotime( $license->expires_at . ' UTC' );
+		$end     = strtotime( $to . ' UTC' );
+		if ( $current < $end ) {
+			return null;
+		}
+		if ( null === $from ) {
+			if ( $current !== $end ) {
+				return null;
+			}
+			$earlier = null;
+		} else {
+			$start = strtotime( $from . ' UTC' );
+			if ( $start >= $end ) {
+				return null;
+			}
+			$utc = new \DateTimeZone( 'UTC' );
+			if ( $current === $end ) {
+				$earlier = gmdate( 'Y-m-d H:i:s', $start );
+			} elseif ( '' !== $interval_spec && ( new \DateTimeImmutable( '@' . $start ) )->add( new \DateInterval( $interval_spec ) )->getTimestamp() === $end ) {
+				$earlier = ( new \DateTimeImmutable( '@' . $current ) )->setTimezone( $utc )->sub( new \DateInterval( $interval_spec ) )->format( 'Y-m-d H:i:s' );
+			} else {
+				$earlier = gmdate( 'Y-m-d H:i:s', $current - ( $end - $start ) );
+			}
+		}
+		$this->update( $id, array( 'expires_at' => $earlier ) );
+
+		/** This action is documented in LicenseService::extend_term(). */
+		do_action( 'wplm_license_term_extended', $id, $earlier, $license->expires_at );
+
+		return array(
+			'from' => $license->expires_at,
+			'to'   => $earlier,
+		);
+	}
+
+	/**
 	 * Delete a license by primary key.
 	 *
 	 * @param int $id License row id.

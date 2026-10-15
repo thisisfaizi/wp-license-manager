@@ -57,6 +57,41 @@ class SelfServiceRenewal {
 
 		// A due manual renewal (or exhausted card retries): one emailed invoice per cycle.
 		add_action( 'wplm_subscription_manual_renewal_due', array( $this, 'invoice_due_renewal' ), 10, 1 );
+
+		// A full refund of a renewal order takes its period back; a partial one only says it does not.
+		// Priority 10: before the add-ons' listeners (20), which then see the rolled-back dates.
+		add_action( 'woocommerce_order_status_refunded', array( $this, 'handle_refunded_order' ), 10, 1 );
+		add_action( 'woocommerce_order_partially_refunded', array( $this, 'handle_partial_refund' ), 10, 2 );
+	}
+
+	/**
+	 * `woocommerce_order_status_refunded`: a renewal order refunded in full takes back the period it paid
+	 * for ({@see RenewalProcessor::roll_back()}). Any other order is left alone.
+	 *
+	 * @param int $order_id WooCommerce order ID.
+	 * @return void
+	 */
+	public function handle_refunded_order( $order_id ): void {
+		$order = wc_get_order( (int) $order_id );
+		if ( $order instanceof \WC_Order ) {
+			$this->renewals->roll_back( $order );
+		}
+	}
+
+	/**
+	 * `woocommerce_order_partially_refunded`: a renewal order keeps its period; the note says so
+	 * ({@see RenewalProcessor::note_partial_refund()}).
+	 *
+	 * @param int $order_id  WooCommerce order ID.
+	 * @param int $refund_id Refund ID.
+	 * @return void
+	 */
+	public function handle_partial_refund( $order_id, $refund_id = 0 ): void {
+		unset( $refund_id );
+		$order = wc_get_order( (int) $order_id );
+		if ( $order instanceof \WC_Order ) {
+			$this->renewals->note_partial_refund( $order );
+		}
 	}
 
 	/**

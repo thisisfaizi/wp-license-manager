@@ -75,6 +75,16 @@ class EntitlementService {
 	}
 
 	/**
+	 * Every line a subscription pays for.
+	 *
+	 * @param int $subscription_id Subscription id.
+	 * @return Entitlement[]
+	 */
+	public function subscription_lines( int $subscription_id ): array {
+		return $this->repo->get_by_subscription( $subscription_id );
+	}
+
+	/**
 	 * What the licence grants on a given day, in the v2 token's shape.
 	 *
 	 * - `modules[code].until` is the latest `paid_through` among that module's lines, or null when
@@ -190,14 +200,17 @@ class EntitlementService {
 	 * - paid on or before `paid_through + grace` → the new period continues from the old end;
 	 * - paid after that (the module had gone read-only) → a full period from today.
 	 *
-	 * @param int      $subscription_id Subscription that was paid.
-	 * @param int      $interval        Billing interval (e.g. 1).
-	 * @param string   $period          day|week|month|year.
-	 * @param int|null $now             Unix time of the payment (default: now).
+	 * @param int        $subscription_id Subscription that was paid.
+	 * @param int        $interval        Billing interval (e.g. 1).
+	 * @param string     $period          day|week|month|year.
+	 * @param int|null   $now             Unix time of the payment (default: now).
+	 * @param array|null $moved           Filled, when given, with what moved: line id => `from` (the old
+	 *                                    paid-through date) and `to` (the new one), both Y-m-d — what a
+	 *                                    refund of this renewal takes back ({@see roll_back_line()}).
 	 * @return string|null The next payment (UTC datetime): the start of the day after the latest new
 	 *                     paid-through date, in the site's time zone. Null when no dated line moved.
 	 */
-	public function extend_subscription_lines( int $subscription_id, int $interval, string $period, ?int $now = null ): ?string {
+	public function extend_subscription_lines( int $subscription_id, int $interval, string $period, ?int $now = null, ?array &$moved = null ): ?string {
 		$now    = $now ?? time();
 		$today  = wp_date( 'Y-m-d', $now );
 		$latest = null;
@@ -220,6 +233,12 @@ class EntitlementService {
 			$through = self::renewed_paid_through( $line->paid_through, $today, $grace[ $line->license_id ], $interval, $period );
 
 			$this->repo->update( $line->id, array( 'paid_through' => $through ) );
+			if ( is_array( $moved ) ) {
+				$moved[ $line->id ] = array(
+					'from' => $line->paid_through,
+					'to'   => $through,
+				);
+			}
 			/** This action is documented in EntitlementService::add_line(). */
 			do_action( 'wplm_entitlement_saved', $this->repo->find_by_id( $line->id ), 'extended' );
 
@@ -235,6 +254,65 @@ class EntitlementService {
 		return ( new \DateTimeImmutable( self::add_period( $latest, 1, 'day' ) . ' 00:00:00', wp_timezone() ) )
 			->setTimezone( new \DateTimeZone( 'UTC' ) )
 			->format( 'Y-m-d H:i:s' );
+	}
+
+	/**
+	 * Take back what a refunded renewal added to one line: move its paid-through date back by exactly
+	 * what the renewal moved it, `from` → `to` ({@see shift_back()}). A later renewal that moved it further
+	 * stays: the date is shifted, never overwritten. Nothing changes when the line is gone, lifetime, or
+	 * before `to` (it was moved back already, or by hand) — so running it twice moves it back once.
+	 *
+	 * Fires `wplm_entitlement_saved` with `rolled_back`.
+	 *
+	 * @param int    $id       Line id.
+	 * @param string $from     The paid-through date before the renewal (Y-m-d).
+	 * @param string $to       The paid-through date the renewal set (Y-m-d).
+	 * @param int    $interval The renewal's billing interval (0: unknown, shift by days).
+	 * @param string $period   Its billing period (day|week|month|year).
+	 * @return array{from: string, to: string}|null The line's date before and after, or null when unchanged.
+	 */
+	public function roll_back_line( int $id, string $from, string $to, int $interval = 0, string $period = '' ): ?array {
+		$line = $this->repo->find_by_id( $id );
+		if ( null === $line || null === $line->paid_through || strcmp( $line->paid_through, $to ) < 0 || strcmp( $from, $to ) >= 0 ) {
+			return null;
+		}
+		$through = self::shift_back( $line->paid_through, $from, $to, $interval, $period );
+		$this->repo->update( $line->id, array( 'paid_through' => $through ) );
+		/** This action is documented in EntitlementService::add_line(). */
+		do_action( 'wplm_entitlement_saved', $this->repo->find_by_id( $line->id ), 'rolled_back' );
+		return array(
+			'from' => $line->paid_through,
+			'to'   => $through,
+		);
+	}
+
+	/**
+	 * A paid-through date moved back by what one renewal moved it (`from` → `to`), counted the way the
+	 * renewal counted it:
+	 * - still `to` → `from`, exactly;
+	 * - later (a later renewal moved it further) and the renewal continued from the old end (`to` is
+	 *   `from` plus whole periods, {@see renewed_paid_through()}) → the same whole periods back, so a
+	 *   month is taken back as a month, whatever its length;
+	 * - else (paid after grace: a period from the payment day) → back by the days it moved.
+	 *
+	 * @param string $current  The date now (Y-m-d), on or after `to`.
+	 * @param string $from     Before the renewal (Y-m-d).
+	 * @param string $to       After it (Y-m-d).
+	 * @param int    $interval Its billing interval (0: unknown, shift by days).
+	 * @param string $period   Its billing period.
+	 * @return string Y-m-d
+	 */
+	public static function shift_back( string $current, string $from, string $to, int $interval = 0, string $period = '' ): string {
+		if ( $current === $to ) {
+			return $from;
+		}
+		if ( $interval > 0 && in_array( $period, array( 'day', 'week', 'month', 'year' ), true )
+			&& self::renewed_paid_through( $from, $from, 0, $interval, $period ) === $to ) {
+			return self::add_period( self::add_period( self::add_period( $current, 1, 'day' ), -$interval, $period ), -1, 'day' );
+		}
+		$utc  = new \DateTimeZone( 'UTC' );
+		$days = (int) ( new \DateTimeImmutable( $from, $utc ) )->diff( new \DateTimeImmutable( $to, $utc ) )->days;
+		return self::add_period( $current, -$days, 'day' );
 	}
 
 	/**

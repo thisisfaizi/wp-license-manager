@@ -28,6 +28,12 @@ defined( 'ABSPATH' ) || exit;
  */
 class RenewalProcessor {
 
+	/** Order meta: what a renewal payment moved (JSON), written by apply_payment(). */
+	public const SNAPSHOT_META = '_wplm_renewal_snapshot';
+
+	/** Order meta: a refunded renewal taken back (JSON: `at` UTC, `by` user id). */
+	public const ROLLED_BACK_META = '_wplm_renewal_rolled_back';
+
 	/** @var SubscriptionRepository */
 	private SubscriptionRepository $sub_repo;
 
@@ -191,6 +197,11 @@ class RenewalProcessor {
 	 *
 	 * Shared by the cron card charge and paid renewal invoices, so both produce identical state.
 	 *
+	 * With an order, what the payment moved is kept on it (`_wplm_renewal_snapshot`, written before
+	 * anything moves and completed after), so a full refund of that order takes back exactly this period
+	 * ({@see roll_back()}); the order is stamped `_wplm_renewal_applied`, and a rollback stamp left by an
+	 * earlier refund of it is cleared (completing a refunded renewal again applies it again).
+	 *
 	 * @param Subscription $sub      The subscription being paid.
 	 * @param int|null     $order_id WooCommerce order that carried the payment, if any.
 	 * @param float        $amount   Amount received.
@@ -203,13 +214,39 @@ class RenewalProcessor {
 		$now_utc  = gmdate( 'Y-m-d H:i:s', $now );
 		$interval = $this->scheduler->period_to_interval( $sub->billing_interval, $sub->billing_period );
 
+		// What the payment is about to move, kept on its order before anything moves.
+		$order    = null !== $order_id && $order_id > 0 && function_exists( 'wc_get_order' ) ? wc_get_order( $order_id ) : null;
+		$order    = $order instanceof \WC_Order ? $order : null;
+		$snapshot = array(
+			'subscription_id' => $sub->id,
+			'interval'        => $sub->billing_interval,
+			'period'          => $sub->billing_period,
+			'before'          => self::state_of( $this->sub_repo->find_by_id( $sub->id ) ?? $sub ),
+		);
+		if ( null !== $order ) {
+			$order->update_meta_data( self::SNAPSHOT_META, wp_json_encode( $snapshot ) );
+			$order->update_meta_data( '_wplm_renewal_applied', '1' );
+			$order->delete_meta_data( self::ROLLED_BACK_META );
+			$order->save();
+		}
+
 		$next = null;
 		// An add-ons-only subscription extends only its own lines, never the licence (1.3.0).
 		if ( null !== $sub->license_id && ! $sub->is_addons_only() ) {
-			$next = $this->license_service->extend_term( $sub->license_id, $interval, $now );
+			$license = $this->license_service->get_by_id( $sub->license_id );
+			$next    = $this->license_service->extend_term( $sub->license_id, $interval, $now );
+			if ( null !== $next && null !== $license ) {
+				$snapshot['license'] = array(
+					'id'   => $sub->license_id,
+					'from' => $license->expires_at,
+					'to'   => $next,
+				);
+			}
 		}
 		if ( null === $next ) {
-			$next = $this->entitlements->extend_subscription_lines( $sub->id, $sub->billing_interval, $sub->billing_period, $now );
+			$moved             = array();
+			$next              = $this->entitlements->extend_subscription_lines( $sub->id, $sub->billing_interval, $sub->billing_period, $now, $moved );
+			$snapshot['lines'] = $moved;
 		}
 		if ( null === $next ) {
 			$next = $this->scheduler->next_payment( $sub, $now_utc );
@@ -242,6 +279,13 @@ class RenewalProcessor {
 			)
 		);
 
+		if ( null !== $order ) {
+			$snapshot['after']      = self::state_of( $this->sub_repo->find_by_id( $sub->id ) ?? $sub );
+			$snapshot['renewal_id'] = (int) $renewal_id;
+			$order->update_meta_data( self::SNAPSHOT_META, wp_json_encode( $snapshot ) );
+			$order->save();
+		}
+
 		$renewal                  = new Renewal();
 		$renewal->id              = (int) $renewal_id;
 		$renewal->subscription_id = $sub->id;
@@ -250,5 +294,368 @@ class RenewalProcessor {
 		$renewal->status          = 'success';
 
 		return $renewal;
+	}
+
+	// -------------------------------------------------------------------------
+	// A refunded renewal
+	// -------------------------------------------------------------------------
+
+	/**
+	 * A full refund of a renewal order takes its period back (`woocommerce_order_status_refunded`, run
+	 * before the add-ons' listeners at 20). Only for an order whose payment was applied
+	 * (`_wplm_renewal_applied`) — a renewal invoice (`_wplm_is_renewal`) or an order a card renewal
+	 * carried (`_wplm_renewal_snapshot`) — and not rolled back yet (`_wplm_renewal_rolled_back`).
+	 *
+	 * From the snapshot taken at payment ({@see apply_payment()}), each thing the renewal moved goes back
+	 * by exactly what it moved (shifted, never overwritten, so a later renewal that moved it further
+	 * stays): each line's paid-through date (a line removed since, or already earlier, is left), the
+	 * subscription's next payment and a classic licence's expiry. The subscription's last payment and
+	 * failed attempts come back only when no later renewal was paid. Its status is left to the renewal
+	 * cron and dunning; when this was the latest renewal and a classic licence now ends before its grace
+	 * is over, it is marked expired as validation would ({@see LicenseService::validate()}). An add-ons-only
+	 * subscription moves only its own lines; a licence's status is never changed for it.
+	 *
+	 * The renewal (and invoice) rows become `refunded`, the order is stamped `_wplm_renewal_rolled_back`
+	 * (`at`, `by`) and loses `_wplm_renewal_applied` — completing it again applies the payment again — and
+	 * the order is noted. Fires `wplm_entitlement_saved` (`rolled_back`) per line,
+	 * `wplm_license_term_extended` with the earlier expiry, then `wplm_renewal_rolled_back`.
+	 *
+	 * A renewal paid before 1.3.0 has no snapshot: it is shifted back one billing period from the cycle it
+	 * renewed (`_wplm_renewal_cycle`), only while the subscription's next payment is still what that
+	 * renewal produced; otherwise the order is noted and nothing changes.
+	 *
+	 * @param \WC_Order $order The refunded order.
+	 * @param int|null  $now   Unix time (tests).
+	 * @return bool Whether anything was rolled back.
+	 */
+	public function roll_back( \WC_Order $order, ?int $now = null ): bool {
+		$fresh = wc_get_order( $order->get_id() );
+		$order = $fresh instanceof \WC_Order ? $fresh : $order;
+		if ( ! $this->rollable( $order ) ) {
+			return false;
+		}
+		$snapshot = json_decode( (string) $order->get_meta( self::SNAPSHOT_META ), true );
+		if ( ! is_array( $snapshot ) ) {
+			return $this->roll_back_legacy( $order, $now );
+		}
+		if ( ! isset( $snapshot['after'] ) || ! is_array( $snapshot['after'] ) || ! is_array( $snapshot['before'] ?? null ) ) {
+			$order->add_order_note( __( 'WPLM: renewal refunded, but applying it was cut off part-way, so WPLM cannot tell what it moved: nothing was changed. Check the subscription\'s dates by hand.', 'wp-license-manager' ) );
+			return false;
+		}
+
+		$sub_id = (int) ( $snapshot['subscription_id'] ?? 0 );
+		$sub    = $sub_id > 0 ? $this->sub_repo->find_by_id( $sub_id ) : null;
+		$latest = null !== $sub && ! $this->renewal_repo->has_later_payment( $sub_id, (int) ( $snapshot['renewal_id'] ?? 0 ) );
+
+		$n       = (int) ( $snapshot['interval'] ?? 0 );
+		$period  = (string) ( $snapshot['period'] ?? '' );
+		$lines   = array();
+		$skipped = 0;
+		foreach ( (array) ( $snapshot['lines'] ?? array() ) as $line_id => $move ) {
+			$back = is_array( $move ) && isset( $move['from'], $move['to'] ) ? $this->entitlements->roll_back_line( (int) $line_id, (string) $move['from'], (string) $move['to'], $n, $period ) : null;
+			if ( null === $back ) {
+				++$skipped;
+				continue;
+			}
+			$lines[ (int) $line_id ] = $back;
+		}
+
+		$license = null;
+		if ( is_array( $snapshot['license'] ?? null ) && isset( $snapshot['license']['id'], $snapshot['license']['to'] ) ) {
+			$license = $this->license_service->roll_back_term( (int) $snapshot['license']['id'], null !== $snapshot['license']['from'] ? (string) $snapshot['license']['from'] : null, (string) $snapshot['license']['to'], $n > 0 && '' !== $period ? $this->scheduler->period_to_interval( $n, $period ) : '' );
+		}
+
+		$next = null;
+		if ( null !== $sub ) {
+			$update = array();
+			$before = $snapshot['before']['next_payment'] ?? null;
+			$after  = $snapshot['after']['next_payment'] ?? null;
+			if ( null !== $sub->next_payment && null !== $before && null !== $after
+				&& strtotime( (string) $after . ' UTC' ) > strtotime( (string) $before . ' UTC' )
+				&& strtotime( $sub->next_payment . ' UTC' ) >= strtotime( (string) $after . ' UTC' ) ) {
+				$update['next_payment'] = $this->next_payment_back( $sub->next_payment, (string) $before, (string) $after, isset( $snapshot['license'] ), $n, $period );
+			}
+			if ( $latest ) {
+				$update['last_payment']    = $snapshot['before']['last_payment'] ?? null;
+				$update['failed_attempts'] = (int) ( $snapshot['before']['failed_attempts'] ?? 0 );
+			}
+			if ( array() !== $update ) {
+				$this->sub_repo->update( $sub->id, $update );
+			}
+			$next = $update['next_payment'] ?? $sub->next_payment;
+
+			// The latest renewal of a classic licence, now over with its grace: what validation would do.
+			if ( $latest && null !== $license && ! $sub->is_addons_only() ) {
+				$this->expire_if_lapsed( (int) $snapshot['license']['id'] );
+			}
+		}
+
+		$this->finish_roll_back( $order, $sub_id, $snapshot, $sub, $lines, $license, $next, $skipped, $now );
+		return true;
+	}
+
+	/**
+	 * `woocommerce_order_partially_refunded` on a renewal order: the period stays, and the order says so.
+	 *
+	 * @param \WC_Order $order The order.
+	 * @return bool Whether it was a renewal (and noted).
+	 */
+	public function note_partial_refund( \WC_Order $order ): bool {
+		$fresh = wc_get_order( $order->get_id() );
+		$order = $fresh instanceof \WC_Order ? $fresh : $order;
+		if ( ! $this->rollable( $order ) ) {
+			return false;
+		}
+		$order->add_order_note( __( 'WPLM: partial refund — the renewal period is unchanged; refund in full to take it back.', 'wp-license-manager' ) );
+		return true;
+	}
+
+	/**
+	 * Whether an order carries a renewal payment that was applied and not rolled back yet.
+	 *
+	 * @param \WC_Order $order The order.
+	 * @return bool
+	 */
+	private function rollable( \WC_Order $order ): bool {
+		$renewal = '1' === (string) $order->get_meta( '_wplm_is_renewal' ) || '' !== (string) $order->get_meta( self::SNAPSHOT_META );
+		return $renewal && '1' === (string) $order->get_meta( '_wplm_renewal_applied' ) && '' === (string) $order->get_meta( self::ROLLED_BACK_META );
+	}
+
+	/**
+	 * A renewal order paid before 1.3.0 (no snapshot): shift back one billing period from the cycle it
+	 * renewed, only while the subscription's next payment is still exactly what that renewal produced —
+	 * paid inside grace, from `_wplm_renewal_cycle` — so nothing a later payment moved is touched. Else
+	 * the order is noted and nothing changes.
+	 *
+	 * @param \WC_Order $order The refunded order.
+	 * @param int|null  $now   Unix time (tests).
+	 * @return bool
+	 */
+	private function roll_back_legacy( \WC_Order $order, ?int $now ): bool {
+		$sub_id = (int) $order->get_meta( '_wplm_subscription_id' );
+		$sub    = $sub_id > 0 ? $this->sub_repo->find_by_id( $sub_id ) : null;
+		$cycle  = (string) $order->get_meta( '_wplm_renewal_cycle' );
+		if ( null === $sub || '' === $cycle || null === $sub->next_payment || false === strtotime( $cycle . ' UTC' ) ) {
+			$order->add_order_note( __( 'WPLM: renewal refunded. It was paid before WPLM kept a record of what a renewal moved, and its subscription or cycle can no longer be read: nothing was changed. Check the subscription\'s dates by hand.', 'wp-license-manager' ) );
+			return false;
+		}
+
+		$license = null !== $sub->license_id && ! $sub->is_addons_only() ? $this->license_service->get_by_id( $sub->license_id ) : null;
+		$classic = null !== $license && null === $license->profile;
+		if ( $classic ) {
+			// LicenseService::extend_term() from the old end, paid inside grace.
+			$produced    = ( new \DateTimeImmutable( $cycle, new \DateTimeZone( 'UTC' ) ) )
+				->add( new \DateInterval( $this->scheduler->period_to_interval( $sub->billing_interval, $sub->billing_period ) ) )
+				->format( 'Y-m-d H:i:s' );
+			$old_through = null;
+			$new_through = null;
+		} else {
+			// EntitlementService::extend_subscription_lines() from the old paid-through date, paid inside grace.
+			$old_through = EntitlementService::paid_through_for( $cycle );
+			$new_through = EntitlementService::renewed_paid_through( $old_through, $old_through, 0, $sub->billing_interval, $sub->billing_period );
+			$produced    = ( new \DateTimeImmutable( EntitlementService::add_period( $new_through, 1, 'day' ) . ' 00:00:00', wp_timezone() ) )
+				->setTimezone( new \DateTimeZone( 'UTC' ) )
+				->format( 'Y-m-d H:i:s' );
+		}
+		if ( strtotime( $sub->next_payment . ' UTC' ) !== strtotime( $produced . ' UTC' ) ) {
+			$order->add_order_note(
+				sprintf(
+					/* translators: 1: subscription id, 2: its next payment (UTC) */
+					__( 'WPLM: renewal refunded. It was paid before WPLM kept a record of what a renewal moved, and subscription #%1$d has moved since (next payment %2$s UTC): nothing was changed. Check its dates by hand.', 'wp-license-manager' ),
+					$sub->id,
+					$sub->next_payment
+				)
+			);
+			return false;
+		}
+
+		$snapshot = array(
+			'subscription_id' => $sub->id,
+			'legacy'          => true,
+			'before'          => array( 'next_payment' => $cycle ),
+			'after'           => self::state_of( $sub ),
+			'lines'           => array(),
+		);
+		$lines    = array();
+		$skipped  = 0;
+		$licensed = null;
+		if ( $classic ) {
+			$snapshot['license'] = array(
+				'id'   => $license->id,
+				'from' => $cycle,
+				'to'   => $produced,
+			);
+			$licensed            = $this->license_service->roll_back_term( $license->id, $cycle, $produced, $this->scheduler->period_to_interval( $sub->billing_interval, $sub->billing_period ) );
+		} else {
+			foreach ( $this->entitlements->subscription_lines( $sub->id ) as $line ) {
+				if ( $new_through !== $line->paid_through ) {
+					continue; // Not what this renewal set.
+				}
+				$snapshot['lines'][ $line->id ] = array(
+					'from' => $old_through,
+					'to'   => $new_through,
+				);
+				$back                           = $this->entitlements->roll_back_line( $line->id, $old_through, $new_through, $sub->billing_interval, $sub->billing_period );
+				if ( null === $back ) {
+					++$skipped;
+					continue;
+				}
+				$lines[ $line->id ] = $back;
+			}
+		}
+		$this->sub_repo->update( $sub->id, array( 'next_payment' => $cycle ) );
+
+		$this->finish_roll_back( $order, $sub->id, $snapshot, $sub, $lines, $licensed, $cycle, $skipped, $now );
+		return true;
+	}
+
+	/**
+	 * The records, the stamp, the hooks and the note every rollback ends with.
+	 *
+	 * @param \WC_Order         $order    The refunded order.
+	 * @param int               $sub_id   Its subscription.
+	 * @param array             $snapshot What the renewal moved.
+	 * @param Subscription|null $sub      The subscription (as it was before the rollback), if it exists.
+	 * @param array             $lines    Lines moved back: id => from / to.
+	 * @param array|null        $license  The licence's expiry moved back: from / to.
+	 * @param string|null       $next     The subscription's next payment now (UTC).
+	 * @param int               $skipped  Lines left as they were.
+	 * @param int|null          $now      Unix time (tests).
+	 * @return void
+	 */
+	private function finish_roll_back( \WC_Order $order, int $sub_id, array $snapshot, ?Subscription $sub, array $lines, ?array $license, ?string $next, int $skipped, ?int $now ): void {
+		$this->renewal_repo->mark_order_refunded( $order->get_id() );
+
+		$order->update_meta_data(
+			self::ROLLED_BACK_META,
+			wp_json_encode(
+				array(
+					'at' => gmdate( 'Y-m-d H:i:s', $now ?? time() ),
+					'by' => get_current_user_id(),
+				)
+			)
+		);
+		$order->delete_meta_data( '_wplm_renewal_applied' );
+		$order->save();
+
+		/**
+		 * Fires after a refunded renewal order took its period back.
+		 *
+		 * @param int   $order_id        The refunded order.
+		 * @param int   $subscription_id Its subscription.
+		 * @param array $snapshot        What the renewal had moved (see RenewalProcessor::apply_payment()).
+		 */
+		do_action( 'wplm_renewal_rolled_back', $order->get_id(), $sub_id, $snapshot );
+
+		$label = null !== $sub && $sub->is_addons_only()
+			/* translators: 1: subscription id, 2: "Add-ons for licence ending ABCD" */
+			? sprintf( __( 'subscription #%1$d (%2$s)', 'wp-license-manager' ), $sub_id, \WPLM\Services\AddonService::label_for( $sub ) )
+			/* translators: %d: subscription id */
+			: sprintf( __( 'subscription #%d', 'wp-license-manager' ), $sub_id );
+		if ( null !== $license ) {
+			$now_through = null !== $license['to'] ? $license['to'] . ' UTC' : __( 'no expiry', 'wp-license-manager' );
+			$was_through = $license['from'] . ' UTC';
+		} elseif ( array() !== $lines ) {
+			$now_through = max( array_column( $lines, 'to' ) );
+			$was_through = max( array_column( $lines, 'from' ) );
+		} else {
+			$now_through = null;
+			$was_through = null;
+		}
+		$note = null !== $now_through
+			? sprintf(
+				/* translators: 1: subscription label, 2: new paid-through date, 3: old paid-through date, 4: next payment (UTC) */
+				__( 'WPLM: renewal refunded: %1$s now paid through %2$s (was %3$s); next payment %4$s.', 'wp-license-manager' ),
+				$label,
+				$now_through,
+				$was_through,
+				null !== $next ? $next . ' UTC' : '—'
+			)
+			: sprintf(
+				/* translators: 1: subscription label, 2: next payment (UTC) */
+				__( 'WPLM: renewal refunded: nothing %1$s was paid through had to move back; next payment %2$s.', 'wp-license-manager' ),
+				$label,
+				null !== $next ? $next . ' UTC' : '—'
+			);
+		if ( $skipped > 0 ) {
+			$note .= ' ' . sprintf(
+				/* translators: %d: number of lines */
+				_n( '%d line was removed or moved back since, and was left as it is.', '%d lines were removed or moved back since, and were left as they are.', $skipped, 'wp-license-manager' ),
+				$skipped
+			);
+		}
+		$order->add_order_note( $note );
+	}
+
+	/**
+	 * A next payment moved back by what one renewal moved it (`before` → `after`), counted the way the
+	 * renewal counted it: still `after` → `before`, exactly; later (a later renewal moved it further) and
+	 * the renewal continued by whole periods → the same periods back (a classic licence's expiry by its
+	 * interval; an entitlement subscription's, the start of a day in the site's time zone, by calendar
+	 * periods); else back by the time it moved.
+	 *
+	 * @param string $current UTC datetime now, on or after `after`.
+	 * @param string $before  Before the renewal (UTC).
+	 * @param string $after   After it (UTC).
+	 * @param bool   $classic Whether it follows a classic licence's expiry.
+	 * @param int    $n       The renewal's billing interval (0: unknown).
+	 * @param string $period  Its billing period.
+	 * @return string UTC datetime.
+	 */
+	private function next_payment_back( string $current, string $before, string $after, bool $classic, int $n, string $period ): string {
+		$utc = new \DateTimeZone( 'UTC' );
+		$c   = new \DateTimeImmutable( $current, $utc );
+		$b   = new \DateTimeImmutable( $before, $utc );
+		$a   = new \DateTimeImmutable( $after, $utc );
+		if ( $c->getTimestamp() === $a->getTimestamp() ) {
+			return $b->format( 'Y-m-d H:i:s' );
+		}
+		if ( $n > 0 && in_array( $period, array( 'day', 'week', 'month', 'year' ), true ) ) {
+			if ( $classic ) {
+				$spec = new \DateInterval( $this->scheduler->period_to_interval( $n, $period ) );
+				if ( $b->add( $spec )->getTimestamp() === $a->getTimestamp() ) {
+					return $c->sub( $spec )->format( 'Y-m-d H:i:s' );
+				}
+			} else {
+				$tz    = wp_timezone();
+				$local = static fn( \DateTimeImmutable $d ): \DateTimeImmutable => $d->setTimezone( $tz );
+				if ( '00:00:00' === $local( $b )->format( 'H:i:s' ) && '00:00:00' === $local( $a )->format( 'H:i:s' ) && '00:00:00' === $local( $c )->format( 'H:i:s' )
+					&& EntitlementService::add_period( $local( $b )->format( 'Y-m-d' ), $n, $period ) === $local( $a )->format( 'Y-m-d' ) ) {
+					return ( new \DateTimeImmutable( EntitlementService::add_period( $local( $c )->format( 'Y-m-d' ), -$n, $period ) . ' 00:00:00', $tz ) )
+						->setTimezone( $utc )
+						->format( 'Y-m-d H:i:s' );
+				}
+			}
+		}
+		return gmdate( 'Y-m-d H:i:s', $c->getTimestamp() - ( $a->getTimestamp() - $b->getTimestamp() ) );
+	}
+
+	/**
+	 * A classic licence whose term is now over with its grace is marked expired — the check validation
+	 * runs ({@see LicenseService::validate()}), here at once. Never a suspended, revoked or terminated one.
+	 *
+	 * @param int $license_id Licence id.
+	 * @return void
+	 */
+	private function expire_if_lapsed( int $license_id ): void {
+		$license = $this->license_service->get_by_id( $license_id );
+		if ( null !== $license && null === $license->profile && in_array( $license->status, array( 1, 2 ), true ) && ! $license->is_within_expiry() ) {
+			$this->license_service->change_status( $license_id, 3 );
+		}
+	}
+
+	/**
+	 * The subscription fields a renewal changes, as kept in a snapshot.
+	 *
+	 * @param Subscription $sub The subscription.
+	 * @return array{next_payment: string|null, last_payment: string|null, status: string, failed_attempts: int}
+	 */
+	private static function state_of( Subscription $sub ): array {
+		return array(
+			'next_payment'    => $sub->next_payment,
+			'last_payment'    => $sub->last_payment,
+			'status'          => $sub->status,
+			'failed_attempts' => $sub->failed_attempts,
+		);
 	}
 }
