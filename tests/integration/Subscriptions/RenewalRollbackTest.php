@@ -672,36 +672,93 @@ class RenewalRollbackTest extends TestCase {
 		$this->assertSame( '2026-06-01 10:00:00', $this->subscription_row( $classic['subscription_id'] )['next_payment'] );
 	}
 
-	public function test_a_line_joined_after_the_renewal_stops_the_rollback_for_a_check_by_hand(): void {
+	/** A dated add-on line that joins a subscription on a later order, co-termed with its lines. */
+	private function join_line( array $bought, string $code, string $through ): array {
+		$later = wc_create_order( array( 'customer_id' => (int) $this->subscription_row( $bought['subscription_id'] )['user_id'] ) );
+		$later->set_status( 'completed' );
+		$later->save();
+		$id = $this->make( EntitlementRepository::class )->create(
+			array(
+				'license_id'      => $bought['license_id'],
+				'kind'            => 'module',
+				'code'            => $code,
+				'qty'             => 1,
+				'paid_through'    => $through,
+				'source'          => 'addon',
+				'subscription_id' => $bought['subscription_id'],
+				'order_id'        => $later->get_id(),
+			)
+		);
+		return array( $id, $later->get_id() );
+	}
+
+	public function test_a_line_joined_after_the_renewal_keeps_its_period_and_the_rest_rolls_back(): void {
 		$bought = $this->buy_profile( 'month' );
 		$sub_id = $bought['subscription_id'];
 		$from   = $this->through( $sub_id );
 		$p0     = (string) reset( $from );
+		$next0  = $this->subscription_row( $sub_id )['next_payment'];
 		$order  = $this->renew( $sub_id );
 		$p1     = $this->next_month( $p0 );
-		// An add-on joins, co-termed with what the renewal paid.
-		$joined = $this->make( EntitlementRepository::class )->create(
-			array(
-				'license_id'      => $bought['license_id'],
-				'kind'            => 'module',
-				'code'            => 'fbr',
-				'qty'             => 1,
-				'paid_through'    => $p1,
-				'subscription_id' => $sub_id,
-			)
-		);
-		$moved = $this->through( $sub_id );
-		$next  = $this->subscription_row( $sub_id )['next_payment'];
+		// Factory joins on a later order, co-termed with what the renewal paid.
+		list( $joined, $by ) = $this->join_line( $bought, 'factory', $p1 );
+		$this->saved         = array();
 
 		$order = $this->refund( $order );
 
-		$this->assertSame( $moved, $this->through( $sub_id ), 'Nothing moved: the lines would fall out of step.' );
-		$this->assertSame( $p1, $moved[ $joined ] );
-		$this->assertSame( $next, $this->subscription_row( $sub_id )['next_payment'] );
-		$this->assertSame( array(), $this->rolled );
-		$this->assertSame( '1', (string) $order->get_meta( '_wplm_renewal_applied' ), 'Not stamped: it can be done once checked.' );
-		$this->assertSame( '', (string) $order->get_meta( RenewalProcessor::ROLLED_BACK_META ) );
-		$this->assertStringContainsString( 'joined subscription #' . $sub_id . ' after this renewal', $this->notes( $order ) );
+		$after = $this->through( $sub_id );
+		$this->assertSame( $p1, $after[ $joined ], 'The joined line keeps the period it was bought for.' );
+		unset( $after[ $joined ] );
+		$this->assertSame( $from, $after, 'The lines the renewal paid for are back one month.' );
+		$this->assertSame( $next0, $this->subscription_row( $sub_id )['next_payment'], 'The next payment follows the renewal\'s lines, not the joined one.' );
+		$this->assertSame( array_keys( $from ), array_map( static fn( $c ) => $c[0]->id, $this->saved ), 'Only the lines that moved are announced.' );
+		$this->assertSame( array( 'rolled_back', 'rolled_back' ), array_map( static fn( $c ) => $c[1], $this->saved ) );
+		$this->assertCount( 1, $this->rolled );
+		$this->assertSame( '', (string) $order->get_meta( '_wplm_renewal_applied' ) );
+		$this->assertNotSame( '', (string) $order->get_meta( RenewalProcessor::ROLLED_BACK_META ), 'Done, not left for a check by hand.' );
+		$notes = $this->notes( $order );
+		$this->assertStringContainsString( 'now paid through ' . $p0 . ' (was ' . $p1 . ')', $notes );
+		$this->assertStringContainsString( 'Kept: Factory, added by order #' . $by . ' (paid through ' . $p1 . ')', $notes );
+		$this->assertStringNotContainsString( 'nothing was changed', $notes );
+	}
+
+	public function test_an_earlier_renewal_refunded_under_a_joined_line_takes_the_next_payment_from_its_own_lines(): void {
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$from   = $this->through( $sub_id );
+		$p0     = (string) reset( $from );
+		$first  = $this->renew( $sub_id );
+		$p1     = $this->next_month( $p0 );
+		list( $joined ) = $this->join_line( $bought, 'factory', $p1 );
+		$this->renew( $sub_id );
+		$p2 = $this->next_month( $p1 );
+		$this->assertSame( $p2, $this->through( $sub_id )[ $joined ], 'The second renewal paid for Factory too.' );
+
+		$this->refund( $first );
+
+		$after = $this->through( $sub_id );
+		$this->assertSame( $p2, $after[ $joined ], 'Not in the refunded renewal: kept.' );
+		unset( $after[ $joined ] );
+		$this->assertSame( $this->all( $from, $p1 ), $after, 'The refunded renewal\'s lines: one month back.' );
+		$this->assertSame( $this->start_of_day_after( $p1 ), $this->subscription_row( $sub_id )['next_payment'], 'Billed next when its own lines run out, not the joined line.' );
+	}
+
+	public function test_a_renewal_paid_before_snapshots_keeps_a_line_a_later_order_added(): void {
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$from   = $this->through( $sub_id );
+		$p0     = (string) reset( $from );
+		$order  = $this->forget_snapshot( $this->renew( $sub_id ) );
+		$p1     = $this->next_month( $p0 );
+		list( $joined, $by ) = $this->join_line( $bought, 'factory', $p1 );
+
+		$order = $this->refund( $order );
+
+		$after = $this->through( $sub_id );
+		$this->assertSame( $p1, $after[ $joined ], 'Added on a later order: kept.' );
+		unset( $after[ $joined ] );
+		$this->assertSame( $from, $after );
+		$this->assertStringContainsString( 'Kept: Factory, added by order #' . $by, $this->notes( $order ) );
 	}
 
 	public function test_a_rollback_run_again_while_it_runs_takes_back_one_period(): void {

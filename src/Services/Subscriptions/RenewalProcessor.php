@@ -336,9 +336,13 @@ class RenewalProcessor {
 	 * ({@see LicenseService::validate()}). An add-ons-only subscription moves only its own lines; a
 	 * licence's status is never changed for it.
 	 *
-	 * Nothing moves, and the order is not stamped — so it can be done once checked — when a dated line
-	 * joined the subscription after the renewal and is paid past where the others would go back to (the
-	 * lines would fall out of step), or when applying the renewal was cut off part-way; the order says so.
+	 * Only the lines the renewal moved (its snapshot) go back, and the subscription's next payment follows
+	 * them alone. A dated line that joined the subscription after the renewal (an add-on bought since,
+	 * co-termed with the renewed period) is not in the snapshot and keeps the period it was bought for;
+	 * the note names it ("Kept: Factory, added by order #N"). The next renewal does not charge for it
+	 * while it is still paid through the period that renewal buys ({@see items_paid_ahead()}), so the
+	 * lines come back in step. Nothing moves, and the order is not stamped, when applying the renewal was
+	 * cut off part-way; the order says so.
 	 *
 	 * The renewal (and invoice) rows become `refunded` and the order is noted. Fires
 	 * `wplm_entitlement_saved` (`rolled_back`) per line, `wplm_license_term_extended` with the earlier
@@ -403,20 +407,8 @@ class RenewalProcessor {
 		$spec   = $n > 0 && in_array( $period, array( 'day', 'week', 'month', 'year' ), true ) ? $this->scheduler->period_to_interval( $n, $period ) : '';
 		$moves  = is_array( $snapshot['lines'] ?? null ) ? $snapshot['lines'] : array();
 
-		// A line that joined after the renewal, paid past where the others would go back to: refuse.
-		$joined = null !== $sub ? $this->joined_since( $sub_id, $moves ) : array();
-		if ( array() !== $joined ) {
-			$order->add_order_note(
-				sprintf(
-					/* translators: 1: line ids, 2: subscription id, 3: their paid-through date */
-					__( 'WPLM: renewal refunded, but line %1$s joined subscription #%2$d after this renewal, paid through %3$s. Moving the other lines back would leave them out of step with it, so nothing was changed. Set the lines\' dates by hand, or set them in step and then set the order to Completed (nothing is extended again) and Refunded again.', 'wp-license-manager' ),
-					implode( ', ', array_map( static fn( $id ) => '#' . $id, array_keys( $joined ) ) ),
-					$sub_id,
-					max( $joined )
-				)
-			);
-			return false;
-		}
+		// Lines that joined after the renewal keep the period they were bought for: named in the note.
+		$kept = null !== $sub ? $this->joined_since( $sub_id, $moves ) : array();
 
 		$renewal_id = (int) ( $snapshot['renewal_id'] ?? 0 );
 		$latest     = null !== $sub && ! $this->renewal_repo->has_later_payment( $sub_id, $renewal_id );
@@ -430,7 +422,7 @@ class RenewalProcessor {
 		$over    = 0;
 		foreach ( $moves as $line_id => $move ) {
 			$why  = null;
-			$back = is_array( $move ) && isset( $move['from'], $move['to'] ) ? $this->entitlements->roll_back_line( (int) $line_id, (string) $move['from'], (string) $move['to'], $n, $period, $why ) : null;
+			$back = is_array( $move ) && isset( $move['from'], $move['to'] ) ? $this->entitlements->roll_back_line( (int) $line_id, (string) $move['from'], (string) $move['to'], $n, $period, $why, $order->get_id() ) : null;
 			if ( null !== $back ) {
 				$lines[ (int) $line_id ] = $back;
 			} elseif ( 'over' === $why ) {
@@ -464,7 +456,7 @@ class RenewalProcessor {
 				&& strtotime( $fresh->next_payment . ' UTC' ) === strtotime( (string) $after . ' UTC' ) ) {
 				$update['next_payment'] = (string) $before;
 			} elseif ( array() !== $lines || null !== $license ) {
-				$derived = $this->next_payment_now( $sub_id, $snapshot );
+				$derived = $this->next_payment_now( $sub_id, $snapshot, array_map( 'intval', array_keys( $moves ) ) );
 				if ( null !== $derived && $derived !== $fresh->next_payment ) {
 					$update['next_payment'] = $derived;
 				}
@@ -484,7 +476,7 @@ class RenewalProcessor {
 			}
 		}
 
-		$this->finish_roll_back( $order, $sub_id, $snapshot, $sub, $lines, $license, $next, $skipped, $over, $latest );
+		$this->finish_roll_back( $order, $sub_id, $snapshot, $sub, $lines, $license, $next, $skipped, $over, $latest, $kept );
 		return true;
 	}
 
@@ -547,13 +539,13 @@ class RenewalProcessor {
 	}
 
 	/**
-	 * A subscription's dated lines a renewal did not move, paid past the earliest date its own lines would
-	 * go back to: lines that joined it after the renewal (co-termed with it), which a rollback would leave
-	 * out of step.
+	 * A subscription's dated lines a renewal did not move, paid past the earliest date its own lines go
+	 * back to: lines that joined it after the renewal (co-termed with it). A rollback leaves them as they
+	 * are — they keep the period they were bought for — and names them in its note.
 	 *
 	 * @param int   $subscription_id The subscription.
 	 * @param array $moves           What the renewal moved: line id => from / to.
-	 * @return array<int, string> Line id => paid-through date.
+	 * @return array<int, \WPLM\Models\Entitlement> Line id => line.
 	 */
 	private function joined_since( int $subscription_id, array $moves ): array {
 		$froms = array();
@@ -569,7 +561,7 @@ class RenewalProcessor {
 		$joined = array();
 		foreach ( $this->entitlements->subscription_lines( $subscription_id ) as $line ) {
 			if ( null !== $line->paid_through && ! array_key_exists( $line->id, $moves ) && ! array_key_exists( (string) $line->id, $moves ) && strcmp( $line->paid_through, $back ) > 0 ) {
-				$joined[ (int) $line->id ] = (string) $line->paid_through;
+				$joined[ (int) $line->id ] = $line;
 			}
 		}
 		return $joined;
@@ -716,6 +708,7 @@ class RenewalProcessor {
 		$lines    = array();
 		$skipped  = 0;
 		$licensed = null;
+		$kept     = array();
 		if ( $classic ) {
 			$snapshot['license'] = array(
 				'id'   => $license->id,
@@ -728,11 +721,16 @@ class RenewalProcessor {
 				if ( $new_through !== $line->paid_through ) {
 					continue; // Not what this renewal set.
 				}
+				if ( null !== $line->order_id && $line->order_id > $order->get_id() ) {
+					$kept[ $line->id ] = $line; // Joined on a later order, co-termed: keeps its period.
+					continue;
+				}
 				$snapshot['lines'][ $line->id ] = array(
 					'from' => $old_through,
 					'to'   => $new_through,
 				);
-				$back                           = $this->entitlements->roll_back_line( $line->id, $old_through, $new_through, $sub->billing_interval, $sub->billing_period );
+				$why                            = null;
+				$back                           = $this->entitlements->roll_back_line( $line->id, $old_through, $new_through, $sub->billing_interval, $sub->billing_period, $why, $order->get_id() );
 				if ( null === $back ) {
 					++$skipped;
 					continue;
@@ -742,7 +740,7 @@ class RenewalProcessor {
 		}
 		$this->sub_repo->update( $sub->id, array( 'next_payment' => $cycle ) );
 
-		$this->finish_roll_back( $order, $sub->id, $snapshot, $sub, $lines, $licensed, $cycle, $skipped, 0, true );
+		$this->finish_roll_back( $order, $sub->id, $snapshot, $sub, $lines, $licensed, $cycle, $skipped, 0, true, $kept );
 		return true;
 	}
 
@@ -760,9 +758,10 @@ class RenewalProcessor {
 	 * @param int               $skipped  Lines left as they were: removed, or moved back already.
 	 * @param int               $over     Lines (or the licence) renewed afresh after this period ended.
 	 * @param bool              $latest   Whether no later renewal was paid.
+	 * @param array             $kept     Lines that joined after the renewal and keep their period: id => line.
 	 * @return void
 	 */
-	private function finish_roll_back( \WC_Order $order, int $sub_id, array $snapshot, ?Subscription $sub, array $lines, ?array $license, ?string $next, int $skipped, int $over, bool $latest ): void {
+	private function finish_roll_back( \WC_Order $order, int $sub_id, array $snapshot, ?Subscription $sub, array $lines, ?array $license, ?string $next, int $skipped, int $over, bool $latest, array $kept = array() ): void {
 		$this->renewal_repo->mark_order_refunded( $order->get_id() );
 
 		// The latest renewal refunded: nothing is billed again until the owner resumes the subscription.
@@ -833,6 +832,21 @@ class RenewalProcessor {
 				$skipped
 			);
 		}
+		if ( array() !== $kept ) {
+			$names = array();
+			foreach ( $kept as $line ) {
+				$names[] = null !== $line->order_id
+					/* translators: 1: module or limit name, 2: order id, 3: its paid-through date */
+					? sprintf( __( '%1$s, added by order #%2$d (paid through %3$s)', 'wp-license-manager' ), $this->entitlements->line_label( $line ), $line->order_id, (string) $line->paid_through )
+					/* translators: 1: module or limit name, 2: its paid-through date */
+					: sprintf( __( '%1$s (paid through %2$s)', 'wp-license-manager' ), $this->entitlements->line_label( $line ), (string) $line->paid_through );
+			}
+			$note .= ' ' . sprintf(
+				/* translators: %s: the lines kept, separated by semicolons */
+				__( 'Kept: %s — joined after this renewal, it keeps the period it was bought for; the next renewal does not charge for it while it is paid ahead.', 'wp-license-manager' ),
+				implode( '; ', $names )
+			);
+		}
 		if ( $held ) {
 			$note .= ' ' . __( 'Renewal refunded — subscription put on hold; resume it to keep billing.', 'wp-license-manager' );
 		}
@@ -881,18 +895,22 @@ class RenewalProcessor {
 	 * The next payment the dates now call for, as a payment sets it: a classic licence's expiry, or the
 	 * start of the day after the subscription's latest dated line. Null when there is none.
 	 *
+	 * Only the lines the refunded renewal moved count: a line that joined since keeps its own period and
+	 * does not set when the subscription is next billed.
+	 *
 	 * @param int   $subscription_id The subscription.
 	 * @param array $snapshot        What the renewal moved (names the licence, if classic).
+	 * @param int[] $line_ids        The lines the renewal moved.
 	 * @return string|null UTC datetime.
 	 */
-	private function next_payment_now( int $subscription_id, array $snapshot ): ?string {
+	private function next_payment_now( int $subscription_id, array $snapshot, array $line_ids ): ?string {
 		if ( is_array( $snapshot['license'] ?? null ) && isset( $snapshot['license']['id'] ) ) {
 			$license = $this->license_service->get_by_id( (int) $snapshot['license']['id'] );
 			return null !== $license ? $license->expires_at : null;
 		}
 		$latest = null;
 		foreach ( $this->entitlements->subscription_lines( $subscription_id ) as $line ) {
-			if ( null !== $line->paid_through && ( null === $latest || strcmp( $line->paid_through, $latest ) > 0 ) ) {
+			if ( null !== $line->paid_through && in_array( (int) $line->id, $line_ids, true ) && ( null === $latest || strcmp( $line->paid_through, $latest ) > 0 ) ) {
 				$latest = $line->paid_through;
 			}
 		}

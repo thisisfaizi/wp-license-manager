@@ -259,24 +259,31 @@ class EntitlementService {
 	/**
 	 * Take back what a refunded renewal added to one line, from what the renewal moved it (`from` →
 	 * `to`): see {@see taken_back()}. Nothing changes when the line is gone or lifetime (`$why` = `gone`),
-	 * ends before `to` — moved back already, or by hand (`earlier`) — or was renewed afresh after the
-	 * refunded period had ended (`over`), so running it twice moves it back once.
+	 * was written by an order later than the refunded renewal's (`joined`: it joined the subscription
+	 * after the renewal and keeps the period it was bought for), ends before `to` — moved back already,
+	 * or by hand (`earlier`) — or was renewed afresh after the refunded period had ended (`over`), so
+	 * running it twice moves it back once.
 	 *
-	 * Fires `wplm_entitlement_saved` with `rolled_back`.
+	 * Fires `wplm_entitlement_saved` with `rolled_back`, only for a line that moved.
 	 *
 	 * @param int         $id       Line id.
 	 * @param string      $from     The paid-through date before the renewal (Y-m-d).
 	 * @param string      $to       The paid-through date the renewal set (Y-m-d).
 	 * @param int         $interval The renewal's billing interval.
 	 * @param string      $period   Its billing period (day|week|month|year).
-	 * @param string|null $why      Set, when nothing changed, to `gone`, `earlier` or `over`.
+	 * @param string|null $why      Set, when nothing changed, to `gone`, `joined`, `earlier` or `over`.
+	 * @param int         $renewal_order The refunded renewal's order (0: not checked).
 	 * @return array{from: string, to: string}|null The line's date before and after, or null when unchanged.
 	 */
-	public function roll_back_line( int $id, string $from, string $to, int $interval = 0, string $period = '', ?string &$why = null ): ?array {
+	public function roll_back_line( int $id, string $from, string $to, int $interval = 0, string $period = '', ?string &$why = null, int $renewal_order = 0 ): ?array {
 		$why  = null;
 		$line = $this->repo->find_by_id( $id );
 		if ( null === $line || null === $line->paid_through ) {
 			$why = 'gone';
+			return null;
+		}
+		if ( $renewal_order > 0 && null !== $line->order_id && $line->order_id > $renewal_order ) {
+			$why = 'joined';
 			return null;
 		}
 		$through = self::taken_back( $line->paid_through, $from, $to, $interval, $period );
@@ -343,6 +350,18 @@ class EntitlementService {
 			$prev = $next;
 		}
 		return null;
+	}
+
+	/**
+	 * A line's name for notes: the module or limit label from its licence's profile, else its code.
+	 *
+	 * @param Entitlement $line The line.
+	 * @return string
+	 */
+	public function line_label( Entitlement $line ): string {
+		$license = $this->licenses->find_by_id( $line->license_id );
+		$profile = null !== $license ? $this->profiles->get( $license->profile ) : null;
+		return null !== $profile ? $profile->code_label( $line->code ) : $line->code;
 	}
 
 	/**
