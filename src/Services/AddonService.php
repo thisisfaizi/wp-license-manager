@@ -587,7 +587,8 @@ class AddonService {
 	 * (awaiting a retry). Its add-ons open — or join — the licence's one add-ons subscription when it is
 	 * completed, on its cycle, so until then that cycle is the licence's: an order on the other cycle
 	 * could be paid for and never added. A paid one (on hold, processing, completed) comes before one
-	 * not paid yet, which may never be.
+	 * not paid yet, which may never be. A line refunded in full (its whole quantity, or its whole total)
+	 * no longer counts: the shop took it back.
 	 *
 	 * @param License $license    The lifetime licence.
 	 * @param int     $skip_order An order not to count (the one being paid for now), 0 for none.
@@ -617,7 +618,8 @@ class AddonService {
 			}
 			foreach ( $order->get_items() as $item ) {
 				if ( ! $item instanceof \WC_Order_Item_Product || (int) $item->get_meta( '_wplm_addon_license_id' ) !== (int) $license->id
-					|| '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $item->get_meta( '_wplm_addon_reverted' ) ) {
+					|| '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $item->get_meta( '_wplm_addon_reverted' )
+					|| self::refunded_in_full( $order, $item ) ) {
 					continue;
 				}
 				$snapshot = json_decode( (string) $item->get_meta( '_wplm_extras' ), true );
@@ -636,6 +638,22 @@ class AddonService {
 			}
 		}
 		return $unpaid;
+	}
+
+	/**
+	 * Whether the shop refunded an order line in full: its whole quantity, or its whole total.
+	 *
+	 * @param \WC_Order              $order The order.
+	 * @param \WC_Order_Item_Product $item  Its line.
+	 * @return bool
+	 */
+	private static function refunded_in_full( \WC_Order $order, \WC_Order_Item_Product $item ): bool {
+		$qty = (int) $item->get_quantity();
+		if ( $qty > 0 && abs( (int) $order->get_qty_refunded_for_item( $item->get_id() ) ) >= $qty ) {
+			return true;
+		}
+		$total = round( (float) $item->get_total(), 4 );
+		return $total > 0 && round( (float) $order->get_total_refunded_for_item( $item->get_id() ), 4 ) >= $total;
 	}
 
 	/**

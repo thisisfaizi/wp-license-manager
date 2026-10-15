@@ -243,7 +243,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   takes the cycle of an order of its owner whose monthly / yearly add-ons are still to be written
   (pending payment, failed — still payable from My account — on hold — a bank transfer awaiting the
   shop — processing, or completed and awaiting a retry; a paid one before one not paid yet;
-  `AddonService::unfulfilled_addons_cycle()`). The product page offers that cycle
+  `AddonService::unfulfilled_addons_cycle()`). A line the shop refunded in full (its whole quantity or
+  its whole total, as WPLM's note for a refused line asks) no longer holds it, though its order stays
+  completed. The product page offers that cycle
   (`cycle_by_license`, `AddonService::offered_cycle()`), and add to cart and checkout refuse the other
   one, naming the order: "choose the same, or cancel that order first" (for a completed order still
   awaiting its add-ons: "choose the same, or contact us"). The fallback form's note under a fixed cycle

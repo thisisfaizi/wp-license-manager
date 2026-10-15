@@ -3068,6 +3068,54 @@ class PackageExtrasTest extends TestCase {
 		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'seats' ) );
 	}
 
+	public function test_a_line_the_shop_refunded_in_full_no_longer_holds_the_licences_addons_cycle(): void {
+		$this->add_seat_plan_offer();
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		// Completed while another request held the licence: nothing added, no add-ons subscription.
+		add_option( 'wplm_addons_lock_' . $base['license_id'], (string) time(), '', 'no' );
+		$first = $this->buy_through_cart(
+			$product,
+			array(
+				'wplm_extras'            => array( 'module:fbr' => '1' ),
+				'wplm_extras_cycle'      => 'month',
+				'wplm_target_license_id' => (string) $base['license_id'],
+			),
+			$base['customer']
+		);
+		delete_option( 'wplm_addons_lock_' . $base['license_id'] );
+		$order  = wc_get_order( $first['order']->get_id() );
+		$item   = array_values( $order->get_items() )[0];
+		$yearly = array(
+			'wplm_extras'            => array( 'seat-plan' => '1' ),
+			'wplm_extras_cycle'      => 'year',
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		wp_set_current_user( $base['customer'] );
+
+		// Part of its price refunded: the line is still to be added, so it still holds the cycle.
+		$this->assertNotWPError( wc_create_refund( array( 'order_id' => $order->get_id(), 'amount' => 300 ) ) );
+		$this->assertFalse( $this->validate( $yearly, $product ) );
+
+		// The shop refunds the line itself (as its note says): it no longer holds anything.
+		$this->assertNotWPError(
+			wc_create_refund(
+				array(
+					'order_id'   => $order->get_id(),
+					'amount'     => 200,
+					'line_items' => array(
+						$item->get_id() => array(
+							'qty'          => 1,
+							'refund_total' => 200,
+						),
+					),
+				)
+			)
+		);
+		$this->assertSame( 'completed', wc_get_order( $order->get_id() )->get_status(), 'A partial refund: the order stays completed.' );
+		$this->assertTrue( $this->validate( $yearly, $product ), 'The customer chooses the cycle again.' );
+	}
+
 	public function test_a_failed_order_still_holds_the_licences_addons_cycle(): void {
 		$this->add_seat_plan_offer();
 		$product = $this->addon_product();
