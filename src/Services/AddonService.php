@@ -641,6 +641,43 @@ class AddonService {
 	}
 
 	/**
+	 * Whether fulfilment adds an order line to the licence it names (`_wplm_addon_license_id`) rather
+	 * than issuing a licence for it, routed as {@see \WPLM\Integrations\WooCommerce\PlanCheckout} routes
+	 * it: extras with no licence type (an add-on plan's), or a stored package whose plan is an add-on
+	 * plan — or that no longer exists (fulfilment fails for it). A licence type's line is never one,
+	 * whatever licence id it carries: orders placed before 1.3.0 may carry a stray one.
+	 *
+	 * @param \WC_Order_Item_Product $item The order line.
+	 * @return bool
+	 */
+	private function adds_to_licence( \WC_Order_Item_Product $item ): bool {
+		if ( '' !== (string) $item->get_meta( '_wplm_dynamic_package' ) ) {
+			return false;
+		}
+		$package_id = (int) $item->get_meta( '_wplm_package_id' );
+		if ( $package_id <= 0 ) {
+			return '' !== (string) $item->get_meta( '_wplm_extras' );
+		}
+		$package = $this->package( $package_id );
+		if ( null === $package ) {
+			return true;
+		}
+		$plan = $this->plan( $package->plan_id );
+		return null !== $plan && $plan->is_addon();
+	}
+
+	/**
+	 * A stored package by id.
+	 *
+	 * @param int $package_id Package id.
+	 * @return Package|null
+	 */
+	private function package( int $package_id ): ?Package {
+		$package = \WPLM\Plugin::get_instance()->container()->make( \WPLM\Repositories\PackageRepository::class )->find_by_id( $package_id );
+		return $package instanceof Package ? $package : null;
+	}
+
+	/**
 	 * Whether the shop refunded an order line in full: its whole quantity, or its whole total. Such a
 	 * line is taken back like a reverted one: fulfilment never adds it, nor opens an add-ons
 	 * subscription for it, and it holds nothing (the licence's cycle, leftovers of an interrupted
@@ -664,7 +701,9 @@ class AddonService {
 	 * checkout) must not be paid now: add-ons on it for an existing licence that could no longer be
 	 * added when it is completed. Every such line is checked as fulfilment will check it
 	 * ({@see line_payment_problem()}): the licence still takes them, it has not since got a module they
-	 * add (another order), and the add-on checks pass. Monthly / yearly add-ons for a lifetime licence
+	 * add (another order), and the add-on checks pass. A licence type's line is issued as a new licence,
+	 * so it is not checked, whatever licence id it carries ({@see adds_to_licence()}). Monthly / yearly
+	 * add-ons for a lifetime licence
 	 * must also still fit its add-ons: not billed on the other cycle now (its add-ons subscription's,
 	 * or a paid order's that will open it), not on another subscription than the one they were sold
 	 * against, and one that can take them ({@see addons_join_problem()}). Checked before payment, as
@@ -679,7 +718,7 @@ class AddonService {
 		foreach ( $order->get_items() as $item ) {
 			if ( ! $item instanceof \WC_Order_Item_Product || (int) $item->get_meta( '_wplm_addon_license_id' ) <= 0
 				|| '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $item->get_meta( '_wplm_addon_reverted' )
-				|| self::refunded_in_full( $order, $item ) ) {
+				|| self::refunded_in_full( $order, $item ) || ! $this->adds_to_licence( $item ) ) {
 				continue;
 			}
 			$snapshot = json_decode( (string) $item->get_meta( '_wplm_extras' ), true );
@@ -738,25 +777,25 @@ class AddonService {
 	 */
 	private function line_payment_problem( \WC_Order $order, \WC_Order_Item_Product $item, License $license ): ?string {
 		try {
-			$json = (string) $item->get_meta( '_wplm_extras' );
-			if ( '' !== $json ) {
-				$plan = $this->plan( (int) $item->get_meta( '_wplm_plan_id' ) );
-				if ( null === $plan || ! $plan->is_addon() ) {
-					return __( 'The add-ons they were bought from are no longer sold.', 'wp-license-manager' );
-				}
-				$this->checked_extras( $order, $license, $plan, $json, null, true );
-				return null;
-			}
 			$package_id = (int) $item->get_meta( '_wplm_package_id' );
-			if ( $package_id <= 0 ) {
+			if ( $package_id > 0 ) {
+				$package = $this->package( $package_id );
+				if ( null === $package ) {
+					return __( 'The add-on bought is no longer sold.', 'wp-license-manager' );
+				}
+				$ok = $this->check_for_user( (int) $order->get_customer_id(), $license, $package, (int) $item->get_quantity() );
+				return is_wp_error( $ok ) ? $ok->get_error_message() : null;
+			}
+			$json = (string) $item->get_meta( '_wplm_extras' );
+			if ( '' === $json ) {
 				return null;
 			}
-			$package = \WPLM\Plugin::get_instance()->container()->make( \WPLM\Repositories\PackageRepository::class )->find_by_id( $package_id );
-			if ( ! $package instanceof Package ) {
-				return __( 'The add-on bought is no longer sold.', 'wp-license-manager' );
+			$plan = $this->plan( (int) $item->get_meta( '_wplm_plan_id' ) );
+			if ( null === $plan || ! $plan->is_addon() ) {
+				return __( 'The add-ons they were bought from are no longer sold.', 'wp-license-manager' );
 			}
-			$ok = $this->check_for_user( (int) $order->get_customer_id(), $license, $package, (int) $item->get_quantity() );
-			return is_wp_error( $ok ) ? $ok->get_error_message() : null;
+			$this->checked_extras( $order, $license, $plan, $json, null, true );
+			return null;
 		} catch ( \RuntimeException $e ) {
 			$message = rtrim( $e->getMessage(), '. ' );
 			return function_exists( 'mb_strtoupper' ) ? mb_strtoupper( mb_substr( $message, 0, 1 ) ) . mb_substr( $message, 1 ) . '.' : ucfirst( $message ) . '.';

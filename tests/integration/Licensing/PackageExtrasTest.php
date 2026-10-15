@@ -3760,4 +3760,42 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( '1', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
 		$this->assertStringContainsString( 'refunded in full', $this->notes( $order ) );
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Final review, round 5 (2026-10-15)
+	// ---------------------------------------------------------------------------------------------
+
+	/** An unpaid order with a licence type's line carrying a licence id, as orders before 1.3.0 could. */
+	private function licence_type_order_with_a_licence_id( int $customer, int $license_id ): \WC_Order {
+		$pkg   = $this->package( 'Monthly' );
+		$order = wc_create_order( array( 'customer_id' => $customer ) );
+		$item  = $order->get_item( $order->add_product( $this->product, 1 ) );
+		$item->add_meta_data( '_wplm_package_id', $pkg->id, true );
+		$item->add_meta_data( '_wplm_plan_id', $pkg->plan_id, true );
+		$item->add_meta_data( '_wplm_addon_license_id', $license_id, true );
+		$item->save();
+		$order->set_payment_method( 'bacs' );
+		$order->calculate_totals();
+		$order->save();
+		$order->update_status( 'failed' );
+		return wc_get_order( $order->get_id() );
+	}
+
+	public function test_a_licence_type_line_with_a_stray_licence_id_can_still_be_paid_and_issues_a_licence(): void {
+		$base     = $this->customer_with( 'Lifetime' );
+		$stranger = $this->customer_with( 'Lifetime' );
+		foreach ( array( $base['license_id'], $stranger['license_id'], 999999 ) as $license_id ) {
+			$order = $this->licence_type_order_with_a_licence_id( $base['customer'], $license_id );
+
+			list( $page, $errors ) = $this->pay_later( $order );
+
+			$this->assertSame( '', $page, 'A licence type is issued as a new licence, whatever licence id it carries.' );
+			$this->assertFalse( $errors->has_errors() );
+		}
+		$order->update_status( 'processing' );
+		wc_get_order( $order->get_id() )->update_status( 'completed' );
+		$order = wc_get_order( $order->get_id() );
+		$this->assertSame( '1', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertNotEmpty( json_decode( (string) array_values( $order->get_items() )[0]->get_meta( '_wplm_license_ids' ), true ) );
+	}
 }

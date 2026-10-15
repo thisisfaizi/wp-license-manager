@@ -266,7 +266,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   fulfilment checks it: the licence still takes add-ons priced like these, it has not since got a
   module they add (another order of the customer's, completed first — before, the stale order was
   charged in full and then refused at fulfilment), and the add-on checks pass (the licence's status,
-  its plan not overdue). A stored add-on is checked at its quantity. Monthly / yearly add-ons for a
+  its plan not overdue). A licence type's line is issued as a new licence whatever licence id an older
+  order left on it, so it is never checked as an add-on. A stored add-on is checked at its quantity. Monthly / yearly add-ons for a
   lifetime licence are also refused when they could no longer be added: the licence's add-ons subscription
   now bills the other cycle, a paid order of the customer's will open it on the other cycle, the
   add-ons subscription it was sold against billed and has ended, or the add-ons subscription cannot
