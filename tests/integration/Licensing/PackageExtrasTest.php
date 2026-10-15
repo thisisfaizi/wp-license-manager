@@ -3005,7 +3005,20 @@ class PackageExtrasTest extends TestCase {
 		$this->checkout()->check_cart_extras();
 		$this->assertStringContainsString( 'not completed yet', $this->first_error() );
 
-		// The order being paid for now is the cart's own, not another.
+		// Left unpaid in the session (the gateway abandoned), but no longer this cart's order: WooCommerce
+		// would place a new order and leave that one payable, so it still counts.
+		WC()->session->set( 'order_awaiting_payment', $first['order']->get_id() );
+		wc_clear_notices();
+		$this->checkout()->check_cart_extras();
+		$this->assertStringContainsString( 'not completed yet', $this->first_error() );
+		$this->assertFalse( wc_get_order( $first['order']->get_id() )->has_cart_hash( WC()->cart->get_cart_hash() ) );
+		WC()->cart->empty_cart();
+
+		// The order being paid for now is the cart's own (WooCommerce pays that order for this cart).
+		WC()->cart->add_to_cart( $product->get_id(), 1, 0, array(), array( 'wplm_extras' => array( 'module:fbr' => 1 ), 'wplm_extras_cycle' => 'month', 'wplm_addon_license_id' => $base['license_id'] ) );
+		$own = wc_get_order( $first['order']->get_id() );
+		$own->set_cart_hash( WC()->cart->get_cart_hash() );
+		$own->save();
 		WC()->session->set( 'order_awaiting_payment', $first['order']->get_id() );
 		wc_clear_notices();
 		$this->checkout()->check_cart_extras();

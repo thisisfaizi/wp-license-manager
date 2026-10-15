@@ -247,8 +247,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   (`cycle_by_license`, `AddonService::offered_cycle()`), and add to cart and checkout refuse the other
   one, naming the order: "choose the same, or cancel that order first" (for a completed order still
   awaiting its add-ons: "choose the same, or contact us"). The fallback form's note under a fixed cycle
-  now says so too. The order being paid for now
-  (`order_awaiting_payment`, the order-pay page) does not count. Before, both orders were accepted and
+  now says so too. The order being paid for now does not count: `order_awaiting_payment` while it is
+  still the cart's own (unpaid and placed for this very cart, so WooCommerce pays it rather than placing
+  a new order), or the order-pay page's. One left in the session for another cart counts. Before, both orders were accepted and
   the second was paid for and could never be added.
 - **An order paid later is checked again before payment.** My account → Pay, the order-pay page
   (`woocommerce_before_pay_action`) and the block checkout's order-pay
