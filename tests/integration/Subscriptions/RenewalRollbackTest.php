@@ -893,4 +893,68 @@ class RenewalRollbackTest extends TestCase {
 		$this->assertSame( 1, (int) $this->license_row( $bought['license_id'] )['status'], 'Inside grace: still active.' );
 		$this->assertStringContainsString( 'unless the subscription is put on hold or cancelled, the renewal cron charges the saved card again on its next run', $this->notes( $order ), 'The shop is told the card will be charged again.' );
 	}
+
+	public function test_a_plan_switch_after_the_renewal_does_not_count_as_a_later_payment(): void {
+		$bought   = $this->buy_classic();
+		$sub_id   = $bought['subscription_id'];
+		$customer = (int) $this->subscription_row( $sub_id )['user_id'];
+		$token    = new \WC_Payment_Token_CC();
+		$token->set_token( 'tok_test' );
+		$token->set_gateway_id( 'm527card' );
+		$token->set_card_type( 'visa' );
+		$token->set_last4( '4242' );
+		$token->set_expiry_month( '12' );
+		$token->set_expiry_year( gmdate( 'Y', strtotime( '+2 years' ) ) );
+		$token->set_user_id( $customer );
+		$token->save();
+		$e0   = $this->utc( -MINUTE_IN_SECONDS );
+		$last = $this->utc( -40 * DAY_IN_SECONDS );
+		$this->set_row(
+			'subscriptions',
+			$sub_id,
+			array(
+				'payment_token_id' => $token->get_id(),
+				'next_payment'     => $e0,
+				'last_payment'     => $last,
+				'failed_attempts'  => 2,
+			)
+		);
+		$this->set_row( 'licenses', $bought['license_id'], array( 'expires_at' => $e0 ) );
+		$created = 0;
+		add_filter(
+			'wplm_create_renewal_order',
+			static function ( $id ) use ( $customer, &$created ) {
+				$order = wc_create_order( array( 'customer_id' => $customer ) );
+				$order->set_total( 1000 );
+				$order->set_status( 'completed' );
+				$order->save();
+				$created = $order->get_id();
+				return $created;
+			}
+		);
+		$this->make( RenewalProcessor::class )->process_due_renewals();
+		$this->assertGreaterThan( 0, $created );
+		// The customer then switches plan: a `switch` row, no order, no payment, no date moved.
+		$this->make( \WPLM\Repositories\RenewalRepository::class )->create(
+			array(
+				'subscription_id' => $sub_id,
+				'order_id'        => null,
+				'type'            => 'switch',
+				'amount'          => 0.0,
+				'status'          => 'success',
+				'gateway_txn'     => null,
+				'scheduled_for'   => $this->utc( 0 ),
+				'processed_at'    => $this->utc( 0 ),
+				'created_at'      => $this->utc( 0 ),
+			)
+		);
+
+		$order = $this->refund( wc_get_order( $created ) );
+
+		$row = $this->subscription_row( $sub_id );
+		$this->assertSame( $e0, $row['next_payment'] );
+		$this->assertSame( $last, $row['last_payment'], 'A switch is not a payment: the refunded one is still the latest, so the payment before it comes back.' );
+		$this->assertSame( 2, (int) $row['failed_attempts'] );
+		$this->assertStringContainsString( 'charges the saved card again on its next run', $this->notes( $order ), 'The shop is still told the card will be charged again.' );
+	}
 }

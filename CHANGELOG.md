@@ -265,7 +265,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     co-termed with the renewal: moving the others back would leave the lines out of step), or when
     applying the renewal was cut off part-way.
   - The subscription is read again before it is written, and its last payment and failed attempts come
-    back only when no later renewal (or switch) was paid, counting one paid while the rollback ran.
+    back only when no later renewal was paid, counting one paid while the rollback ran. A plan switch
+    since is not a payment (it pays no period and moves no date), so it does not stop them.
     Then its next payment comes back exactly; otherwise it follows the dates as a payment sets it (the
     start of the day after the latest dated line, or a classic licence's expiry). Its status is left to
     the renewal cron and dunning. When it was the latest renewal and a classic licence now ends before

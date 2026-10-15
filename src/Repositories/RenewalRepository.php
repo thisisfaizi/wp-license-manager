@@ -126,8 +126,9 @@ class RenewalRepository {
 	}
 
 	/**
-	 * Whether a subscription was paid for, or switched, after a renewal row: a later successful renewal
-	 * or switch row (by id, which never ties).
+	 * Whether a subscription was paid for after a renewal row: a later successful `renewal` row (by id,
+	 * which never ties). A plan switch (`switch` row) is not a payment: it pays no period and moves no
+	 * date, so a renewal refunded after one is still the latest.
 	 *
 	 * @param int $subscription_id Subscription row id.
 	 * @param int $renewal_id      The renewal row.
@@ -139,7 +140,7 @@ class RenewalRepository {
 		$table = $wpdb->prefix . 'wplm_subscription_renewals';
 		return (bool) $wpdb->get_var(
 			$wpdb->prepare(
-				"SELECT id FROM `{$table}` WHERE subscription_id = %d AND id > %d AND type IN ('renewal', 'switch') AND status = 'success' LIMIT 1", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+				"SELECT id FROM `{$table}` WHERE subscription_id = %d AND id > %d AND type = 'renewal' AND status = 'success' LIMIT 1", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
 				$subscription_id,
 				$renewal_id
 			)
