@@ -3615,4 +3615,78 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( 'cut off part-way', $this->notes( $order ) );
 		$this->assertStringContainsString( '#' . $users[0]->id, $this->notes( $order ) );
 	}
+
+	public function test_an_order_paid_later_is_refused_when_the_licence_has_since_got_its_monthly_module(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$fbr     = array(
+			'wplm_extras'            => array( 'module:fbr' => '1' ),
+			'wplm_extras_cycle'      => 'month',
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		$first   = $this->buy_through_cart( $product, $fbr, $base['customer'], false );
+		wc_get_order( $first['order']->get_id() )->update_status( 'failed' );
+		$this->assertSame( '', $this->pay_later( $first['order'] )[0], 'Payable while it could be added.' );
+		$this->buy_through_cart( $product, $fbr, $base['customer'] );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'fbr' ) );
+
+		list( $page, $errors ) = $this->pay_later( $first['order'] );
+
+		$this->assertStringContainsString( 'already has FBR', $page, 'Never charged twice for one module.' );
+		$this->assertStringContainsString( 'order #' . $first['order']->get_order_number(), $page );
+		$this->assertTrue( $errors->has_errors(), 'The block checkout\'s order-pay too.' );
+	}
+
+	public function test_an_order_paid_later_is_refused_when_the_licence_has_since_got_its_lifetime_module(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$factory = array(
+			'wplm_extras'            => array( 'module:factory' => '1' ),
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		$first   = $this->buy_through_cart( $product, $factory, $base['customer'], false );
+		wc_get_order( $first['order']->get_id() )->update_status( 'failed' );
+		$this->buy_through_cart( $product, $factory, $base['customer'] );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'factory' ) );
+
+		list( $page, $errors ) = $this->pay_later( $first['order'] );
+
+		$this->assertStringContainsString( 'already has Factory', $page, 'Never charged twice for one module.' );
+		$this->assertTrue( $errors->has_errors() );
+
+		// One that can still be added is paid as usual.
+		$user = $this->buy_through_cart(
+			$product,
+			array(
+				'wplm_extras'            => array( 'user' => '1' ),
+				'wplm_target_license_id' => (string) $base['license_id'],
+			),
+			$base['customer'],
+			false
+		);
+		list( $page, $errors ) = $this->pay_later( $user['order'] );
+		$this->assertSame( '', $page );
+		$this->assertFalse( $errors->has_errors() );
+	}
+
+	public function test_an_order_paid_later_is_refused_when_its_licence_can_no_longer_take_addons(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$first   = $this->buy_through_cart(
+			$product,
+			array(
+				'wplm_extras'            => array( 'user' => '1' ),
+				'wplm_target_license_id' => (string) $base['license_id'],
+			),
+			$base['customer'],
+			false
+		);
+		wc_get_order( $first['order']->get_id() )->update_status( 'failed' );
+		$this->set_row( 'licenses', $base['license_id'], array( 'status' => 4 ) ); // Suspended.
+
+		list( $page, $errors ) = $this->pay_later( $first['order'] );
+
+		$this->assertStringContainsString( 'nothing can be added to it', $page );
+		$this->assertTrue( $errors->has_errors() );
+	}
 }

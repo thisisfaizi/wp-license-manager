@@ -258,8 +258,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   the second was paid for and could never be added.
 - **An order paid later is checked again before payment.** My account → Pay, the order-pay page
   (`woocommerce_before_pay_action`) and the block checkout's order-pay
-  (`woocommerce_checkout_validate_order_before_payment`) refuse payment of an order whose monthly /
-  yearly add-ons for a lifetime licence could no longer be added: the licence's add-ons subscription
+  (`woocommerce_checkout_validate_order_before_payment`) refuse payment of an order whose add-ons for
+  an existing licence could no longer be added. Every such line, whatever its billing, is checked as
+  fulfilment checks it: the licence still takes add-ons priced like these, it has not since got a
+  module they add (another order of the customer's, completed first — before, the stale order was
+  charged in full and then refused at fulfilment), and the add-on checks pass (the licence's status,
+  its plan not overdue). A stored add-on is checked at its quantity. Monthly / yearly add-ons for a
+  lifetime licence are also refused when they could no longer be added: the licence's add-ons subscription
   now bills the other cycle, a paid order of the customer's will open it on the other cycle, the
   add-ons subscription it was sold against billed and has ended, or the add-ons subscription cannot
   take them (`AddonService::payment_problem()`). A gateway that reports a payment on its own (a late

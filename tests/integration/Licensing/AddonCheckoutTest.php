@@ -822,6 +822,30 @@ class AddonCheckoutTest extends TestCase {
 		$this->assertStringContainsString( 'refunded in full', $this->notes_of( $order ) );
 	}
 
+	public function test_a_stored_addon_order_paid_later_is_refused_when_the_licence_has_since_got_it(): void {
+		$base  = $this->customer_with( 'month' );
+		$stale = wc_create_order( array( 'customer_id' => $base['customer'] ) );
+		$item  = $stale->get_item( $stale->add_product( $this->addon_product, 1 ) );
+		$item->add_meta_data( '_wplm_package_id', $this->addon( 'FBR monthly' )->id, true );
+		$item->add_meta_data( '_wplm_addon_license_id', $base['license_id'], true );
+		$item->save();
+		$stale->calculate_totals();
+		$stale->save();
+		$stale->update_status( 'failed' );
+		$this->buy_addon( $this->addon( 'FBR monthly' ), $base['customer'], $base['license_id'] );
+
+		wc_clear_notices();
+		do_action( 'woocommerce_before_pay_action', wc_get_order( $stale->get_id() ) );
+		$notices = wc_get_notices( 'error' );
+		$errors  = new \WP_Error();
+		do_action( 'woocommerce_checkout_validate_order_before_payment', wc_get_order( $stale->get_id() ), $errors );
+		wc_clear_notices();
+
+		$this->assertNotEmpty( $notices, 'Never charged twice for one add-on.' );
+		$this->assertStringContainsString( 'already has FBR', (string) ( $notices[0]['notice'] ?? '' ) );
+		$this->assertTrue( $errors->has_errors() );
+	}
+
 	private function notes_of( \WC_Order $order ): string {
 		return implode( "\n", array_map( static fn( $n ) => $n->content, wc_get_order_notes( array( 'order_id' => $order->get_id() ) ) ) );
 	}
