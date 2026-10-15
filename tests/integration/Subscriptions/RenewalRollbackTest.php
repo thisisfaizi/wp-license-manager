@@ -361,6 +361,7 @@ class RenewalRollbackTest extends TestCase {
 		$this->assertGreaterThan( 0, $license_id );
 		$this->assertTrue( $this->make( SubscriptionRepository::class )->find_by_id( $addons )->is_addons_only() );
 		$p0       = $this->align_lines( $addons );
+		$this->set_row( 'licenses', $license_id, array( 'status' => 1 ) ); // Activated: in use.
 		$licence  = $this->license_row( $license_id );
 		$lifetime = array_values( array_filter( $this->make( EntitlementRepository::class )->get_by_license( $license_id ), static fn( $l ) => null === $l->paid_through ) );
 		$this->assertNotEmpty( $lifetime );
@@ -374,7 +375,7 @@ class RenewalRollbackTest extends TestCase {
 		$this->assertSame( $this->start_of_day_after( $p0 ), $this->subscription_row( $addons )['next_payment'] );
 		$after = $this->license_row( $license_id );
 		$this->assertSame( array( $licence['status'], $licence['expires_at'] ), array( $after['status'], $after['expires_at'] ), 'The lifetime licence is untouched.' );
-		$this->assertContains( (int) $after['status'], array( 1, 2 ), 'Active or not yet activated: never expired or suspended for it.' );
+		$this->assertSame( 1, (int) $after['status'], 'The licence stays active.' );
 		foreach ( $lifetime as $line ) {
 			$this->assertNull( $this->make( EntitlementRepository::class )->find_by_id( $line->id )->paid_through, 'Its lifetime lines never move.' );
 		}
@@ -384,6 +385,50 @@ class RenewalRollbackTest extends TestCase {
 	// ---------------------------------------------------------------------------------------------
 	// What is kept, and doing it twice
 	// ---------------------------------------------------------------------------------------------
+
+	/** Pay a renewal on a plain order at a fixed time (as the card path records it). */
+	private function pay_on_order( int $subscription_id, int $now ): \WC_Order {
+		$order = wc_create_order( array( 'customer_id' => (int) $this->subscription_row( $subscription_id )['user_id'] ) );
+		$order->set_total( 1000 );
+		$order->set_status( 'completed' );
+		$order->save();
+		$sub = $this->make( SubscriptionRepository::class )->find_by_id( $subscription_id );
+		$this->make( RenewalProcessor::class )->apply_payment( $sub, $order->get_id(), 1000.0, 'txn', $now );
+		return wc_get_order( $order->get_id() );
+	}
+
+	public function test_a_later_renewal_across_months_of_different_lengths_keeps_whole_months(): void {
+		$jan10 = (int) strtotime( '2026-01-10 10:00:00 UTC' ); // Each paid before the end: inside grace.
+		$feb10 = (int) strtotime( '2026-02-10 10:00:00 UTC' );
+
+		// A profile licence paid through 2026-01-14: January (31 days), then February (28 days).
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		global $wpdb;
+		$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->prefix}wplm_entitlements SET paid_through = %s WHERE subscription_id = %d AND paid_through IS NOT NULL", '2026-01-14', $sub_id ) );
+		$this->set_row( 'subscriptions', $sub_id, array( 'next_payment' => $this->start_of_day_after( '2026-01-14' ) ) );
+		$first = $this->pay_on_order( $sub_id, $jan10 );
+		$this->pay_on_order( $sub_id, $feb10 );
+		$this->assertSame( array( '2026-03-14' ), array_values( array_unique( $this->through( $sub_id ) ) ) );
+
+		$this->refund( $first );
+
+		$this->assertSame( array( '2026-02-14' ), array_values( array_unique( $this->through( $sub_id ) ) ), 'One month taken back as a month, not as 31 days.' );
+		$this->assertSame( $this->start_of_day_after( '2026-02-14' ), $this->subscription_row( $sub_id )['next_payment'] );
+
+		// A classic licence ending 2026-01-14 10:00 UTC, the same way.
+		$classic = $this->buy_classic();
+		$this->set_row( 'licenses', $classic['license_id'], array( 'expires_at' => '2026-01-14 10:00:00' ) );
+		$this->set_row( 'subscriptions', $classic['subscription_id'], array( 'next_payment' => '2026-01-14 10:00:00' ) );
+		$first = $this->pay_on_order( $classic['subscription_id'], $jan10 );
+		$this->pay_on_order( $classic['subscription_id'], $feb10 );
+		$this->assertSame( '2026-03-14 10:00:00', $this->license_row( $classic['license_id'] )['expires_at'] );
+
+		$this->refund( $first );
+
+		$this->assertSame( '2026-02-14 10:00:00', $this->license_row( $classic['license_id'] )['expires_at'] );
+		$this->assertSame( '2026-02-14 10:00:00', $this->subscription_row( $classic['subscription_id'] )['next_payment'] );
+	}
 
 	public function test_a_later_renewal_is_kept_when_an_earlier_one_is_refunded(): void {
 		$bought = $this->buy_profile( 'month' );
