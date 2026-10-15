@@ -4708,6 +4708,215 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( 'ended before it billed anything', $this->notes( $order ) );
 	}
 
+	// ---------------------------------------------------------------------------------------------
+	// Undo settled add-ons (1.3.0)
+	// ---------------------------------------------------------------------------------------------
+
+	/** The order screen's "Undo settled add-ons" order action, as WooCommerce runs it on Update. */
+	private function unsettle_from_screen( \WC_Order $order, array $item_ids, string $note = '', ?string $nonce = null ): void {
+		$_POST['wplm_unsettle_items'] = array_map( 'strval', $item_ids );
+		$_POST['wplm_unsettle_note']  = $note;
+		$_POST['wplm_unsettle_nonce'] = $nonce ?? wp_create_nonce( AddonSettlement::UNDO_ACTION . '_' . $order->get_id() );
+		do_action( 'woocommerce_order_action_' . AddonSettlement::UNDO_ACTION, wc_get_order( $order->get_id() ) );
+		unset( $_POST['wplm_unsettle_items'], $_POST['wplm_unsettle_note'], $_POST['wplm_unsettle_nonce'] );
+	}
+
+	/** @return array[] The line's undone settlements. */
+	private function settled_history( \WC_Order_Item_Product $item ): array {
+		$history = json_decode( (string) $this->fresh_item( $item )->get_meta( AddonSettlement::HISTORY_META ), true );
+		return is_array( $history ) ? $history : array();
+	}
+
+	public function test_undoing_a_settled_line_holds_its_module_and_cycle_again_and_completing_the_order_adds_it(): void {
+		list( $product, $base, $first, $opened ) = $this->fbr_line_on_an_unbilled_addons_subscription();
+		$license                                 = $this->make( LicenseRepository::class )->find_by_id( $base['license_id'] );
+		$addons                                  = $this->make( AddonService::class );
+		$owner                                   = $this->shop_owner();
+		$this->assertTrue( $this->settlement()->settle( $first['order']->get_id(), array( $first['item']->get_id() ), $owner, 'credited' )['ok'] );
+		$stamp = AddonSettlement::stamp( $this->fresh_item( $first['item'] ) );
+		$this->assertSame( '1', (string) wc_get_order( $first['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ), 'Settled: done.' );
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'] );
+		$this->assertArrayNotHasKey( 'fbr', $addons->unfulfilled_addon_modules( $license ) );
+
+		wp_set_current_user( $owner );
+		$this->unsettle_from_screen( $first['order'], array( $first['item']->get_id() ), 'customer paid after all' );
+
+		$order = wc_get_order( $first['order']->get_id() );
+		$this->assertSame( array(), AddonSettlement::stamp( $this->fresh_item( $first['item'] ) ), 'The stamp is gone.' );
+		$this->assertFalse( AddonService::settled( $this->fresh_item( $first['item'] ) ) );
+		$history = $this->settled_history( $first['item'] );
+		$this->assertCount( 1, $history );
+		$this->assertSame( $stamp, $history[0]['settled'], 'The stamp moved into the history.' );
+		$this->assertSame( $owner, (int) $history[0]['undone_by'] );
+		$this->assertSame( 'customer paid after all', $history[0]['note'] );
+		$this->assertMatchesRegularExpression( '/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', (string) $history[0]['undone_at'] );
+		$this->assertSame( '', (string) $order->get_meta( '_wplm_plan_fulfilled' ), 'A line is left to do: not fulfilled.' );
+		$this->assertSame( $order->get_id(), ( $addons->unfulfilled_addon_modules( $license )['fbr'] ?? null )?->get_id(), 'FBR is held again.' );
+		$this->assertSame( 'month', $addons->unfulfilled_addons_cycle( $license )['cycle'] ?? null, 'And its monthly cycle.' );
+		$this->assertSame( 'month', $addons->offered_cycle( $license ) );
+		$this->assertStringContainsString( 'settled add-ons on line "' . $first['item']->get_name() . '" reopened by Shop Owner: customer paid after all — set the order to Completed again to add them.', $this->notes( $order ) );
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'], 'Undo never brings back a cancelled subscription.' );
+		$this->assertCount( 0, $this->addon_lines( $base['license_id'], 'fbr' ), 'Undo writes nothing.' );
+		wp_set_current_user( $base['customer'] );
+		$this->assertFalse(
+			$this->validate(
+				array(
+					'wplm_extras'            => array( 'seat-plan' => '1' ),
+					'wplm_extras_cycle'      => 'year',
+					'wplm_target_license_id' => (string) $base['license_id'],
+				),
+				$product
+			),
+			'Held on monthly again.'
+		);
+
+		$this->complete_again( $order );
+
+		$order = wc_get_order( $first['order']->get_id() );
+		$fbr   = $this->addon_lines( $base['license_id'], 'fbr' );
+		$this->assertCount( 1, $fbr, 'Added once.' );
+		$now = $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] );
+		$this->assertNotNull( $now );
+		$this->assertNotSame( $opened, $now->id, 'On a new add-ons subscription: the cancelled one stays cancelled.' );
+		$this->assertSame( $now->id, (int) $fbr[0]->subscription_id );
+		$this->assertSame( 'month', $now->billing_period );
+		$this->assertSame( 1000.0, $this->total( $now->id ), 'Billed once.' );
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'] );
+		$this->assertSame( '1', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertNotSame( '', (string) $this->fresh_item( $first['item'] )->get_meta( '_wplm_entitlement_ids' ) );
+	}
+
+	public function test_only_a_shop_manager_with_the_undo_forms_nonce_can_undo_settled_addons(): void {
+		list( $base, $first, $second ) = $this->factory_refused_on_a_second_order();
+		$item                          = $second['item'];
+		$owner                         = $this->shop_owner();
+		$this->assertTrue( $this->settlement()->settle( $second['order']->get_id(), array( $item->get_id() ), $owner )['ok'] );
+		$settled = fn() => AddonService::settled( $this->fresh_item( $item ) );
+		$this->assertTrue( $settled() );
+
+		// The customer, with a nonce of their own: no.
+		wp_set_current_user( $base['customer'] );
+		$this->unsettle_from_screen( $second['order'], array( $item->get_id() ) );
+		$this->assertTrue( $settled() );
+		$this->assertFalse( $this->settlement()->handle_undo_request( $second['order'], array( 'wplm_unsettle_items' => array( $item->get_id() ), 'wplm_unsettle_nonce' => wp_create_nonce( AddonSettlement::UNDO_ACTION . '_' . $second['order']->get_id() ) ) )['ok'] );
+		$this->assertArrayNotHasKey( AddonSettlement::UNDO_ACTION, $this->settlement()->order_actions( array(), wc_get_order( $second['order']->get_id() ) ) );
+		ob_start();
+		do_action( 'woocommerce_after_order_itemmeta', $item->get_id(), $this->fresh_item( $item ), null );
+		$this->assertStringNotContainsString( 'wplm_unsettle_items', (string) ob_get_clean(), 'No tick for the customer.' );
+
+		// The owner with no nonce, a wrong one, another order's, or the settle form's: no.
+		wp_set_current_user( $owner );
+		$this->unsettle_from_screen( $second['order'], array( $item->get_id() ), '', '' );
+		$this->unsettle_from_screen( $second['order'], array( $item->get_id() ), '', 'not-a-nonce' );
+		$this->unsettle_from_screen( $second['order'], array( $item->get_id() ), '', wp_create_nonce( AddonSettlement::UNDO_ACTION . '_' . $first['order']->get_id() ) );
+		$this->unsettle_from_screen( $second['order'], array( $item->get_id() ), '', wp_create_nonce( AddonSettlement::ACTION . '_' . $second['order']->get_id() ) );
+		$this->assertTrue( $settled() );
+		$this->assertSame( '1', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertSame( array(), $this->settled_history( $item ) );
+
+		// Another order's line: no.
+		$foreign = $this->settlement()->unsettle( $first['order']->get_id(), array( $item->get_id() ), $owner );
+		$this->assertFalse( $foreign['ok'] );
+		$this->assertTrue( $settled() );
+
+		// The screen offers it only where a line is settled: one undo tick, the note and its nonce.
+		$this->assertArrayHasKey( AddonSettlement::UNDO_ACTION, $this->settlement()->order_actions( array(), wc_get_order( $second['order']->get_id() ) ) );
+		$this->assertArrayNotHasKey( AddonSettlement::UNDO_ACTION, $this->settlement()->order_actions( array(), wc_get_order( $first['order']->get_id() ) ) );
+		ob_start();
+		do_action( 'woocommerce_after_order_itemmeta', $item->get_id(), $this->fresh_item( $item ), null );
+		do_action( 'woocommerce_after_order_itemmeta', $first['item']->get_id(), $this->fresh_item( $first['item'] ), null );
+		do_action( 'woocommerce_order_actions_end', $second['order']->get_id() );
+		$html = (string) ob_get_clean();
+		$this->assertSame( 1, substr_count( $html, 'name="wplm_unsettle_items[]"' ), 'One tick: the settled line only.' );
+		$this->assertStringContainsString( 'value="' . $item->get_id() . '"', $html );
+		$this->assertStringContainsString( 'name="wplm_unsettle_nonce"', $html );
+		$this->assertStringContainsString( 'name="wplm_unsettle_note"', $html );
+		$this->assertStringNotContainsString( 'name="wplm_settle_nonce"', $html, 'Nothing left to settle on it.' );
+
+		// The owner, from the order screen: yes.
+		$this->unsettle_from_screen( $second['order'], array( $item->get_id() ), 'Reopened' );
+		$this->assertFalse( $settled() );
+		$this->assertSame( $owner, (int) ( $this->settled_history( $item )[0]['undone_by'] ?? 0 ) );
+		$this->assertSame( '', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+	}
+
+	public function test_undoing_twice_changes_nothing_more(): void {
+		list( , , $second ) = $this->factory_refused_on_a_second_order();
+		$owner              = $this->shop_owner();
+		$this->settlement()->settle( $second['order']->get_id(), array( $second['item']->get_id() ), $owner );
+
+		$first = $this->settlement()->unsettle( $second['order']->get_id(), array( $second['item']->get_id() ), $owner, 'once' );
+		$this->assertTrue( $first['ok'], $first['message'] );
+		$this->assertSame( array( $second['item']->get_id() ), $first['settled'], 'Reopened the first time.' );
+		$this->assertCount( 1, $this->settled_history( $second['item'] ) );
+		$notes = count( wc_get_order_notes( array( 'order_id' => $second['order']->get_id() ) ) );
+
+		$again = $this->settlement()->unsettle( $second['order']->get_id(), array( $second['item']->get_id() ), $this->shop_owner(), 'twice' );
+
+		$this->assertTrue( $again['ok'], $again['message'] );
+		$this->assertSame( array(), $again['settled'] );
+		$history = $this->settled_history( $second['item'] );
+		$this->assertCount( 1, $history, 'No second history entry.' );
+		$this->assertSame( 'once', $history[0]['note'] );
+		$this->assertCount( $notes, wc_get_order_notes( array( 'order_id' => $second['order']->get_id() ) ), 'No second note.' );
+		$this->assertFalse( AddonService::settled( $this->fresh_item( $second['item'] ) ) );
+	}
+
+	public function test_undoing_settled_addons_works_the_same_on_hpos_order_storage(): void {
+		update_option( 'woocommerce_custom_orders_table_enabled', 'yes' );
+		update_option( 'woocommerce_custom_orders_table_data_sync_enabled', 'no' );
+		$this->assertTrue( \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled() );
+
+		list( $base, , $second ) = $this->factory_refused_on_a_second_order();
+		$this->assertNotSame( 'shop_order', get_post_type( $second['order']->get_id() ), 'Not in posts storage.' );
+		$license = $this->make( LicenseRepository::class )->find_by_id( $base['license_id'] );
+		wp_set_current_user( $this->shop_owner() );
+		$this->settle_from_screen( $second['order'], array( $second['item']->get_id() ), 'HPOS' );
+		$this->assertSame( '1', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertArrayHasKey( AddonSettlement::UNDO_ACTION, $this->settlement()->order_actions( array(), wc_get_order( $second['order']->get_id() ) ) );
+
+		$this->unsettle_from_screen( $second['order'], array( $second['item']->get_id() ), 'HPOS undo' );
+
+		$order = wc_get_order( $second['order']->get_id() );
+		$this->assertFalse( AddonService::settled( $this->fresh_item( $second['item'] ) ) );
+		$this->assertSame( 'HPOS undo', $this->settled_history( $second['item'] )[0]['note'] ?? null );
+		$this->assertSame( '', (string) $order->get_meta( '_wplm_plan_fulfilled' ), 'Cleared in the HPOS meta table.' );
+		$this->assertArrayHasKey( 'factory', $this->make( AddonService::class )->unfulfilled_addon_modules( $license ) );
+		$this->assertStringContainsString( 'reopened by Shop Owner: HPOS undo', $this->notes( $order ) );
+	}
+
+	public function test_settle_undo_settle_round_trip(): void {
+		list( $base, , $second ) = $this->factory_refused_on_a_second_order();
+		$license                 = $this->make( LicenseRepository::class )->find_by_id( $base['license_id'] );
+		$addons                  = $this->make( AddonService::class );
+		$owner                   = $this->shop_owner();
+		$total                   = $this->total( $base['subscription_id'] );
+
+		$this->assertTrue( $this->settlement()->settle( $second['order']->get_id(), array( $second['item']->get_id() ), $owner, 'first' )['ok'] );
+		$this->assertTrue( $this->settlement()->unsettle( $second['order']->get_id(), array( $second['item']->get_id() ), $owner, 'reopen' )['ok'] );
+		$this->assertArrayHasKey( 'factory', $addons->unfulfilled_addon_modules( $license ), 'Held again.' );
+
+		// Completed again: the usual checks run, and refuse it again with the usual note.
+		$this->complete_again( $second['order'] );
+		$order = wc_get_order( $second['order']->get_id() );
+		$this->assertSame( '', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertCount( 1, $this->factory_lines( $base['license_id'] ), 'Refused again: nothing added.' );
+		$this->assertGreaterThanOrEqual( 2, substr_count( $this->notes( $order ), 'already has Factory' ), 'Refused again, with the usual note.' );
+		$this->assertTrue( $addons->settleable( $order, $this->fresh_item( $second['item'] ) ), 'It can be settled again.' );
+
+		$again = $this->settlement()->settle( $second['order']->get_id(), array( $second['item']->get_id() ), $owner, 'second' );
+
+		$this->assertTrue( $again['ok'], $again['message'] );
+		$this->assertSame( array( $second['item']->get_id() ), $again['settled'] );
+		$this->assertSame( 'second', AddonSettlement::stamp( $this->fresh_item( $second['item'] ) )['note'] ?? null, 'A fresh stamp.' );
+		$history = $this->settled_history( $second['item'] );
+		$this->assertCount( 1, $history, 'The first settlement is kept.' );
+		$this->assertSame( 'first', $history[0]['settled']['note'] ?? null );
+		$this->assertSame( '1', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertSame( array(), $addons->unfulfilled_addon_modules( $license ) );
+		$this->assertSame( $total, $this->total( $base['subscription_id'] ), 'Nothing billed.' );
+	}
+
 	public function test_refunding_only_the_addons_part_of_a_new_licence_line_does_not_close_it_but_settling_does(): void {
 		$product = $this->addon_product();
 		$first   = $this->new_purchase_awaiting_its_extras( 'Lifetime', array( 'module:factory' => '1' ) );

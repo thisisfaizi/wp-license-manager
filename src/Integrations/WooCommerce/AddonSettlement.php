@@ -48,6 +48,12 @@ class AddonSettlement {
 	/** The order line meta that records it. */
 	public const META = '_wplm_addon_settled';
 
+	/** The "Undo settled add-ons" order action, and its nonce action's prefix. */
+	public const UNDO_ACTION = 'wplm_unsettle_addons';
+
+	/** The order line meta that keeps every undone settlement (JSON list). */
+	public const HISTORY_META = '_wplm_addon_settled_history';
+
 	/** @var AddonService */
 	private AddonService $addons;
 
@@ -64,6 +70,7 @@ class AddonSettlement {
 		add_action( 'woocommerce_order_actions_end', array( $this, 'render_note_field' ) );
 		add_action( 'woocommerce_after_order_itemmeta', array( $this, 'render_item' ), 10, 3 );
 		add_action( 'woocommerce_order_action_' . self::ACTION, array( $this, 'handle_action' ) );
+		add_action( 'woocommerce_order_action_' . self::UNDO_ACTION, array( $this, 'handle_undo_action' ) );
 	}
 
 	/**
@@ -82,12 +89,29 @@ class AddonSettlement {
 		return $found;
 	}
 
+	/**
+	 * The lines of an order whose add-ons are marked settled (which "Undo settled add-ons" reopens).
+	 *
+	 * @param \WC_Order $order The order.
+	 * @return array<int, \WC_Order_Item_Product> By item id.
+	 */
+	public function settled_items( \WC_Order $order ): array {
+		$found = array();
+		foreach ( $order->get_items() as $id => $item ) {
+			if ( $item instanceof \WC_Order_Item_Product && AddonService::settled( $item ) ) {
+				$found[ (int) $id ] = $item;
+			}
+		}
+		return $found;
+	}
+
 	// -------------------------------------------------------------------------
 	// The order screen
 	// -------------------------------------------------------------------------
 
 	/**
-	 * `woocommerce_order_actions`: offer "Mark add-ons settled" on an order with a line to settle.
+	 * `woocommerce_order_actions`: offer "Mark add-ons settled" on an order with a line to settle, and
+	 * "Undo settled add-ons" on an order with a settled line.
 	 *
 	 * @param mixed $actions Action key => label.
 	 * @param mixed $order   The order (WooCommerce 7.x+), else the screen's.
@@ -95,23 +119,39 @@ class AddonSettlement {
 	 */
 	public function order_actions( $actions, $order = null ) {
 		$order = $order instanceof \WC_Order ? $order : ( $GLOBALS['theorder'] ?? null );
-		if ( ! is_array( $actions ) || ! $order instanceof \WC_Order || ! current_user_can( 'manage_woocommerce' )
-			|| array() === $this->settleable_items( $order ) ) {
+		if ( ! is_array( $actions ) || ! $order instanceof \WC_Order || ! current_user_can( 'manage_woocommerce' ) ) {
 			return $actions;
 		}
-		$actions[ self::ACTION ] = __( 'Mark add-ons settled', 'wp-license-manager' );
+		if ( array() !== $this->settleable_items( $order ) ) {
+			$actions[ self::ACTION ] = __( 'Mark add-ons settled', 'wp-license-manager' );
+		}
+		if ( array() !== $this->settled_items( $order ) ) {
+			$actions[ self::UNDO_ACTION ] = __( 'Undo settled add-ons', 'wp-license-manager' );
+		}
 		return $actions;
 	}
 
 	/**
-	 * `woocommerce_order_actions_end`: the note and the nonce for "Mark add-ons settled".
+	 * `woocommerce_order_actions_end`: the note and the nonce for "Mark add-ons settled", and for "Undo
+	 * settled add-ons" — each only where it applies.
 	 *
 	 * @param mixed $order_id The order id.
 	 * @return void
 	 */
 	public function render_note_field( $order_id ): void {
 		$order = wc_get_order( (int) $order_id );
-		if ( ! $order instanceof \WC_Order || ! current_user_can( 'manage_woocommerce' ) || array() === $this->settleable_items( $order ) ) {
+		if ( ! $order instanceof \WC_Order || ! current_user_can( 'manage_woocommerce' ) ) {
+			return;
+		}
+		if ( array() !== $this->settled_items( $order ) ) {
+			echo '<li class="wide wplm-unsettle-addons">';
+			echo '<label for="wplm_unsettle_note"><strong>' . esc_html__( 'Undo settled add-ons', 'wp-license-manager' ) . '</strong></label>';
+			echo '<textarea id="wplm_unsettle_note" name="wplm_unsettle_note" rows="2" style="width:100%;" placeholder="' . esc_attr__( 'Note (optional), e.g. the customer paid after all', 'wp-license-manager' ) . '"></textarea>';
+			echo '<p class="description">' . esc_html__( 'To reopen settled add-on lines: tick them in the items list, choose "Undo settled add-ons" above, then Update. Undo adds, removes, bills and refunds nothing; the lines hold their modules again, and setting the order to Completed again adds them, with the usual checks.', 'wp-license-manager' ) . '</p>';
+			wp_nonce_field( self::UNDO_ACTION . '_' . $order->get_id(), 'wplm_unsettle_nonce', false );
+			echo '</li>';
+		}
+		if ( array() === $this->settleable_items( $order ) ) {
 			return;
 		}
 		echo '<li class="wide wplm-settle-addons">';
@@ -147,6 +187,14 @@ class AddonSettlement {
 				$text .= ' ' . (string) $stamp['note'];
 			}
 			echo '<div class="wplm-addon-settled"><small>' . esc_html( $text ) . '</small></div>';
+			if ( current_user_can( 'manage_woocommerce' ) ) {
+				printf(
+					'<div class="wplm-unsettle-item"><label><input type="checkbox" name="wplm_unsettle_items[]" value="%1$d" /> %2$s</label> <small>%3$s</small></div>',
+					(int) $item_id,
+					esc_html__( 'Undo settled add-ons', 'wp-license-manager' ),
+					esc_html__( '(then choose "Undo settled add-ons" in Order actions)', 'wp-license-manager' )
+				);
+			}
 			return;
 		}
 		$order = $item->get_order();
@@ -336,6 +384,145 @@ class AddonSettlement {
 			return self::result( false, implode( ' ', $problems ), $settled );
 		}
 		return self::result( true, trim( __( 'Add-ons marked settled.', 'wp-license-manager' ) . ' ' . implode( ' ', $problems ) ), $settled );
+	}
+
+	// -------------------------------------------------------------------------
+	// Undo
+	// -------------------------------------------------------------------------
+
+	/**
+	 * `woocommerce_order_action_wplm_unsettle_addons`: run on the order screen's Update (posts and HPOS
+	 * alike). A refusal is shown on the order screen.
+	 *
+	 * @param mixed $order The order.
+	 * @return void
+	 */
+	public function handle_undo_action( $order ): void {
+		if ( ! $order instanceof \WC_Order ) {
+			return;
+		}
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified in handle_undo_request().
+		$result = $this->handle_undo_request( $order, wp_unslash( $_POST ) );
+		if ( ! $result['ok'] && class_exists( 'WC_Admin_Meta_Boxes' ) ) {
+			\WC_Admin_Meta_Boxes::add_error( $result['message'] );
+		}
+	}
+
+	/**
+	 * Check the request (capability and nonce), then reopen the ticked settled lines.
+	 *
+	 * @param \WC_Order $order   The order.
+	 * @param array     $request The posted form, unslashed: `wplm_unsettle_nonce`, `wplm_unsettle_items[]`,
+	 *                           `wplm_unsettle_note`.
+	 * @return array{ok: bool, message: string, settled: int[]} `settled`: the lines reopened.
+	 */
+	public function handle_undo_request( \WC_Order $order, array $request ): array {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			return self::result( false, __( 'You are not allowed to undo settled add-ons.', 'wp-license-manager' ) );
+		}
+		$nonce = isset( $request['wplm_unsettle_nonce'] ) ? sanitize_text_field( (string) $request['wplm_unsettle_nonce'] ) : '';
+		if ( ! wp_verify_nonce( $nonce, self::UNDO_ACTION . '_' . $order->get_id() ) ) {
+			return self::result( false, __( 'The page had expired, so no settled add-ons were reopened. Reload the order and try again.', 'wp-license-manager' ) );
+		}
+		$items = isset( $request['wplm_unsettle_items'] ) ? array_map( 'absint', (array) $request['wplm_unsettle_items'] ) : array();
+		$note  = isset( $request['wplm_unsettle_note'] ) ? sanitize_textarea_field( (string) $request['wplm_unsettle_note'] ) : '';
+		return $this->unsettle( $order->get_id(), $items, get_current_user_id(), $note );
+	}
+
+	/**
+	 * Reopen settled order lines: the mirror of {@see settle()}. Each line's stamp moves into
+	 * `_wplm_addon_settled_history` (appended: `settled` — the stamp —, `undone_by`, `undone_at` UTC,
+	 * `note`) and `_wplm_addon_settled` is deleted, so the line holds its modules and add-ons cycle again;
+	 * the order's fulfilled mark goes when a line of it is left to do ({@see AddonService::order_lines_done()}),
+	 * so completing the order again adds the line through the usual checks — it may join or open an
+	 * add-ons subscription, or be refused again with the usual note. Writes no line and brings back no
+	 * subscription settling cancelled. A line of the order that is not settled is left as it is (no note).
+	 * Claims the order's fulfilment lock, like settling.
+	 *
+	 * @param int    $order_id The order.
+	 * @param int[]  $item_ids Its lines.
+	 * @param int    $user_id  Who reopens them.
+	 * @param string $note     Why (optional).
+	 * @param int    $now      Unix time, 0 for now (tests).
+	 * @return array{ok: bool, message: string, settled: int[]} `settled`: the lines reopened.
+	 */
+	public function unsettle( int $order_id, array $item_ids, int $user_id, string $note = '', int $now = 0 ): array {
+		$item_ids = array_values( array_unique( array_filter( array_map( 'intval', $item_ids ) ) ) );
+		if ( array() === $item_ids ) {
+			return self::result( false, __( 'Tick the settled add-on lines to reopen in the items list, then choose "Undo settled add-ons" again.', 'wp-license-manager' ) );
+		}
+		$lock = 'wplm_fulfil_lock_' . $order_id;
+		if ( ! \WPLM\Support\Lock::claim( $lock, PlanCheckout::FULFIL_LOCK_TTL ) ) {
+			return self::result( false, __( 'This order is being fulfilled right now, so no settled add-ons were reopened. Try again in a few minutes.', 'wp-license-manager' ) );
+		}
+		try {
+			$order = wc_get_order( $order_id );
+			if ( ! $order instanceof \WC_Order ) {
+				return self::result( false, __( 'That order no longer exists.', 'wp-license-manager' ) );
+			}
+			$items    = $order->get_items();
+			$by       = self::user_name( $user_id );
+			$note     = trim( $note );
+			$reopened = array();
+			$foreign  = array();
+			foreach ( $item_ids as $id ) {
+				$item = $items[ $id ] ?? null;
+				if ( ! $item instanceof \WC_Order_Item_Product ) {
+					$foreign[] = '#' . $id;
+					continue;
+				}
+				if ( ! AddonService::settled( $item ) ) {
+					continue; // Not settled (or reopened before): nothing to do.
+				}
+				$history   = json_decode( (string) $item->get_meta( self::HISTORY_META ), true );
+				$history   = is_array( $history ) ? $history : array();
+				$history[] = array(
+					'settled'   => self::stamp( $item ),
+					'undone_by' => $user_id,
+					'undone_at' => gmdate( 'Y-m-d H:i:s', $now > 0 ? $now : time() ),
+					'note'      => $note,
+				);
+				$item->update_meta_data( self::HISTORY_META, wp_json_encode( $history ) );
+				$item->delete_meta_data( self::META );
+				$item->save_meta_data();
+				$order->add_order_note(
+					'' !== $note
+						? sprintf(
+							/* translators: 1: order line name, 2: user name, 3: the note */
+							__( 'WPLM: settled add-ons on line "%1$s" reopened by %2$s: %3$s — set the order to Completed again to add them.', 'wp-license-manager' ),
+							$item->get_name(),
+							$by,
+							$note
+						)
+						: sprintf(
+							/* translators: 1: order line name, 2: user name */
+							__( 'WPLM: settled add-ons on line "%1$s" reopened by %2$s — set the order to Completed again to add them.', 'wp-license-manager' ),
+							$item->get_name(),
+							$by
+						)
+				);
+				$reopened[] = $id;
+			}
+
+			if ( array() !== $reopened && '1' === (string) $order->get_meta( '_wplm_plan_fulfilled' ) && ! $this->addons->order_lines_done( $order ) ) {
+				$order->delete_meta_data( '_wplm_plan_fulfilled' );
+				$order->save();
+			}
+		} finally {
+			\WPLM\Support\Lock::release( $lock );
+		}
+
+		if ( array() !== $foreign ) {
+			/* translators: %s: order line ids */
+			return self::result( false, sprintf( __( 'These are not lines of this order, so they were not reopened: %s.', 'wp-license-manager' ), implode( ', ', $foreign ) ), $reopened );
+		}
+		return self::result(
+			true,
+			array() !== $reopened
+				? __( 'Settled add-ons reopened. Set the order to Completed again to add them.', 'wp-license-manager' )
+				: __( 'Those lines were not settled: nothing to undo.', 'wp-license-manager' ),
+			$reopened
+		);
 	}
 
 	// -------------------------------------------------------------------------

@@ -213,7 +213,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     off before recording them — is never settled (no tick, no action): completing the order again
     records them (`AddonService::retry_records()`), and they are billed.
   - Settling twice changes nothing and adds no second note. It claims the order's fulfilment lock, so
-    it never races a completion. There is no undo.
+    it never races a completion.
+- **Undo settled add-ons** (the same order screen, posts storage and HPOS). A settled line gets an
+  **Undo settled add-ons** tick, and the order an **Undo settled add-ons** order action with an optional
+  note — the same rules as settling: `manage_woocommerce`, its own nonce (`wplm_unsettle_addons_<id>`)
+  and the order's fulfilment lock.
+  - Undo moves the stamp into `_wplm_addon_settled_history` (a JSON list of `settled` — the stamp —,
+    `undone_by`, `undone_at` UTC and `note`) and deletes `_wplm_addon_settled`, so the line holds its
+    modules and add-ons cycle again. The order's fulfilled mark (`_wplm_plan_fulfilled`) goes when a
+    line of the order is left to do, and the order note says "settled add-ons on line "X" reopened by Y
+    — set the order to Completed again to add them".
+  - It writes no line and brings back no add-ons subscription settling cancelled. Completing the order
+    again runs the usual checks: the line may join or open an add-ons subscription, or be refused again
+    with the usual note (and then be settled again).
+  - Undoing a line that is not settled does nothing (no note, no history entry).
 
 ### Changed
 - `AddonService::apply()` now writes through one private line writer, shared with the new
