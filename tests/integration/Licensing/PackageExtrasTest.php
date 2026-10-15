@@ -3456,4 +3456,163 @@ class PackageExtrasTest extends TestCase {
 		);
 		$this->assertSame( 'Choose an add-on, or tick at least one add-on, before adding to cart.', $this->first_error() );
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Final review (2026-10-15): a line refunded in full is never added; an order paid later is checked
+	// as fulfilment will check it; a refund never leaves an empty pending add-ons subscription behind
+	// ---------------------------------------------------------------------------------------------
+
+	/**
+	 * One order for a lifetime licence with two lines: FBR billed every month, and a user for life.
+	 *
+	 * @return \WC_Order Not paid yet.
+	 */
+	private function fbr_and_user_order( \WC_Product $product, array $base ): \WC_Order {
+		wp_set_current_user( $base['customer'] );
+		$lines = array(
+			array(
+				'wplm_extras'       => array( 'module:fbr' => '1' ),
+				'wplm_extras_cycle' => 'month',
+			),
+			array( 'wplm_extras' => array( 'user' => '1' ) ),
+		);
+		foreach ( $lines as $post ) {
+			$post['wplm_target_license_id'] = (string) $base['license_id'];
+			foreach ( $post as $field => $value ) {
+				$_POST[ $field ] = $value;
+			}
+			$this->assertTrue( apply_filters( 'woocommerce_add_to_cart_validation', true, $product->get_id(), 1 ) );
+			$this->assertNotFalse( WC()->cart->add_to_cart( $product->get_id(), 1 ) );
+			foreach ( array_keys( $post ) as $field ) {
+				unset( $_POST[ $field ] );
+			}
+		}
+		WC()->cart->calculate_totals();
+		$order = new \WC_Order();
+		$order->set_customer_id( $base['customer'] );
+		WC()->checkout()->create_order_line_items( $order, WC()->cart );
+		$order->set_payment_method( 'bacs' );
+		$order->calculate_totals();
+		$order->save();
+		WC()->cart->empty_cart();
+		return $order;
+	}
+
+	/** The shop refunds one order line in full, as WPLM's refusal note tells it to. */
+	private function refund_line( \WC_Order $order, \WC_Order_Item_Product $item ): void {
+		$total = (float) $item->get_total();
+		$this->assertNotWPError(
+			wc_create_refund(
+				array(
+					'order_id'   => $order->get_id(),
+					'amount'     => $total,
+					'line_items' => array(
+						$item->get_id() => array(
+							'qty'          => 1,
+							'refund_total' => $total,
+						),
+					),
+				)
+			)
+		);
+	}
+
+	public function test_a_line_refunded_in_full_is_never_added_when_the_order_is_completed_again(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$order   = $this->fbr_and_user_order( $product, $base );
+		// Completed while another request held the licence: both lines refused.
+		add_option( 'wplm_addons_lock_' . $base['license_id'], (string) time(), '', 'no' );
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+		delete_option( 'wplm_addons_lock_' . $base['license_id'] );
+		$order = wc_get_order( $order->get_id() );
+		$items = array_values( $order->get_items() );
+		$this->refund_line( $order, $items[0] );
+		$this->assertSame( 'completed', wc_get_order( $order->get_id() )->get_status() );
+
+		// The owner sets it to Completed again, for the user line.
+		$this->complete_again( $order );
+
+		$order = wc_get_order( $order->get_id() );
+		$this->assertCount( 0, $this->addon_lines( $base['license_id'], 'fbr' ), 'Refunded: never added.' );
+		$this->assertNull( $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] ), 'Nothing billed every month for it.' );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'users' ), 'The line paid for is added.' );
+		$this->assertSame( '', (string) \WC_Order_Factory::get_order_item( $items[0]->get_id() )->get_meta( '_wplm_entitlement_ids' ) );
+		$this->assertSame( '1', (string) $order->get_meta( '_wplm_plan_fulfilled' ), 'Nothing left to add.' );
+		$this->assertStringContainsString( 'refunded in full', $this->notes( $order ) );
+	}
+
+	public function test_a_line_refunded_in_full_before_completion_leaves_the_cycle_to_the_next_order(): void {
+		$this->add_seat_plan_offer();
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$first   = $this->fbr_and_user_order( $product, $base );
+		$first->update_status( 'processing' );
+		$first = wc_get_order( $first->get_id() );
+		$this->refund_line( $first, array_values( $first->get_items() )[0] );
+
+		// The monthly line is gone: the customer chooses the cycle again.
+		$yearly = array(
+			'wplm_extras'            => array( 'seat-plan' => '1' ),
+			'wplm_extras_cycle'      => 'year',
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		$second = $this->buy_through_cart( $product, $yearly, $base['customer'], false );
+		wc_get_order( $second['order']->get_id() )->update_status( 'processing' );
+
+		wc_get_order( $first->get_id() )->update_status( 'completed' );
+		wc_get_order( $second['order']->get_id() )->update_status( 'completed' );
+
+		$this->assertCount( 0, $this->addon_lines( $base['license_id'], 'fbr' ), 'Refunded: never added.' );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'users' ) );
+		$seats = $this->addon_lines( $base['license_id'], 'seats' );
+		$this->assertCount( 1, $seats, 'The yearly seat paid for is added.' );
+		$addons = $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] );
+		$this->assertSame( 'year', $addons->billing_period );
+		$this->assertSame( (int) $addons->id, (int) $seats[0]->subscription_id );
+		$this->assertSame( '1', (string) wc_get_order( $first->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertSame( '1', (string) wc_get_order( $second['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+	}
+
+	public function test_a_line_refunded_in_full_never_claims_what_an_interrupted_attempt_left_on_the_licence(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		wp_set_current_user( $base['customer'] );
+		foreach ( array( array( 'module:factory' => '1' ), array( 'user' => '2' ) ) as $extras ) {
+			$_POST['wplm_extras']            = $extras;
+			$_POST['wplm_target_license_id'] = (string) $base['license_id'];
+			$this->assertTrue( apply_filters( 'woocommerce_add_to_cart_validation', true, $product->get_id(), 1 ) );
+			$this->assertNotFalse( WC()->cart->add_to_cart( $product->get_id(), 1 ) );
+			unset( $_POST['wplm_extras'], $_POST['wplm_target_license_id'] );
+		}
+		WC()->cart->calculate_totals();
+		$order = new \WC_Order();
+		$order->set_customer_id( $base['customer'] );
+		WC()->checkout()->create_order_line_items( $order, WC()->cart );
+		$order->set_payment_method( 'bacs' );
+		$order->calculate_totals();
+		$order->save();
+		WC()->cart->empty_cart();
+		// The first line fails; the second is written, then the request dies before it is recorded.
+		$this->break_next = true;
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+		$items = array_values( wc_get_order( $order->get_id() )->get_items() );
+		$users = $this->addon_lines( $base['license_id'], 'users' );
+		$this->assertCount( 1, $users );
+		$this->lose_the_stamp( $items[1] );
+		// The shop refunds the second line in full.
+		$this->refund_line( wc_get_order( $order->get_id() ), $items[1] );
+
+		$this->complete_again( $order );
+
+		$order = wc_get_order( $order->get_id() );
+		$this->assertSame( array( $users[0]->id ), array_map( static fn( $l ) => $l->id, $this->addon_lines( $base['license_id'], 'users' ) ), 'Nothing removed automatically.' );
+		$this->assertCount( 0, $this->addon_lines( $base['license_id'], 'factory' ), 'The leftovers are no line\'s now: nothing is written beside them.' );
+		$this->assertSame( '', (string) \WC_Order_Factory::get_order_item( $items[1]->get_id() )->get_meta( '_wplm_entitlement_ids' ), 'Never recorded for a refunded line.' );
+		$this->assertSame( '', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertStringContainsString( 'cut off part-way', $this->notes( $order ) );
+		$this->assertStringContainsString( '#' . $users[0]->id, $this->notes( $order ) );
+	}
 }

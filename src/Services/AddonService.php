@@ -641,13 +641,16 @@ class AddonService {
 	}
 
 	/**
-	 * Whether the shop refunded an order line in full: its whole quantity, or its whole total.
+	 * Whether the shop refunded an order line in full: its whole quantity, or its whole total. Such a
+	 * line is taken back like a reverted one: fulfilment never adds it, nor opens an add-ons
+	 * subscription for it, and it holds nothing (the licence's cycle, leftovers of an interrupted
+	 * attempt). Read live, never stamped: a refund the shop deletes makes the line payable again.
 	 *
 	 * @param \WC_Order              $order The order.
 	 * @param \WC_Order_Item_Product $item  Its line.
 	 * @return bool
 	 */
-	private static function refunded_in_full( \WC_Order $order, \WC_Order_Item_Product $item ): bool {
+	public static function refunded_in_full( \WC_Order $order, \WC_Order_Item_Product $item ): bool {
 		$qty = (int) $item->get_quantity();
 		if ( $qty > 0 && abs( (int) $order->get_qty_refunded_for_item( $item->get_id() ) ) >= $qty ) {
 			return true;
@@ -1109,8 +1112,9 @@ class AddonService {
 			$theirs = false;
 			foreach ( $order->get_items() as $other ) {
 				if ( ! $other instanceof \WC_Order_Item_Product || $other->get_id() === $item->get_id()
-					|| '' !== (string) $other->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $other->get_meta( '_wplm_addon_reverted' ) ) {
-					continue;
+					|| '' !== (string) $other->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $other->get_meta( '_wplm_addon_reverted' )
+					|| self::refunded_in_full( $order, $other ) ) {
+					continue; // A line refunded in full is never added: nothing left over is its.
 				}
 				$other_units = $this->line_units( $other, $license );
 				if ( null === $other_units ) {

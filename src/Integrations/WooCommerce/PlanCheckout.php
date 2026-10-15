@@ -1767,7 +1767,8 @@ class PlanCheckout {
 				continue;
 			}
 			$licence_done = '' !== (string) $item->get_meta( '_wplm_license_ids' );
-			$extras_done  = '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $item->get_meta( '_wplm_addon_reverted' );
+			$extras_done  = '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $item->get_meta( '_wplm_addon_reverted' )
+				|| ( '' !== $extras && AddonService::refunded_in_full( $order, $item ) );
 			if ( '' === $extras ) {
 				// Already issued (or added) on an earlier attempt: never issue a second licence.
 				if ( $licence_done || '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) ) {
@@ -1789,6 +1790,9 @@ class PlanCheckout {
 			// An add-on for an existing licence: lines on that licence, never a new key.
 			$plan = $this->plans->get( $pkg->plan_id );
 			if ( null !== $plan && $plan->is_addon() ) {
+				if ( $this->taken_back( $order, $item, $pkg->name ) ) {
+					continue;
+				}
 				try {
 					$target = $this->licenses->get_by_id( (int) $item->get_meta( '_wplm_addon_license_id' ) );
 					if ( null === $target ) {
@@ -1909,7 +1913,7 @@ class PlanCheckout {
 				return;
 			}
 		}
-		if ( '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $item->get_meta( '_wplm_addon_reverted' ) ) {
+		if ( '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || $this->taken_back( $order, $item, (string) $item->get_meta( __( 'Add-ons', 'wp-license-manager' ) ) ) ) {
 			return;
 		}
 
@@ -1981,8 +1985,11 @@ class PlanCheckout {
 	 * @return array{license: License, lines: \WPLM\Models\Entitlement[], item_id: int}|null Null when done earlier or failed.
 	 */
 	private function fulfill_existing_extras( \WC_Order $order, $item, int &$failed ): ?array {
-		if ( '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $item->get_meta( '_wplm_addon_reverted' ) ) {
-			return null; // Added on an earlier attempt (or refunded since).
+		if ( '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) ) {
+			return null; // Added on an earlier attempt.
+		}
+		if ( $this->taken_back( $order, $item, (string) $item->get_meta( __( 'Add-ons', 'wp-license-manager' ) ) ) ) {
+			return null; // Refunded since.
 		}
 		try {
 			$plan = $this->plans->get( (int) $item->get_meta( '_wplm_plan_id' ) );
@@ -2011,6 +2018,34 @@ class PlanCheckout {
 			);
 			return null;
 		}
+	}
+
+	/**
+	 * Whether an add-on line was taken back, so fulfilment adds nothing for it and counts it done: WPLM
+	 * reverted it (the order was refunded), or the shop refunded the line in full
+	 * ({@see AddonService::refunded_in_full()}) — the add-ons were never paid for. Never opens an add-ons
+	 * subscription for it. A refunded line passed over is noted on the order.
+	 *
+	 * @param \WC_Order              $order The order.
+	 * @param \WC_Order_Item_Product $item  Its line.
+	 * @param string                 $what  What the line adds, for the note.
+	 * @return bool
+	 */
+	private function taken_back( \WC_Order $order, $item, string $what ): bool {
+		if ( '1' === (string) $item->get_meta( '_wplm_addon_reverted' ) ) {
+			return true;
+		}
+		if ( ! $item instanceof \WC_Order_Item_Product || ! AddonService::refunded_in_full( $order, $item ) ) {
+			return false;
+		}
+		$order->add_order_note(
+			sprintf(
+				/* translators: %s: what the line adds */
+				__( 'WPLM: "%s" was refunded in full, so it was not added. Nothing is billed for it.', 'wp-license-manager' ),
+				'' !== $what ? $what : $item->get_name()
+			)
+		);
+		return true;
 	}
 
 	/**

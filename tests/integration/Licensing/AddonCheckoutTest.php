@@ -766,4 +766,63 @@ class AddonCheckoutTest extends TestCase {
 		WC()->cart->empty_cart();
 		wc_clear_notices();
 	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Final review (2026-10-15): a line refunded in full is never added; an order paid later is checked
+	// ---------------------------------------------------------------------------------------------
+
+	/** An order of two stored add-ons for a licence, not paid yet. */
+	private function two_addons_order( array $base, string $first, string $second ): \WC_Order {
+		$order = wc_create_order( array( 'customer_id' => $base['customer'] ) );
+		foreach ( array( $first, $second ) as $name ) {
+			$item = $order->get_item( $order->add_product( $this->addon_product, 1 ) );
+			$item->add_meta_data( '_wplm_package_id', $this->addon( $name )->id, true );
+			$item->add_meta_data( '_wplm_addon_license_id', $base['license_id'], true );
+			$item->save();
+		}
+		$order->set_payment_method( 'bacs' );
+		$order->set_billing_email( 'customer' . $base['customer'] . '@example.org' );
+		$order->calculate_totals();
+		$order->save();
+		return $order;
+	}
+
+	public function test_a_stored_addon_refunded_in_full_is_never_added_when_the_order_is_completed_again(): void {
+		$base  = $this->customer_with( 'month' );
+		$order = $this->two_addons_order( $base, 'FBR monthly', 'Extra user monthly' );
+		add_option( 'wplm_addons_lock_' . $base['license_id'], (string) time(), '', 'no' );
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+		delete_option( 'wplm_addons_lock_' . $base['license_id'] );
+		$order = wc_get_order( $order->get_id() );
+		$fbr   = array_values( $order->get_items() )[0];
+		$this->assertNotWPError(
+			wc_create_refund(
+				array(
+					'order_id'   => $order->get_id(),
+					'amount'     => (float) $fbr->get_total(),
+					'line_items' => array(
+						$fbr->get_id() => array(
+							'qty'          => 1,
+							'refund_total' => (float) $fbr->get_total(),
+						),
+					),
+				)
+			)
+		);
+
+		$order->update_status( 'processing' );
+		wc_get_order( $order->get_id() )->update_status( 'completed' );
+
+		$order = wc_get_order( $order->get_id() );
+		$this->assertNull( $this->line( $base['license_id'], 'fbr', 'addon' ), 'Refunded: never added.' );
+		$this->assertNotNull( $this->line( $base['license_id'], 'users', 'addon' ), 'The line paid for is added.' );
+		$this->assertSame( 6000.0, $this->total( $base['subscription_id'] ), 'Billed for the plan and the user, never the refunded FBR.' );
+		$this->assertSame( '1', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertStringContainsString( 'refunded in full', $this->notes_of( $order ) );
+	}
+
+	private function notes_of( \WC_Order $order ): string {
+		return implode( "\n", array_map( static fn( $n ) => $n->content, wc_get_order_notes( array( 'order_id' => $order->get_id() ) ) ) );
+	}
 }
