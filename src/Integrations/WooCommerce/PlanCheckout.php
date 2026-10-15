@@ -2073,6 +2073,8 @@ class PlanCheckout {
 	/**
 	 * `woocommerce_order_partially_refunded`: a partial refund of an order with package extras changes
 	 * no licence line (WPLM cannot tell which extra a part refund was for). The note tells the shop.
+	 * A line refunded in full and not added yet is never added; an add-ons subscription it opened and
+	 * never billed ends with it ({@see AddonService::end_refunded_lines_addons_subscriptions()}).
 	 *
 	 * @param int $order_id  Order id.
 	 * @param int $refund_id Refund id.
@@ -2084,6 +2086,7 @@ class PlanCheckout {
 		if ( ! $order instanceof \WC_Order ) {
 			return;
 		}
+		$this->addons()->end_refunded_lines_addons_subscriptions( $order );
 		foreach ( $order->get_items() as $item ) {
 			if ( '' !== (string) $item->get_meta( '_wplm_extras' ) ) {
 				$order->add_order_note( __( 'WPLM: partial refund — the licence and its add-on lines are unchanged. If an add-on should go, remove its line on the licence screen (its billing goes with it).', 'wp-license-manager' ) );

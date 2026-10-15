@@ -2067,11 +2067,7 @@ class AddonService {
 			}
 		}
 		foreach ( array_unique( array_filter( $on_subs ) ) as $sub_id ) {
-			$unbilled = $this->subscriptions->find_by_id( $sub_id );
-			if ( null !== $unbilled && $unbilled->is_addons_only() && 'pending' === $unbilled->status && array() === $this->subscriptions->get_items( $unbilled->id )
-				&& array() === $this->lines->get_by_subscription( $unbilled->id ) ) {
-				$this->subscription_service()->cancel( $unbilled->id );
-			}
+			$this->end_unbilled_addons_subscription( (int) $sub_id );
 		}
 
 		if ( $touched['issued'] ) {
@@ -2089,6 +2085,43 @@ class AddonService {
 			);
 		}
 		return $issued + $added;
+	}
+
+	/**
+	 * Cancel an add-ons subscription that never billed anything and holds nothing: add-ons-only, still
+	 * pending (its first add-ons were never written), with no items and no lines. Left open, a later
+	 * purchase would join it with its old dates, and it would decide the licence's add-ons cycle for
+	 * good. One holding lines is never ended: another order sold against it wrote them, and they are paid
+	 * for and renew on it. Cancelled, never deleted.
+	 *
+	 * @param int $id Subscription id.
+	 * @return bool Whether it was cancelled.
+	 */
+	public function end_unbilled_addons_subscription( int $id ): bool {
+		$sub = $id > 0 ? $this->subscriptions->find_by_id( $id ) : null;
+		if ( null === $sub || ! $sub->is_addons_only() || 'pending' !== $sub->status || array() !== $this->subscriptions->get_items( $sub->id )
+			|| array() !== $this->lines->get_by_subscription( $sub->id ) ) {
+			return false;
+		}
+		$this->subscription_service()->cancel( $sub->id );
+		return true;
+	}
+
+	/**
+	 * After a partial refund: a line refunded in full that opened an add-ons subscription and was never
+	 * added ({@see refunded_in_full()}) is never added now, so that subscription — never billed, nothing
+	 * on it — ends with it ({@see end_unbilled_addons_subscription()}), as it would with a full refund.
+	 *
+	 * @param \WC_Order $order The order.
+	 * @return void
+	 */
+	public function end_refunded_lines_addons_subscriptions( \WC_Order $order ): void {
+		foreach ( $order->get_items() as $item ) {
+			if ( $item instanceof \WC_Order_Item_Product && (int) $item->get_meta( '_wplm_addons_subscription_id' ) > 0
+				&& '' === (string) $item->get_meta( '_wplm_entitlement_ids' ) && self::refunded_in_full( $order, $item ) ) {
+				$this->end_unbilled_addons_subscription( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
+			}
+		}
 	}
 
 	// -------------------------------------------------------------------------

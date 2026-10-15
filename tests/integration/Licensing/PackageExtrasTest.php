@@ -3712,4 +3712,52 @@ class PackageExtrasTest extends TestCase {
 		);
 		$this->assertSame( 'year', json_decode( (string) $yearly['item']->get_meta( '_wplm_extras' ), true )['cycle'] );
 	}
+
+	public function test_refunding_in_full_the_line_that_opened_an_unbilled_addons_subscription_ends_it(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$order   = $this->fbr_and_user_order( $product, $base );
+		// The FBR line opens the add-ons subscription, then its write fails; the user line is added.
+		$this->break_next = true;
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+		$order  = wc_get_order( $order->get_id() );
+		$fbr    = array_values( $order->get_items() )[0];
+		$opened = (int) \WC_Order_Factory::get_order_item( $fbr->get_id() )->get_meta( '_wplm_addons_subscription_id' );
+		$this->assertGreaterThan( 0, $opened );
+		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'] );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'users' ) );
+
+		// The shop refunds the FBR line in full: the order stays completed.
+		$this->refund_line( $order, $fbr );
+
+		$this->assertSame( 'completed', wc_get_order( $order->get_id() )->get_status() );
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'], 'Never billed, nothing on it: it ends with the line.' );
+		$licence = $this->make( \WPLM\Repositories\LicenseRepository::class )->find_by_id( $base['license_id'] );
+		$this->assertNull( $this->make( AddonService::class )->addons_cycle( $licence ), 'The customer chooses the cycle again.' );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'users' ), 'The line paid for is untouched.' );
+
+		// Completed again: nothing more is added, nothing is reopened.
+		$this->complete_again( $order );
+		$this->assertCount( 0, $this->addon_lines( $base['license_id'], 'fbr' ) );
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'] );
+		$this->assertNull( $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] ) );
+		$this->assertSame( '1', (string) wc_get_order( $order->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+	}
+
+	public function test_a_new_licence_line_refunded_in_full_before_completion_gets_no_addons(): void {
+		$bought = $this->buy_new( 'Monthly', array( 'module:fbr' => '1' ), null, false );
+		$order  = wc_get_order( $bought['order']->get_id() );
+		$order->update_status( 'processing' );
+		$this->refund_line( wc_get_order( $order->get_id() ), array_values( $order->get_items() )[0] );
+
+		wc_get_order( $order->get_id() )->update_status( 'completed' );
+
+		$order = wc_get_order( $order->get_id() );
+		$ids   = json_decode( (string) array_values( $order->get_items() )[0]->get_meta( '_wplm_license_ids' ), true );
+		$this->assertNotEmpty( $ids, 'The licence itself: as for any licence type line (an owner question).' );
+		$this->assertCount( 0, $this->lines( (int) $ids[0], 'addon' ), 'Refunded: its add-ons are never added.' );
+		$this->assertSame( '1', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertStringContainsString( 'refunded in full', $this->notes( $order ) );
+	}
 }
