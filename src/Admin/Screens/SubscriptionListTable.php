@@ -715,9 +715,15 @@ class SubscriptionListTable extends \WP_List_Table {
 	 *
 	 * @param string $action pause|resume|cancel.
 	 * @param int    $id     Subscription id.
+	 * A subscription already cancelled or expired is not cancelled again (no second email or webhook).
+	 *
 	 * @return bool False when its status does not allow it (or it is gone): nothing changed.
 	 */
 	private function change_status( string $action, int $id ): bool {
+		$sub = $this->repo->find_by_id( $id );
+		if ( null === $sub || ( 'cancel' === $action && in_array( $sub->status, array( 'cancelled', 'expired' ), true ) ) ) {
+			return false;
+		}
 		try {
 			switch ( $action ) {
 				case 'pause':

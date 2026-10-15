@@ -27,6 +27,9 @@ class PaidAheadRenewalTest extends TestCase {
 	/** @var int[] Orders the fake gateway module built for card charges. */
 	private array $created = array();
 
+	/** @var float[] The amount WPLM asked the gateway module to bill each order at. */
+	private array $billed = array();
+
 	public function set_up(): void {
 		parent::set_up();
 		add_filter(
@@ -202,8 +205,8 @@ class PaidAheadRenewalTest extends TestCase {
 		return implode( "\n", array_map( static fn( $n ) => $n->content, wc_get_order_notes( array( 'order_id' => $order_id ) ) ) );
 	}
 
-	/** A stored card; each cron charge is recorded on an order a gateway module builds. */
-	private function card( array $s ): void {
+	/** A stored card; each cron charge is recorded on an order a gateway module builds, at what was charged (or a fixed total). */
+	private function card( array $s, ?float $fixed_total = null ): void {
 		$token = new \WC_Payment_Token_CC();
 		$token->set_token( 'tok_test' );
 		$token->set_gateway_id( 'm527card' );
@@ -217,14 +220,18 @@ class PaidAheadRenewalTest extends TestCase {
 		$customer = $s['customer'];
 		add_filter(
 			'wplm_create_renewal_order',
-			function ( $id ) use ( $customer ) {
-				unset( $id );
-				$order = wc_create_order( array( 'customer_id' => $customer ) );
+			function ( $id, $sub, $amount ) use ( $customer, $fixed_total ) {
+				unset( $id, $sub );
+				$this->billed[] = (float) $amount;
+				$order          = wc_create_order( array( 'customer_id' => $customer ) );
+				$order->set_total( null !== $fixed_total ? $fixed_total : (float) $amount );
 				$order->set_status( 'completed' );
 				$order->save();
 				$this->created[] = $order->get_id();
 				return $order->get_id();
-			}
+			},
+			10,
+			3
 		);
 	}
 
@@ -242,6 +249,7 @@ class PaidAheadRenewalTest extends TestCase {
 		do_action( 'wplm_process_renewals' );
 
 		$this->assertSame( array( round( $s['total'] - $s['item_total'], 4 ) ), $this->charges, 'The base is charged; Factory, already paid through the new month, is not.' );
+		$this->assertSame( $this->charges, $this->billed, 'The gateway module is told what was charged.' );
 		$this->assertSame( array( $s['p1'] ), $this->dates( $sub_id ), 'Every line in step again.' );
 		$this->assertSame( $s['p1'], $this->through( $s['factory'] ), 'Factory was not extended.' );
 		$this->assertSame( $this->start_of_day_after( $s['p1'] ), $this->subscription_row( $sub_id )['next_payment'] );
@@ -249,6 +257,7 @@ class PaidAheadRenewalTest extends TestCase {
 		$this->assertCount( 1, $this->created );
 		$order = wc_get_order( $this->created[0] );
 		$this->assertStringContainsString( 'WPLM: Factory not charged this time — already paid through ' . $s['p1'] . '.', $this->notes( $order->get_id() ) );
+		$this->assertStringNotContainsString( 'but this order totals', $this->notes( $order->get_id() ) );
 		$skipped = json_decode( (string) $order->get_meta( RenewalProcessor::SKIPPED_META ), true );
 		$this->assertSame( array( $s['item'] ), array_map( 'intval', array_keys( $skipped ) ) );
 		$snapshot = json_decode( (string) $order->get_meta( RenewalProcessor::SNAPSHOT_META ), true );
@@ -388,5 +397,67 @@ class PaidAheadRenewalTest extends TestCase {
 		$this->pay( $invoice );
 
 		$this->assertSame( array( $p1 ), $this->dates( $sub->id ), 'In step again.' );
+	}
+
+	public function test_a_card_order_billed_at_another_total_says_what_was_charged(): void {
+		$s = $this->refunded_with_factory_joined();
+		$this->card( $s, $s['total'] );
+		$this->make( SubscriptionService::class )->resume( $s['subscription_id'] );
+
+		do_action( 'wplm_process_renewals' );
+
+		$charged = round( $s['total'] - $s['item_total'], 4 );
+		$this->assertSame( array( $charged ), $this->charges );
+		$this->assertStringContainsString( 'the card was charged ' . wc_format_decimal( $charged, 2 ) . ' for this renewal, but this order totals ' . wc_format_decimal( $s['total'], 2 ), $this->notes( (int) end( $this->created ) ) );
+	}
+
+	public function test_refunding_the_renewal_that_skipped_the_add_on_leaves_it_and_says_why(): void {
+		$s      = $this->refunded_with_factory_joined();
+		$sub_id = $s['subscription_id'];
+		$this->make( SubscriptionService::class )->resume( $sub_id );
+		$invoice = $this->pay( $this->make( SelfServiceRenewal::class )->create_renewal_order_object( $sub_id ) );
+		$this->assertSame( array( $s['p1'] ), $this->dates( $sub_id ) );
+
+		wc_get_order( $invoice->get_id() )->update_status( 'refunded' );
+
+		$this->assertSame( $s['p1'], $this->through( $s['factory'] ), 'Not charged by that renewal: not taken back.' );
+		$this->assertSame( array( $s['p0'], $s['p1'] ), $this->dates( $sub_id ), 'The rest is back a month.' );
+		$notes = $this->notes( $invoice->get_id() );
+		$this->assertStringContainsString( 'Kept: Factory (paid through ' . $s['p1'] . ') — not charged by this renewal, so not taken back.', $notes );
+		$this->assertStringNotContainsString( 'joined after this renewal', $notes );
+	}
+
+	/** @dataProvider external_totals */
+	public function test_an_invoice_a_gateway_module_builds_skips_only_when_billed_without_the_add_on( bool $at_amount ): void {
+		$s      = $this->refunded_with_factory_joined();
+		$sub_id = $s['subscription_id'];
+		$this->make( SubscriptionService::class )->resume( $sub_id );
+		$customer = $s['customer'];
+		add_filter(
+			'wplm_create_renewal_order',
+			static function ( $id, $sub, $amount ) use ( $customer, $at_amount ) {
+				unset( $id );
+				$order = wc_create_order( array( 'customer_id' => $customer ) );
+				$order->set_total( $at_amount ? (float) $amount : (float) $sub->recurring_total );
+				$order->save();
+				return $order->get_id();
+			},
+			10,
+			3
+		);
+
+		$invoice = $this->make( SelfServiceRenewal::class )->create_renewal_order_object( $sub_id );
+		$this->pay( $invoice );
+
+		$p2 = EntitlementService::renewed_paid_through( $s['p1'], $s['p1'], 0, 1, 'month' );
+		$this->assertSame( $at_amount ? $s['p1'] : $p2, $this->through( $s['factory'] ), $at_amount ? 'Billed without Factory: Factory not extended.' : 'Billed in full: Factory extended too.' );
+		$this->assertSame( $at_amount, '' !== (string) wc_get_order( $invoice->get_id() )->get_meta( RenewalProcessor::SKIPPED_META ) );
+	}
+
+	public function external_totals(): array {
+		return array(
+			'billed at the amount given' => array( true ),
+			'billed in full'             => array( false ),
+		);
 	}
 }

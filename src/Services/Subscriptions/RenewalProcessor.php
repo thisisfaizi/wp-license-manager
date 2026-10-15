@@ -186,8 +186,10 @@ class RenewalProcessor {
 		 *
 		 * @param int          $order_id Default 0 (no WC order created).
 		 * @param Subscription $sub      The subscription being renewed.
+		 * @param float        $amount   What was charged: the recurring total, less any add-on already
+		 *                               paid ahead ({@see items_paid_ahead()}). Bill the order at this.
 		 */
-		$order_id = (int) apply_filters( 'wplm_create_renewal_order', 0, $sub );
+		$order_id = (int) apply_filters( 'wplm_create_renewal_order', 0, $sub, $amount );
 
 		// Marked as a renewal the way an invoice is, so completing it again after a refund applies it
 		// again. Marked applied in the same save: a completed status saved with it never applies it twice.
@@ -196,6 +198,16 @@ class RenewalProcessor {
 			$this->stamp_renewal_order( $order, $sub );
 			$this->stamp_skipped( $order, $skip );
 			$order->update_meta_data( '_wplm_renewal_applied', '1' );
+			if ( abs( (float) $order->get_total() - $amount ) >= 0.005 ) {
+				$order->add_order_note(
+					sprintf(
+						/* translators: 1: amount charged, 2: the order's total */
+						__( 'WPLM: the card was charged %1$s for this renewal, but this order totals %2$s. Refund no more than was charged.', 'wp-license-manager' ),
+						wc_format_decimal( $amount, 2 ),
+						wc_format_decimal( (float) $order->get_total(), 2 )
+					)
+				);
+			}
 			$order->save();
 		} elseif ( array() !== $skip ) {
 			$this->sub_service->add_note( $sub->id, $this->skipped_note( $skip ) );
@@ -1033,19 +1045,38 @@ class RenewalProcessor {
 			);
 		}
 		if ( array() !== $kept ) {
+			$not_charged = array();
+			foreach ( (array) ( $snapshot['skipped'] ?? array() ) as $skipped ) {
+				$not_charged = array_merge( $not_charged, array_map( 'intval', (array) ( $skipped['line_ids'] ?? array() ) ) );
+			}
 			$names = array();
+			$asked = array();
 			foreach ( $kept as $line ) {
+				if ( in_array( (int) $line->id, $not_charged, true ) ) {
+					/* translators: 1: module or limit name, 2: its paid-through date */
+					$asked[] = sprintf( __( '%1$s (paid through %2$s)', 'wp-license-manager' ), $this->entitlements->line_label( $line ), (string) $line->paid_through );
+					continue;
+				}
 				$names[] = null !== $line->order_id
 					/* translators: 1: module or limit name, 2: order id, 3: its paid-through date */
 					? sprintf( __( '%1$s, added by order #%2$d (paid through %3$s)', 'wp-license-manager' ), $this->entitlements->line_label( $line ), $line->order_id, (string) $line->paid_through )
 					/* translators: 1: module or limit name, 2: its paid-through date */
 					: sprintf( __( '%1$s (paid through %2$s)', 'wp-license-manager' ), $this->entitlements->line_label( $line ), (string) $line->paid_through );
 			}
-			$note .= ' ' . sprintf(
-				/* translators: %s: the lines kept, separated by semicolons */
-				__( 'Kept: %s — joined after this renewal, it keeps the period it was bought for; the next renewal does not charge for it while it is paid ahead.', 'wp-license-manager' ),
-				implode( '; ', $names )
-			);
+			if ( array() !== $names ) {
+				$note .= ' ' . sprintf(
+					/* translators: %s: the lines kept, separated by semicolons */
+					__( 'Kept: %s — joined after this renewal, it keeps the period it was bought for; the next renewal does not charge for it while it is paid ahead.', 'wp-license-manager' ),
+					implode( '; ', $names )
+				);
+			}
+			if ( array() !== $asked ) {
+				$note .= ' ' . sprintf(
+					/* translators: %s: the lines, separated by semicolons */
+					__( 'Kept: %s — not charged by this renewal, so not taken back.', 'wp-license-manager' ),
+					implode( '; ', $asked )
+				);
+			}
 		}
 		if ( $held ) {
 			$note .= ' ' . __( 'Renewal refunded — subscription put on hold; resume it to keep billing.', 'wp-license-manager' );

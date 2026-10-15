@@ -219,4 +219,28 @@ class SubscriptionAdminActionsTest extends TestCase {
 		$this->assertSame( array_merge( array( $row ), $bulk ), $this->cancelled, 'Each fired the cancelled hook.' );
 		$this->assertSame( array( 'subscription.cancelled', 'subscription.cancelled', 'subscription.cancelled' ), $this->events );
 	}
+
+	public function test_cancelling_an_ended_subscription_again_sends_nothing(): void {
+		$open  = $this->subscription();
+		$ended = array( $this->subscription( 'cancelled' ), $this->subscription( 'expired' ) );
+
+		$_REQUEST['action']       = 'bulk-cancel';
+		$_REQUEST['subscription'] = array_map( 'strval', array_merge( array( $open ), $ended ) );
+		try {
+			$this->table()->render_page();
+			$this->fail( 'Expected a redirect.' );
+		} catch ( SubscriptionAdminRedirect $redirect ) {
+			unset( $redirect );
+		}
+
+		$this->assertSame( array( $open ), $this->cancelled, 'Only the open one is cancelled.' );
+		$this->assertSame( array( 'subscription.cancelled' ), $this->events, 'One webhook.' );
+		$this->assertSame( 'expired', $this->subscription_row( $ended[1] )['status'] );
+		$subjects = array_map( static fn( $m ) => $m['subject'], tests_retrieve_phpmailer_instance()->mock_sent );
+		$this->assertCount( 1, array_keys( $subjects, 'Your subscription has been cancelled', true ), 'One email.' );
+
+		$to = $this->click( 'cancel_from_edit', $ended[0], 'wplm_cancel_subscription_' );
+		$this->assertStringContainsString( 'failed=1', $to );
+		$this->assertSame( array( $open ), $this->cancelled );
+	}
 }

@@ -284,7 +284,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     extends exactly that, however late. The plan's own item, adjustments and lines no item names are
     always charged; nothing is skipped when it would leave nothing to charge; the subscription's items
     and recurring total never change. `EntitlementService::extend_subscription_lines()` takes the lines
-    to leave as a new optional `$skip` argument.
+    to leave as a new optional `$skip` argument. The `wplm_create_renewal_order` filter now gets the
+    amount to bill as a third argument (`apply_filters( 'wplm_create_renewal_order', 0, $sub, $amount )`):
+    a gateway module that builds the order a card charge is recorded on should bill it at that amount
+    (WPLM notes the order when its total differs from what was charged); an invoice a module builds
+    leaves the paid-ahead add-ons out only when it is billed at that amount.
+  - When the renewal that skipped an add-on is itself refunded, the add-on is left as it is (that
+    renewal did not pay for it); the note says "Kept: Factory (paid through D) — not charged by this
+    renewal, so not taken back".
   - **Nothing moved, not stamped** — the order note asks for a check by hand — when applying the
     renewal was cut off part-way.
   - The subscription is read again before it is written, and its last payment and failed attempts come
@@ -320,7 +327,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   subscription screen, the row Cancel and bulk Cancel used to write the status straight to the table,
   skipping the webhooks, the cancellation email, the status hooks and the licence sync. They now call
   `SubscriptionService::pause()` / `resume()` / `cancel()`, like the REST API and My Account. A button
-  the status no longer allows changes nothing and says so.
+  the status no longer allows changes nothing and says so; a subscription already cancelled or expired
+  is not cancelled again (no second email or webhook).
 - `AddonService::apply()` now writes through one private line writer, shared with the new
   `AddonService::apply_extras()` and `AddonService::apply_extras_to_licence()`. If it fails part-way,
   it removes what it wrote through the service, which also detaches any subscription items.

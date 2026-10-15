@@ -194,12 +194,21 @@ class SelfServiceRenewal {
 			return null;
 		}
 
-		// Let third-party code (e.g. a gateway module) build the WC order.
-		$external_id = (int) apply_filters( 'wplm_create_renewal_order', 0, $sub );
+		// An add-on already paid through the period this renewal buys is not invoiced this time
+		// (RenewalProcessor::items_paid_ahead()); the order records it, so paying it extends the rest only.
+		$skip   = $this->renewals->items_paid_ahead( $sub );
+		$amount = $this->renewals->renewal_amount( $sub, $skip );
+
+		// Let third-party code (e.g. a gateway module) build the WC order, billed at $amount. It leaves the
+		// paid-ahead add-ons out only when it billed that amount.
+		$external_id = (int) apply_filters( 'wplm_create_renewal_order', 0, $sub, $amount );
 		if ( $external_id > 0 ) {
 			$ext_order = wc_get_order( $external_id );
 			if ( $ext_order instanceof \WC_Order ) {
 				$this->stamp_renewal( $ext_order, $sub );
+				if ( array() !== $skip && abs( (float) $ext_order->get_total() - $amount ) < 0.005 ) {
+					$this->renewals->stamp_skipped( $ext_order, $skip );
+				}
 				$ext_order->save();
 				$this->record_invoice( $ext_order, $sub );
 				return $ext_order;
@@ -219,11 +228,6 @@ class SelfServiceRenewal {
 			);
 			return null;
 		}
-
-		// An add-on already paid through the period this renewal buys is not invoiced this time
-		// (RenewalProcessor::items_paid_ahead()); the order records it, so paying it extends the rest only.
-		$skip   = $this->renewals->items_paid_ahead( $sub );
-		$amount = $this->renewals->renewal_amount( $sub, $skip );
 
 		// Deliberately NOT copying _wplm_package_id onto this line item —
 		// PlanCheckout::fulfill_order() would issue a brand-new license if it saw
