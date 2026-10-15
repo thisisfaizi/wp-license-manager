@@ -4599,24 +4599,113 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( '1', (string) wc_get_order( $order['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
 	}
 
-	public function test_settling_a_line_whose_addons_subscription_never_billed_says_that_subscription_keeps_the_cycle(): void {
+	/** A line whose add-ons subscription was opened and never billed: its add-ons write broke. */
+	private function fbr_line_on_an_unbilled_addons_subscription(): array {
 		$this->add_seat_plan_offer();
 		$product          = $this->addon_product();
 		$base             = $this->customer_with( 'Lifetime' );
 		$this->break_next = true;
 		$first            = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
 		$opened           = (int) $this->fresh_item( $first['item'] )->get_meta( '_wplm_addons_subscription_id' );
+		$this->assertGreaterThan( 0, $opened );
 		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'], 'Opened, its add-ons not written.' );
+		$this->assertSettleable( $first['order'], $first['item'], 'The line can be settled.' );
+		return array( $product, $base, $first, $opened );
+	}
+
+	public function test_settling_a_line_whose_addons_subscription_never_billed_cancels_it_and_frees_the_cycle(): void {
+		list( $product, $base, $first, $opened ) = $this->fbr_line_on_an_unbilled_addons_subscription();
+		$license                                 = $this->make( LicenseRepository::class )->find_by_id( $base['license_id'] );
+		$addons                                  = $this->make( AddonService::class );
+		$this->assertSame( 'month', $addons->addons_cycle( $license ), 'Before: the pending subscription sets the cycle.' );
 
 		$result = $this->settlement()->settle( $first['order']->get_id(), array( $first['item']->get_id() ), $this->shop_owner(), 'credited' );
 
 		$this->assertTrue( $result['ok'], $result['message'] );
-		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'], 'Settling changes no subscription.' );
-		$license = $this->make( LicenseRepository::class )->find_by_id( $base['license_id'] );
-		$this->assertSame( 'month', $this->make( AddonService::class )->addons_cycle( $license ), 'That subscription still sets the cycle.' );
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'], 'It never billed: it ends with the line.' );
+		$this->assertSame( (string) $opened, (string) $this->subscription_row( $opened )['id'], 'Cancelled, never deleted.' );
+		$this->assertNull( $addons->addons_cycle( $license ), 'Nothing holds the add-ons cycle now.' );
+		$this->assertNull( $addons->offered_cycle( $license ), 'The customer chooses it again.' );
 		$settled = $this->note_with( wc_get_order( $first['order']->get_id() ), 'marked settled' );
-		$this->assertStringContainsString( 'Add-ons subscription #' . $opened . ', opened for it, never billed and stays pending: until it is cancelled, the licence\'s monthly / yearly add-ons stay on its cycle (every month).', $settled, 'The note says what still holds the cycle.' );
-		$this->assertStringNotContainsString( 'no longer holds its modules or add-ons cycle', $settled, 'Never claims the cycle is free while it is not.' );
+		$this->assertStringContainsString( 'Its add-ons subscription #' . $opened . ' never billed and was cancelled.', $settled );
+		$this->assertStringNotContainsString( 'stays pending', $settled );
+
+		// Yearly can be bought now, and is billed on a new, yearly add-ons subscription.
+		$yearly = array(
+			'wplm_extras'            => array( 'seat-plan' => '1' ),
+			'wplm_extras_cycle'      => 'year',
+			'wplm_target_license_id' => (string) $base['license_id'],
+		);
+		wp_set_current_user( $base['customer'] );
+		$this->assertTrue( $this->validate( $yearly, $product ), 'Yearly is offered: ' . $this->first_error() );
+		$bought = $this->buy_through_cart( $product, $yearly, $base['customer'] );
+		$this->assertSame( '1', (string) $bought['order']->get_meta( '_wplm_plan_fulfilled' ) );
+		$now = $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] );
+		$this->assertNotNull( $now );
+		$this->assertNotSame( $opened, $now->id );
+		$this->assertSame( 'year', $now->billing_period );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'seats' ) );
+	}
+
+	public function test_settling_never_cancels_an_addons_subscription_that_holds_another_orders_lines(): void {
+		list( $first, , $opened, $base ) = $this->second_order_cut_off_on_an_unbilled_addons_subscription();
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'seats' ), 'Another order\'s line is on it.' );
+		$this->assertSettleable( $first['order'], $first['item'], 'The opening line can be settled.' );
+
+		$result = $this->settlement()->settle( $first['order']->get_id(), array( $first['item']->get_id() ), $this->shop_owner() );
+
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$this->assertSame( array( $first['item']->get_id() ), $result['settled'] );
+		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'], 'It holds a paid line: never cancelled.' );
+		$settled = $this->note_with( wc_get_order( $first['order']->get_id() ), 'marked settled' );
+		$this->assertStringNotContainsString( 'was cancelled', $settled );
+		$this->assertStringContainsString( 'no longer holds its modules or add-ons cycle', $settled, 'Today\'s wording.' );
+	}
+
+	public function test_settling_never_touches_an_addons_subscription_that_has_billed(): void {
+		$this->add_seat_plan_offer();
+		$product          = $this->addon_product();
+		$base             = $this->customer_with( 'Lifetime' );
+		$this->break_next = true;
+		$first            = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$opened           = (int) $this->fresh_item( $first['item'] )->get_meta( '_wplm_addons_subscription_id' );
+		// Another order's add-on starts it: it bills.
+		$this->add_to_licence( $product, $base, array( 'seat-plan' => '1' ) );
+		$this->assertSame( 'active', $this->subscription_row( $opened )['status'] );
+		$items = count( $this->items( $opened ) );
+		$total = $this->total( $opened );
+		$this->assertGreaterThan( 0, $items );
+		$this->assertSettleable( $first['order'], $first['item'], 'The first line can still be settled.' );
+
+		$result = $this->settlement()->settle( $first['order']->get_id(), array( $first['item']->get_id() ), $this->shop_owner() );
+
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$this->assertSame( 'active', $this->subscription_row( $opened )['status'], 'It billed: untouched.' );
+		$this->assertCount( $items, $this->items( $opened ) );
+		$this->assertSame( $total, $this->total( $opened ) );
+		$this->assertStringNotContainsString( 'was cancelled', $this->note_with( wc_get_order( $first['order']->get_id() ), 'marked settled' ) );
+	}
+
+	public function test_settling_never_strands_another_order_sold_against_the_cancelled_subscription(): void {
+		list( $product, $base, $first, $opened ) = $this->fbr_line_on_an_unbilled_addons_subscription();
+		$second                                  = $this->add_to_licence( $product, $base, array( 'seat-plan' => '1' ), false );
+		$sold                                    = json_decode( (string) $second['item']->get_meta( '_wplm_extras' ), true );
+		$this->assertSame( $opened, (int) $sold['addons_subscription_id'], 'Sold against the pending one.' );
+
+		$this->settlement()->settle( $first['order']->get_id(), array( $first['item']->get_id() ), $this->shop_owner() );
+		$this->assertSame( 'cancelled', $this->subscription_row( $opened )['status'] );
+		$order = wc_get_order( $second['order']->get_id() );
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+
+		$order = wc_get_order( $second['order']->get_id() );
+		$this->assertSame( '1', (string) $order->get_meta( '_wplm_plan_fulfilled' ), 'Paid, so granted.' );
+		$now = $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] );
+		$this->assertNotNull( $now );
+		$this->assertNotSame( $opened, $now->id );
+		$this->assertSame( $now->id, (int) $this->addon_lines( $base['license_id'], 'seats' )[0]->subscription_id );
+		$this->assertSame( 300.0, $this->total( $now->id ), 'Billed what was sold, once.' );
+		$this->assertStringContainsString( 'ended before it billed anything', $this->notes( $order ) );
 	}
 
 	public function test_refunding_only_the_addons_part_of_a_new_licence_line_does_not_close_it_but_settling_does(): void {

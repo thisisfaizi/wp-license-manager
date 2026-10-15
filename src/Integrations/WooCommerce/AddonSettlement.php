@@ -23,16 +23,22 @@ use WPLM\Services\AddonService;
  *   order action with an optional note (`woocommerce_order_actions`, `woocommerce_order_actions_end`) —
  *   the same on the posts and the HPOS order screen;
  * - settling stamps the line `_wplm_addon_settled` (JSON: `by` user id, `at` UTC, `note`) and notes it
- *   on the order. Nothing else: no line is written or removed, no subscription changed, no money moved.
- *   The line then holds no module or cycle and is never added ({@see AddonService::released()}), and once
- *   every line of the order is done the order is marked fulfilled (`_wplm_plan_fulfilled`). The note
- *   names what settling leaves as it is: add-on lines an attempt cut off before recording them left on
- *   the licence ({@see AddonService::unrecorded_lines()}), and an add-ons subscription the line opened
- *   that never billed — still pending, it keeps the licence's add-ons on its cycle until cancelled;
+ *   on the order. No line is written or removed and no money moved. The line then holds no module or
+ *   cycle and is never added ({@see AddonService::released()}), and once every line of the order is done
+ *   the order is marked fulfilled (`_wplm_plan_fulfilled`). The add-ons subscription the line opened or
+ *   joined (`_wplm_addons_subscription_id`) is cancelled — never deleted — when it never billed and holds
+ *   nothing ({@see AddonService::end_unbilled_addons_subscription()}): left pending it would keep the
+ *   licence's add-ons on its cycle for good. One that billed, or holds another order's lines, is left as
+ *   it is. The note names what settling leaves: add-on lines an attempt cut off before recording them
+ *   left on the licence ({@see AddonService::unrecorded_lines()});
  * - a line whose add-ons are on the licence already, which completing the order again records
- *   ({@see AddonService::retry_records()}), is never settled.
+ *   ({@see AddonService::retry_records()}), is never settled;
+ * - "Undo settled add-ons" (a tick on each settled line, and its own order action and note) reopens a
+ *   settled line: its stamp moves to `_wplm_addon_settled_history`, the order's fulfilled mark goes when
+ *   a line is left to do, and completing the order again adds the line through the usual checks. Undo
+ *   writes no line and brings back no cancelled subscription.
  *
- * Needs `manage_woocommerce` and this form's nonce. Settling a line twice changes nothing.
+ * Needs `manage_woocommerce` and that form's nonce. Settling, or undoing, a line twice changes nothing.
  */
 class AddonSettlement {
 
@@ -111,7 +117,7 @@ class AddonSettlement {
 		echo '<li class="wide wplm-settle-addons">';
 		echo '<label for="wplm_settle_note"><strong>' . esc_html__( 'Mark add-ons settled', 'wp-license-manager' ) . '</strong></label>';
 		echo '<textarea id="wplm_settle_note" name="wplm_settle_note" rows="2" style="width:100%;" placeholder="' . esc_attr__( 'Note (optional), e.g. refunded by bank transfer', 'wp-license-manager' ) . '"></textarea>';
-		echo '<p class="description">' . esc_html__( 'For add-on lines that could not be added and will not be: tick them in the items list, choose "Mark add-ons settled" above, then Update. Settling adds, removes, bills and refunds nothing; the lines stop holding their modules and are never added later.', 'wp-license-manager' ) . '</p>';
+		echo '<p class="description">' . esc_html__( 'For add-on lines that could not be added and will not be: tick them in the items list, choose "Mark add-ons settled" above, then Update. Settling adds, removes, bills and refunds nothing; the lines stop holding their modules and are never added later, and an add-ons subscription opened for them that never billed is cancelled.', 'wp-license-manager' ) . '</p>';
 		wp_nonce_field( self::ACTION . '_' . $order->get_id(), 'wplm_settle_nonce', false );
 		echo '</li>';
 	}
@@ -202,9 +208,9 @@ class AddonSettlement {
 	 * Mark the add-ons of order lines settled. Each line must be the order's and settleable now
 	 * ({@see AddonService::settleable()}); a line already settled is left as it is (no second note).
 	 * Claims the order's fulfilment lock, so a completion running now can neither add a line being
-	 * settled nor be overtaken. Writes or removes no line, changes no subscription, moves no money; add-on
-	 * lines left on the licence unrecorded, and an add-ons subscription the line opened that never billed,
-	 * are named in the note and the message.
+	 * settled nor be overtaken. Writes or removes no line and moves no money; an add-ons subscription the
+	 * line opened or joined that never billed and holds nothing is cancelled (never deleted), and the note
+	 * says so. Add-on lines left on the licence unrecorded are named in the note and the message.
 	 *
 	 * @param int    $order_id The order.
 	 * @param int[]  $item_ids Its lines.
@@ -234,6 +240,7 @@ class AddonSettlement {
 			$refused    = array();
 			$recordable = array();
 			$left_over  = array();
+			$cancelled  = array(); // Add-ons subscriptions ended here, by id.
 			foreach ( $item_ids as $id ) {
 				$item = $items[ $id ] ?? null;
 				if ( $item instanceof \WC_Order_Item_Product && AddonService::settled( $item ) ) {
@@ -249,7 +256,7 @@ class AddonSettlement {
 				}
 				$left      = $this->addons->unrecorded_lines( $order, $item );
 				$licence   = array() !== $left ? $this->addons->line_licence( $item ) : null;
-				$unbilled  = $this->addons->unbilled_addons_subscription( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
+				$sub_id    = (int) $item->get_meta( '_wplm_addons_subscription_id' );
 				$left_note = '';
 				if ( array() !== $left && null !== $licence ) {
 					$left_note = sprintf(
@@ -271,6 +278,12 @@ class AddonSettlement {
 					)
 				);
 				$item->save_meta_data();
+				// An add-ons subscription the line opened (or joined) that never billed and holds nothing
+				// would keep the licence's add-ons on its cycle for good: it ends with the line. Cancelled,
+				// never deleted; one holding lines, or billing, is never touched.
+				if ( $sub_id > 0 && ! isset( $cancelled[ $sub_id ] ) && $this->addons->end_unbilled_addons_subscription( $sub_id ) ) {
+					$cancelled[ $sub_id ] = true;
+				}
 				$text = '' !== $note
 					? sprintf(
 						/* translators: 1: order line name, 2: user name, 3: the note */
@@ -285,14 +298,13 @@ class AddonSettlement {
 						$item->get_name(),
 						$by
 					);
-				$text .= ' ' . ( null === $unbilled
-					? __( 'Settling added, removed, billed and refunded nothing; the line no longer holds its modules or add-ons cycle and is never added later.', 'wp-license-manager' )
-					: sprintf(
-						/* translators: 1: subscription id, 2: cycle (month or year) */
-						__( 'Settling added, removed, billed and refunded nothing; the line no longer holds its modules and is never added later. Add-ons subscription #%1$d, opened for it, never billed and stays pending: until it is cancelled, the licence\'s monthly / yearly add-ons stay on its cycle (every %2$s).', 'wp-license-manager' ),
-						$unbilled->id,
-						$unbilled->billing_period
-					) );
+				$text .= ' ' . ( isset( $cancelled[ $sub_id ] )
+					? sprintf(
+						/* translators: %d: subscription id */
+						__( 'Settling added, removed, billed and refunded nothing; the line no longer holds its modules or add-ons cycle and is never added later. Its add-ons subscription #%d never billed and was cancelled.', 'wp-license-manager' ),
+						$sub_id
+					)
+					: __( 'Settling added, removed, billed and refunded nothing; the line no longer holds its modules or add-ons cycle and is never added later.', 'wp-license-manager' ) );
 				if ( '' !== $left_note ) {
 					$text .= ' ' . $left_note;
 				}

@@ -192,8 +192,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     **Mark add-ons settled** order action with an optional note. Needs `manage_woocommerce` and the
     form's nonce.
   - Settling stamps the line `_wplm_addon_settled` (JSON: `by` user id, `at` UTC, `note`) and adds an
-    order note ("add-ons on line "X" marked settled by Y: note"). It writes and removes no line, changes
-    no subscription and moves no money.
+    order note ("add-ons on line "X" marked settled by Y: note"). It writes and removes no line and
+    moves no money.
   - A settled line no longer holds its modules or its add-ons cycle anywhere (product page, add to cart,
     checkout, order-pay, the Store API) and is never added later, however often the order is completed
     again (`AddonService::released()`). Once every line of the order is done, the order is marked
@@ -201,9 +201,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   - What settling leaves as it is, the order note names: add-on lines an earlier attempt of the order
     left on the licence without recording them (not another line's, which a retry records) stay there ("remove
     them on the licence screen if they should go"), and still count as the settled line's, so a sibling
-    line of the order is written as usual on the next completion; an add-ons subscription the line opened
-    that never billed stays pending, and until it is cancelled the licence's monthly / yearly add-ons
-    stay on its cycle. Unlike a full refund, settling does not cancel that subscription.
+    line of the order is written as usual on the next completion.
+  - **Settling cancels the add-ons subscription the line opened (or joined) when it never billed** —
+    add-ons-only, still pending, no items and no lines (`AddonService::end_unbilled_addons_subscription()`,
+    as a full refund does). It is cancelled, never deleted, and the note says "Its add-ons subscription
+    #N never billed and was cancelled". Left pending it kept the licence's monthly / yearly add-ons on its
+    cycle for good, so the customer could never buy yearly. One that has billed, or that holds another
+    order's lines, is left as it is (and the note keeps its usual wording). Another order sold against
+    the cancelled one is billed on a new add-ons subscription when it is completed, as after a refund.
   - A line whose add-ons are on the licence already — an attempt wrote exactly what it adds and was cut
     off before recording them — is never settled (no tick, no action): completing the order again
     records them (`AddonService::retry_records()`), and they are billed.
