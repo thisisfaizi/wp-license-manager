@@ -198,8 +198,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     checkout, order-pay, the Store API) and is never added later, however often the order is completed
     again (`AddonService::released()`). Once every line of the order is done, the order is marked
     fulfilled (`_wplm_plan_fulfilled`).
-  - What settling leaves as it is, the order note (and the message on the order screen) names: add-on
-    lines an earlier attempt of the order left on the licence without recording them stay there ("remove
+  - What settling leaves as it is, the order note names: add-on lines an earlier attempt of the order
+    left on the licence without recording them (not another line's, which a retry records) stay there ("remove
     them on the licence screen if they should go"), and still count as the settled line's, so a sibling
     line of the order is written as usual on the next completion; an add-ons subscription the line opened
     that never billed stays pending, and until it is cancelled the licence's monthly / yearly add-ons

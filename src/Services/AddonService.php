@@ -2993,7 +2993,9 @@ class AddonService {
 	/**
 	 * This order's add-on lines on the licence a line adds to that no line of the order records: left by
 	 * an attempt cut off before recording them ({@see adopt_unstamped()}). Settling a line takes none of
-	 * them back; the shop is told about them.
+	 * them back; the shop is told about them. None when they are exactly another line's of the order,
+	 * still to be recorded, that completing the order again records ({@see retry_records()}): they are
+	 * that line's, paid for, not left over.
 	 *
 	 * @param \WC_Order              $order The order.
 	 * @param \WC_Order_Item_Product $item  Its line.
@@ -3001,7 +3003,22 @@ class AddonService {
 	 */
 	public function unrecorded_lines( \WC_Order $order, \WC_Order_Item_Product $item ): array {
 		$license = $this->line_licence( $item );
-		return null === $license ? array() : $this->unrecorded_line_ids( $order, $license->id );
+		$left    = null === $license ? array() : $this->unrecorded_line_ids( $order, $license->id );
+		if ( array() === $left ) {
+			return array();
+		}
+		foreach ( $order->get_items() as $other ) {
+			if ( ! $other instanceof \WC_Order_Item_Product || $other->get_id() === $item->get_id()
+				|| '' !== (string) $other->get_meta( '_wplm_entitlement_ids' ) || self::released( $other )
+				|| self::refunded_in_full( $order, $other ) ) {
+				continue;
+			}
+			$theirs = $this->line_licence( $other );
+			if ( null !== $theirs && (int) $theirs->id === (int) $license->id && $this->retry_records( $order, $other ) ) {
+				return array();
+			}
+		}
+		return $left;
 	}
 
 	/**

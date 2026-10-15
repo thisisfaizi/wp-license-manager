@@ -4657,4 +4657,53 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( array(), $this->make( AddonService::class )->unfulfilled_addon_modules( $license ), 'Settled: released.' );
 		$this->assertSame( '1', (string) wc_get_order( $order->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
 	}
+
+	public function test_settling_a_line_never_names_a_sibling_lines_unrecorded_addons_as_left_over(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		wp_set_current_user( $base['customer'] );
+		foreach ( array( array( 'module:factory' => '1' ), array( 'user' => '2' ) ) as $extras ) {
+			$_POST['wplm_extras']            = $extras;
+			$_POST['wplm_target_license_id'] = (string) $base['license_id'];
+			$this->assertTrue( apply_filters( 'woocommerce_add_to_cart_validation', true, $product->get_id(), 1 ) );
+			$this->assertNotFalse( WC()->cart->add_to_cart( $product->get_id(), 1 ) );
+			unset( $_POST['wplm_extras'], $_POST['wplm_target_license_id'] );
+		}
+		WC()->cart->calculate_totals();
+		$order = new \WC_Order();
+		$order->set_customer_id( $base['customer'] );
+		WC()->checkout()->create_order_line_items( $order, WC()->cart );
+		$order->set_payment_method( 'bacs' );
+		$order->calculate_totals();
+		$order->save();
+		WC()->cart->empty_cart();
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+		$items = array_values( wc_get_order( $order->get_id() )->get_items() );
+		// Line 1 (Factory) never got its add-on; line 2 (2 users) was written, and a crash lost its stamp.
+		$this->make( EntitlementRepository::class )->delete( $this->line( $base['license_id'], 'factory', 'addon' )->id );
+		$this->lose_the_stamp( $items[0] );
+		$this->lose_the_stamp( $items[1] );
+		$this->unfulfil( $order );
+		$users   = $this->addon_lines( $base['license_id'], 'users' );
+		$service = $this->make( AddonService::class );
+		$screen  = wc_get_order( $order->get_id() );
+		$this->assertTrue( $service->retry_records( $screen, $this->fresh_item( $items[1] ) ), 'Line 2\'s lines are its own: a retry records them.' );
+		$this->assertSame( array(), $service->unrecorded_lines( $screen, $this->fresh_item( $items[0] ) ) );
+		$this->assertSettleable( $order, $items[0], 'Line 1 can be settled.' );
+
+		$result = $this->settlement()->settle( $order->get_id(), array( $items[0]->get_id() ), $this->shop_owner() );
+
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$settled = $this->note_with( wc_get_order( $order->get_id() ), 'marked settled' );
+		$this->assertStringNotContainsString( '#' . $users[0]->id, $settled, 'Line 2\'s paid lines are never offered for removal.' );
+		$this->assertStringNotContainsString( 'remove them on the licence screen', $settled );
+
+		$this->complete_again( $order );
+
+		$this->assertSame( wp_json_encode( array( $users[0]->id ) ), (string) $this->fresh_item( $items[1] )->get_meta( '_wplm_entitlement_ids' ), 'Line 2 recorded, nothing written twice.' );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'users' ) );
+		$this->assertCount( 0, $this->addon_lines( $base['license_id'], 'factory' ), 'The settled line is never written.' );
+		$this->assertSame( '1', (string) wc_get_order( $order->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+	}
 }
