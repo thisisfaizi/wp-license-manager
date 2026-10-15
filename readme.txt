@@ -51,7 +51,7 @@ Client software (desktop apps, plugins, SaaS) calls the REST API to enforce lice
 * Licensing tab on any product: assign a subscription plan, or enable simple one-time licensing.
 * Auto-issue and deliver keys on order completion; resend on demand.
 * Customer "My Account" portal for keys, devices, and subscriptions.
-* A full refund of a renewal order takes its period back (paid-through dates, next payment, a classic licence's expiry); a partial refund changes nothing.
+* A full refund of a renewal order takes its period back (paid-through dates, next payment, a classic licence's expiry); a partial refund changes nothing. Refunding the latest renewal puts the subscription on hold: nothing is charged or invoiced until you resume it. An add-on bought after the renewal keeps its period, and the next renewal does not charge for it while it is paid ahead.
 * Mark add-ons settled: on the order screen, close an add-on line that could not be added (the licence already has it, its add-ons subscription ended) once you have dealt with the customer. Settling adds, removes, bills and refunds nothing; the line stops holding its modules and is never added later, an add-ons subscription opened for it that never billed is cancelled, and the order note names anything settling leaves as it is. Undo settled add-ons reopens a settled line: completing the order again adds it, with the usual checks.
 
 = REST API & developer tools =
@@ -102,7 +102,8 @@ The signing private key, encryption key, and HMAC secrets are stored as non-auto
 = 1.3.0 =
 * New: package extras at purchase and for an existing licence (see CHANGELOG.md for the full list).
 * New: Mark add-ons settled on the WooCommerce order screen (posts storage and HPOS) for add-on lines refused at fulfilment; refusal notes a retry cannot cure now say to refund the line or mark it settled instead of completing the order again. Settling cancels an add-ons subscription opened for the line that never billed, and Undo settled add-ons reopens a settled line.
-* New: a full refund of a renewal order takes the period it paid for back; a partial refund changes nothing and says so.
+* New: a full refund of a renewal order takes the period it paid for back; a partial refund changes nothing and says so. Refunding the latest renewal puts the subscription on hold (resume it to keep billing). A dated add-on that joined after the renewal keeps its period, and the next renewal skips it once while it is paid ahead. Card (cron) renewal orders are marked as renewals, so completing one again after a refund applies it again, once.
+* Fix: the subscription screen's Pause, Resume and Cancel buttons now go through the subscription service, sending the same webhooks and emails as everywhere else.
 
 = 1.0.8 =
 * Fixed: device deactivation failed with a database error ("Unknown column 'deactivated_at'") because the `wplm_machines` table was missing that column — devices could not be deactivated and clients received a corrupted response. The column is now part of the schema and is added automatically to existing installs on upgrade.

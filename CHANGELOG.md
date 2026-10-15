@@ -236,6 +236,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     => `from` / `to` paid-through dates, from `EntitlementService::extend_subscription_lines()`'s new
     optional `&$moved` collector), a classic licence's `license` (`id`, `from` / `to` expiry) and the
     `renewal_id` row. The order is stamped `_wplm_renewal_applied` (the card path too).
+  - **Card renewal orders are renewal orders.** The order a gateway module builds for a cron card charge
+    (`wplm_create_renewal_order`) is now stamped like a renewal invoice (`_wplm_is_renewal`,
+    `_wplm_subscription_id`, `_wplm_renewal_term_days`, `_wplm_renewal_cycle`;
+    `RenewalProcessor::stamp_renewal_order()`, shared with `SelfServiceRenewal`), with
+    `_wplm_renewal_applied` in the same save. Completing it again after a refund applies it again,
+    exactly once; completing it twice without a refund extends once. Card orders made before this
+    change carry no flag and still roll back from their snapshot.
   - **On a full refund** (`woocommerce_order_status_refunded`, priority 10 — before the add-ons'
     listeners at 20), `RenewalProcessor::roll_back()` takes back what that renewal moved: each line's
     paid-through date (`EntitlementService::roll_back_line()` / `taken_back()`), the subscription's next
@@ -260,16 +267,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     webhook) or a listener re-entering finds it done and moves nothing more. A refund that finds the
     claim held moves nothing and says how to retry (Completed, then Refunded again: completing a renewal
     still marked applied extends nothing).
-  - **Not stamped, nothing moved** — the order note asks for a check by hand — when a dated line joined
-    the subscription after the renewal and is paid past where the others would go back to (an add-on
-    co-termed with the renewal: moving the others back would leave the lines out of step), or when
-    applying the renewal was cut off part-way.
+  - **A dated add-on that joined after the renewal is kept.** Only the lines in the renewal's snapshot
+    move back, and the subscription's next payment follows them alone. An add-on bought after the
+    renewal (co-termed with the renewed period) keeps the period it was bought for; the note says
+    "Kept: Factory, added by order #N (paid through D)". `wplm_entitlement_saved( $line, 'rolled_back' )`
+    fires only for the lines that moved. A renewal paid before snapshots keeps a line a later order
+    added the same way (`EntitlementService::roll_back_line()`'s new `$renewal_order` guard, why
+    `joined`).
+  - **Skipped once at the next renewal** (`RenewalProcessor::items_paid_ahead()`). An add-on item whose
+    lines already reach the date the next renewal gives the subscription's lines
+    (`EntitlementService::renewal_target()`) is not charged that time and its lines are not extended:
+    the card is charged the rest (the renewal row records it), the invoice leaves the item out, and the
+    order (or, for a card charge without an order, the subscription) says "Factory not charged this
+    time — already paid through D". The lines are in step again, and the renewal after that bills
+    everything together. An invoice records what it left out (`_wplm_renewal_skipped`), and paying it
+    extends exactly that, however late. The plan's own item, adjustments and lines no item names are
+    always charged; nothing is skipped when it would leave nothing to charge; the subscription's items
+    and recurring total never change. `EntitlementService::extend_subscription_lines()` takes the lines
+    to leave as a new optional `$skip` argument.
+  - **Nothing moved, not stamped** — the order note asks for a check by hand — when applying the
+    renewal was cut off part-way.
   - The subscription is read again before it is written, and its last payment and failed attempts come
     back only when no later renewal was paid, counting one paid while the rollback ran. A plan switch
     since is not a payment (it pays no period and moves no date), so it does not stop them.
     Then its next payment comes back exactly; otherwise it follows the dates as a payment sets it (the
-    start of the day after the latest dated line, or a classic licence's expiry). Its status is left to
-    the renewal cron and dunning. When it was the latest renewal and a classic licence now ends before
+    start of the day after the latest of the renewal's own lines, or a classic licence's expiry). When it
+    was the latest renewal and a classic licence now ends before
     its grace is over, the licence is marked expired at once, as validation would. An add-ons-only
     subscription moves only its own lines; the licence's status is never changed for it.
   - The renewal and invoice rows become `refunded`, and the order note says "renewal refunded:
@@ -283,13 +306,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   - A renewal **paid before 1.3.0** has no snapshot: it is shifted back one billing period from the
     cycle it renewed (`_wplm_renewal_cycle`), only while the subscription's next payment is still what
     that renewal produced. Otherwise the order is noted and nothing changes.
-  - After the rollback of the latest renewal the subscription is due again: the renewal cron bills it
-    as usual (a stored card is charged, a manual payer is sent a new invoice). When that payment is due
-    at once, the order note says so ("unless the subscription is put on hold or cancelled, the renewal
-    cron charges the saved card again on its next run"). Cancel the subscription, or put it on hold, as
-    well if it should not renew.
+  - **On hold after a refund.** Refunding the latest renewal puts an `active` or `trial` subscription
+    on hold (`SubscriptionService::update_status()`: the `subscription.paused` webhook; an add-ons-only
+    subscription never touches its licence). The cron neither charges a saved card nor invoices an
+    on-hold subscription, so nothing is billed again until the owner clicks Resume; otherwise the lines
+    lapse after grace as usual. Pending, pending-cancel, on-hold, cancelled and expired subscriptions are
+    left as they are, and refunding a renewal that is not the latest changes no status. The order and
+    subscription notes say "Renewal refunded — subscription put on hold; resume it to keep billing."
+    Completing the refunded order again makes the subscription active again.
 
 ### Changed
+- **Subscription admin buttons go through `SubscriptionService`.** Pause, Resume and Cancel on the
+  subscription screen, the row Cancel and bulk Cancel used to write the status straight to the table,
+  skipping the webhooks, the cancellation email, the status hooks and the licence sync. They now call
+  `SubscriptionService::pause()` / `resume()` / `cancel()`, like the REST API and My Account. A button
+  the status no longer allows changes nothing and says so.
 - `AddonService::apply()` now writes through one private line writer, shared with the new
   `AddonService::apply_extras()` and `AddonService::apply_extras_to_licence()`. If it fails part-way,
   it removes what it wrote through the service, which also detaches any subscription items.
