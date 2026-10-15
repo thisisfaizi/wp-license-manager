@@ -528,6 +528,236 @@ class RenewalRollbackTest extends TestCase {
 	}
 
 	// ---------------------------------------------------------------------------------------------
+	// Renewals refunded out of order, restarts, lines joined since, refunds that overlap
+	// ---------------------------------------------------------------------------------------------
+
+	/** Every dated line of a subscription paid through one date, and its next payment the day after. */
+	private function lines_through( int $subscription_id, string $through ): void {
+		global $wpdb;
+		$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->prefix}wplm_entitlements SET paid_through = %s WHERE subscription_id = %d AND paid_through IS NOT NULL", $through, $subscription_id ) );
+		$this->set_row( 'subscriptions', $subscription_id, array( 'next_payment' => $this->start_of_day_after( $through ) ) );
+	}
+
+	/** A classic licence ending at one time, due then. */
+	private function classic_ending( string $end ): array {
+		$classic = $this->buy_classic();
+		$this->set_row( 'licenses', $classic['license_id'], array( 'expires_at' => $end ) );
+		$this->set_row( 'subscriptions', $classic['subscription_id'], array( 'next_payment' => $end ) );
+		return $classic;
+	}
+
+	/** One date for every dated line of a subscription (they move together). */
+	private function one_date( int $subscription_id ): string {
+		$dates = array_values( array_unique( array_filter( $this->through( $subscription_id ) ) ) );
+		$this->assertCount( 1, $dates, 'The lines move together.' );
+		return (string) $dates[0];
+	}
+
+	public function test_two_renewals_refunded_oldest_first_take_both_periods_back(): void {
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$from   = $this->through( $sub_id );
+		$p0     = (string) reset( $from );
+		$next0  = $this->subscription_row( $sub_id )['next_payment'];
+		$first  = $this->renew( $sub_id );
+		$second = $this->renew( $sub_id );
+
+		$this->refund( $first );
+		$this->assertSame( $this->all( $from, $this->next_month( $p0 ) ), $this->through( $sub_id ), 'The older one: one month back.' );
+
+		$second = $this->refund( $second );
+
+		$this->assertSame( $from, $this->through( $sub_id ), 'Both refunded: back to where it started.' );
+		$this->assertSame( $next0, $this->subscription_row( $sub_id )['next_payment'] );
+		$this->assertStringNotContainsString( 'nothing', $this->notes( $second ) );
+		$this->assertCount( 2, $this->rolled );
+
+		// A classic licence the same way.
+		$classic = $this->classic_ending( '2026-01-14 10:00:00' );
+		$first   = $this->pay_on_order( $classic['subscription_id'], (int) strtotime( '2026-01-10 10:00:00 UTC' ) );
+		$second  = $this->pay_on_order( $classic['subscription_id'], (int) strtotime( '2026-02-10 10:00:00 UTC' ) );
+		$this->refund( $first );
+		$this->assertSame( '2026-02-14 10:00:00', $this->license_row( $classic['license_id'] )['expires_at'] );
+		$this->refund( $second );
+		$this->assertSame( '2026-01-14 10:00:00', $this->license_row( $classic['license_id'] )['expires_at'], 'Both months gone.' );
+		$this->assertSame( '2026-01-14 10:00:00', $this->subscription_row( $classic['subscription_id'] )['next_payment'] );
+	}
+
+	public function test_a_renewal_paid_after_grace_refunded_under_a_later_one_takes_back_one_period(): void {
+		// Paid through 2026-01-14; the first renewal comes after grace (a month from its own day), the
+		// second inside grace (continuing). Refunding the first takes back one month, not the lapse.
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$this->lines_through( $sub_id, '2026-01-14' );
+		$first = $this->pay_on_order( $sub_id, (int) strtotime( '2026-04-10 10:00:00 UTC' ) );
+		$this->assertSame( '2026-05-09', $this->one_date( $sub_id ) );
+		$this->pay_on_order( $sub_id, (int) strtotime( '2026-05-01 10:00:00 UTC' ) );
+		$this->assertSame( '2026-06-09', $this->one_date( $sub_id ) );
+
+		$this->refund( $first );
+
+		$this->assertSame( '2026-05-09', $this->one_date( $sub_id ), 'One month back.' );
+		$this->assertSame( $this->start_of_day_after( '2026-05-09' ), $this->subscription_row( $sub_id )['next_payment'] );
+
+		// A classic licence the same way.
+		$classic = $this->classic_ending( '2026-01-14 10:00:00' );
+		$first   = $this->pay_on_order( $classic['subscription_id'], (int) strtotime( '2026-04-10 10:00:00 UTC' ) );
+		$this->pay_on_order( $classic['subscription_id'], (int) strtotime( '2026-05-01 10:00:00 UTC' ) );
+		$this->assertSame( '2026-06-10 10:00:00', $this->license_row( $classic['license_id'] )['expires_at'] );
+
+		$this->refund( $first );
+
+		$this->assertSame( '2026-05-10 10:00:00', $this->license_row( $classic['license_id'] )['expires_at'] );
+		$this->assertSame( '2026-05-10 10:00:00', $this->subscription_row( $classic['subscription_id'] )['next_payment'] );
+	}
+
+	public function test_a_renewal_whose_period_a_later_fresh_start_left_behind_moves_nothing(): void {
+		// The first renewal continues to 2026-02-14; the customer lapses; the second starts afresh on
+		// 2026-05-01. The first's period is over: refunding it takes nothing from the second.
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$this->lines_through( $sub_id, '2026-01-14' );
+		$first = $this->pay_on_order( $sub_id, (int) strtotime( '2026-01-10 10:00:00 UTC' ) );
+		$this->assertSame( '2026-02-14', $this->one_date( $sub_id ) );
+		$second = $this->pay_on_order( $sub_id, (int) strtotime( '2026-05-01 10:00:00 UTC' ) );
+		$this->assertSame( '2026-05-31', $this->one_date( $sub_id ) );
+		$next = $this->subscription_row( $sub_id )['next_payment'];
+
+		$first = $this->refund( $first );
+
+		$this->assertSame( '2026-05-31', $this->one_date( $sub_id ), 'The fresh period stays whole.' );
+		$this->assertSame( $next, $this->subscription_row( $sub_id )['next_payment'] );
+		$this->assertNotSame( '', (string) $first->get_meta( RenewalProcessor::ROLLED_BACK_META ), 'Done: the refund is recorded.' );
+		$this->assertSame( array( 'renewal:refunded' ), array_map( static fn( $r ) => $r['type'] . ':' . $r['status'], $this->rows( $first->get_id() ) ) );
+		$this->assertStringContainsString( 'renewed afresh after this period had ended', $this->notes( $first ) );
+
+		// Refunding the second too: back to before either.
+		$this->refund( $second );
+		$this->assertSame( '2026-01-14', $this->one_date( $sub_id ) );
+		$this->assertSame( $this->start_of_day_after( '2026-01-14' ), $this->subscription_row( $sub_id )['next_payment'] );
+
+		// A classic licence the same way.
+		$classic = $this->classic_ending( '2026-01-14 10:00:00' );
+		$first   = $this->pay_on_order( $classic['subscription_id'], (int) strtotime( '2026-01-10 10:00:00 UTC' ) );
+		$this->pay_on_order( $classic['subscription_id'], (int) strtotime( '2026-05-01 10:00:00 UTC' ) );
+		$this->assertSame( '2026-06-01 10:00:00', $this->license_row( $classic['license_id'] )['expires_at'] );
+		$this->refund( $first );
+		$this->assertSame( '2026-06-01 10:00:00', $this->license_row( $classic['license_id'] )['expires_at'] );
+		$this->assertSame( '2026-06-01 10:00:00', $this->subscription_row( $classic['subscription_id'] )['next_payment'] );
+	}
+
+	public function test_a_line_joined_after_the_renewal_stops_the_rollback_for_a_check_by_hand(): void {
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$from   = $this->through( $sub_id );
+		$p0     = (string) reset( $from );
+		$order  = $this->renew( $sub_id );
+		$p1     = $this->next_month( $p0 );
+		// An add-on joins, co-termed with what the renewal paid.
+		$joined = $this->make( EntitlementRepository::class )->create(
+			array(
+				'license_id'      => $bought['license_id'],
+				'kind'            => 'module',
+				'code'            => 'fbr',
+				'qty'             => 1,
+				'paid_through'    => $p1,
+				'subscription_id' => $sub_id,
+			)
+		);
+		$moved = $this->through( $sub_id );
+		$next  = $this->subscription_row( $sub_id )['next_payment'];
+
+		$order = $this->refund( $order );
+
+		$this->assertSame( $moved, $this->through( $sub_id ), 'Nothing moved: the lines would fall out of step.' );
+		$this->assertSame( $p1, $moved[ $joined ] );
+		$this->assertSame( $next, $this->subscription_row( $sub_id )['next_payment'] );
+		$this->assertSame( array(), $this->rolled );
+		$this->assertSame( '1', (string) $order->get_meta( '_wplm_renewal_applied' ), 'Not stamped: it can be done once checked.' );
+		$this->assertSame( '', (string) $order->get_meta( RenewalProcessor::ROLLED_BACK_META ) );
+		$this->assertStringContainsString( 'joined subscription #' . $sub_id . ' after this renewal', $this->notes( $order ) );
+	}
+
+	public function test_a_rollback_run_again_while_it_runs_takes_back_one_period(): void {
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$from   = $this->through( $sub_id );
+		$p0     = (string) reset( $from );
+		$first  = $this->renew( $sub_id );
+		$this->renew( $sub_id );
+		$fired = false;
+		add_action(
+			'wplm_entitlement_saved',
+			function ( $line, $op ) use ( $first, &$fired ) {
+				unset( $line );
+				if ( 'rolled_back' === $op && ! $fired ) {
+					$fired = true;
+					$this->assertFalse( $this->make( RenewalProcessor::class )->roll_back( wc_get_order( $first->get_id() ) ), 'The second run finds it taken.' );
+				}
+			},
+			5,
+			2
+		);
+
+		$this->refund( $first );
+
+		$this->assertTrue( $fired );
+		$this->assertSame( $this->all( $from, $this->next_month( $p0 ) ), $this->through( $sub_id ), 'One month back, once.' );
+		$this->assertCount( 1, $this->rolled );
+	}
+
+	public function test_a_refund_that_finds_another_rollback_running_moves_nothing_and_says_how_to_retry(): void {
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$from   = $this->through( $sub_id );
+		$order  = $this->renew( $sub_id );
+		$moved  = $this->through( $sub_id );
+		$this->assertTrue( \WPLM\Support\Lock::claim( RenewalProcessor::LOCK_PREFIX . $sub_id, 300 ), 'Another request holds the subscription.' );
+
+		$order = $this->refund( $order );
+
+		$this->assertSame( $moved, $this->through( $sub_id ), 'Nothing moved.' );
+		$this->assertSame( '1', (string) $order->get_meta( '_wplm_renewal_applied' ) );
+		$this->assertStringContainsString( 'Set the order to Completed (nothing is extended again), then to Refunded again.', $this->notes( $order ) );
+
+		// Once it is free, the retry the note names takes the period back.
+		\WPLM\Support\Lock::release( RenewalProcessor::LOCK_PREFIX . $sub_id );
+		$order->update_status( 'completed' );
+		$this->assertSame( $moved, $this->through( $sub_id ), 'Completing it again extends nothing.' );
+		$this->refund( $order );
+		$this->assertSame( $from, $this->through( $sub_id ) );
+		$this->assertCount( 1, $this->rolled );
+	}
+
+	public function test_a_renewal_paid_while_a_rollback_runs_keeps_its_next_payment(): void {
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$first  = $this->renew( $sub_id );
+		$last   = $this->subscription_row( $sub_id )['last_payment'];
+		$fired  = false;
+		add_action(
+			'wplm_entitlement_saved',
+			function ( $line, $op ) use ( $sub_id, &$fired ) {
+				unset( $line );
+				if ( 'rolled_back' === $op && ! $fired ) {
+					$fired = true;
+					$this->renew( $sub_id );
+				}
+			},
+			5,
+			2
+		);
+
+		$this->refund( $first );
+
+		$this->assertTrue( $fired );
+		$row = $this->subscription_row( $sub_id );
+		$this->assertSame( $this->start_of_day_after( $this->one_date( $sub_id ) ), $row['next_payment'], 'The next payment agrees with the lines.' );
+		$this->assertNotNull( $row['last_payment'] );
+		$this->assertGreaterThanOrEqual( (string) $last, (string) $row['last_payment'], 'The later payment is kept.' );
+	}
+
+	// ---------------------------------------------------------------------------------------------
 	// Before 1.3.0, lines removed, HPOS, the card path
 	// ---------------------------------------------------------------------------------------------
 
@@ -660,5 +890,6 @@ class RenewalRollbackTest extends TestCase {
 		$this->assertSame( array( 'renewal:refunded' ), array_map( static fn( $r ) => $r['type'] . ':' . $r['status'], $this->rows( $created ) ) );
 		$this->assertCount( 1, $this->rolled );
 		$this->assertSame( 1, (int) $this->license_row( $bought['license_id'] )['status'], 'Inside grace: still active.' );
+		$this->assertStringContainsString( 'unless the subscription is put on hold or cancelled, the renewal cron charges the saved card again on its next run', $this->notes( $order ), 'The shop is told the card will be charged again.' );
 	}
 }

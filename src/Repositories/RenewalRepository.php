@@ -147,6 +147,47 @@ class RenewalRepository {
 	}
 
 	/**
+	 * The newest row of a subscription's renewals table (any type or status), or 0.
+	 *
+	 * @param int $subscription_id Subscription row id.
+	 * @return int
+	 */
+	public function latest_id( int $subscription_id ): int {
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'wplm_subscription_renewals';
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT MAX(id) FROM `{$table}` WHERE subscription_id = %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+				$subscription_id
+			)
+		);
+	}
+
+	/**
+	 * The orders that paid a subscription's renewals after a renewal row (successful `renewal` rows with
+	 * a higher id), oldest first.
+	 *
+	 * @param int $subscription_id Subscription row id.
+	 * @param int $renewal_id      The renewal row.
+	 * @return int[] Order ids.
+	 */
+	public function later_renewal_orders( int $subscription_id, int $renewal_id ): array {
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'wplm_subscription_renewals';
+		$ids   = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT order_id FROM `{$table}` WHERE subscription_id = %d AND id > %d AND type = 'renewal' AND status = 'success' AND order_id > 0 ORDER BY id", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+				$subscription_id,
+				$renewal_id
+			)
+		);
+
+		return array_values( array_unique( array_map( 'intval', (array) $ids ) ) );
+	}
+
+	/**
 	 * The newest renewal row an order paid for a subscription (type `renewal`), or 0.
 	 *
 	 * @param int $subscription_id Subscription row id.
