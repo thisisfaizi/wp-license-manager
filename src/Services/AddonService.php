@@ -1296,21 +1296,10 @@ class AddonService {
 	 * @throws \RuntimeException When what was left over is not exactly this line's add-ons.
 	 */
 	private function adopt_unstamped( \WC_Order $order, $item, License $license, callable $units, string $items_key ): ?array {
-		$stamped = array();
-		foreach ( $order->get_items() as $other ) {
-			if ( ! $other instanceof \WC_Order_Item_Product ) {
-				continue;
-			}
-			$ids = json_decode( (string) $other->get_meta( '_wplm_entitlement_ids' ), true );
-			if ( is_array( $ids ) ) {
-				$stamped = array_merge( $stamped, array_map( 'intval', $ids ) );
-			}
-		}
-		$left = array_values( array_diff( $this->order_line_ids( $order->get_id(), $license->id ), $stamped ) );
+		$left = $this->unrecorded_line_ids( $order, $license->id );
 		if ( array() === $left ) {
 			return null;
 		}
-		sort( $left );
 		$lines = array();
 		foreach ( $left as $id ) {
 			$line = $this->lines->find_by_id( (int) $id );
@@ -1326,63 +1315,31 @@ class AddonService {
 			return self::refused( $refuse() );
 		}
 
-		// Each unit billed on a subscription has its item there; one the attempt did not get to is
-		// attached, to the subscription its lines are on — once everything has been checked.
-		$plan   = array(); // Unit => [subscription, existing item id or null, line ids].
-		$addons = array();
-		foreach ( $units as $u => $unit ) {
-			$unit_lines = $by_row[ $u ] ?? array();
-			$sub_ids    = array_unique( array_map( static fn( Entitlement $l ) => (int) $l->subscription_id, $unit_lines ) );
-			if ( count( $sub_ids ) > 1 ) {
-				return self::refused( $refuse() );
-			}
-			$sub_id = (int) reset( $sub_ids );
-			if ( $sub_id <= 0 ) {
-				continue; // For life, or a dated pack: never on a subscription.
-			}
-			$sub = $this->subscriptions->find_by_id( $sub_id );
-			if ( null === $sub ) {
-				return self::refused( $refuse() );
-			}
-			if ( $sub->is_addons_only() && in_array( $sub->status, array( 'cancelled', 'expired' ), true ) ) {
-				// Recorded there, they would lapse at their paid-through day and never renew.
-				\WPLM\Support\Logger::error( sprintf( 'AddonService: order %d left add-on lines %s on licence %d unrecorded, on add-ons subscription %d, which has ended; nothing was changed.', $order->get_id(), implode( ', ', $left ), $license->id, $sub->id ) );
-				throw new AddonRefusal(
-					sprintf(
-						/* translators: 1: line ids, 2: licence label, 3: subscription id */
-						__( 'an earlier attempt added lines #%1$s to %2$s and was cut off before recording them. They are on add-ons subscription #%3$d, which has ended, so they would never renew. Nothing was changed and nothing was added; the lines stay on the licence until the day they are paid through', 'wp-license-manager' ),
-						implode( ', #', $left ),
-						self::licence_label( $license ),
-						$sub->id
-					)
-				);
-			}
-			$ids = array_map( static fn( Entitlement $l ) => (int) $l->id, $unit_lines );
-			sort( $ids );
-			$found = null;
-			foreach ( $this->subscriptions->get_items( $sub_id ) as $sub_item ) {
-				$billed = array_map( 'intval', (array) ( $sub_item->meta['entitlement_ids'] ?? array() ) );
-				sort( $billed );
-				if ( empty( $sub_item->meta['addon'] ) || array() === array_intersect( $billed, $ids ) ) {
-					continue;
-				}
-				if ( $billed !== $ids || (int) ( $sub_item->meta['order_item_id'] ?? 0 ) !== (int) $item->get_id() ) {
-					return self::refused( $refuse() ); // Billed for another line: not this line's to adopt.
-				}
-				$found = (int) $sub_item->id;
-			}
-			$plan[ $u ] = array( $sub, $found, $ids );
-			if ( $sub->is_addons_only() ) {
-				$addons[ $sub_id ] = true;
-			}
+		$found = $this->adoption_plan( $item, $units, $by_row );
+		if ( null === $found ) {
+			return self::refused( $refuse() );
 		}
-		$sub_items = array();
-		foreach ( $plan as $u => list( $sub, $found, $ids ) ) {
+		if ( $found instanceof Subscription ) {
+			// Recorded there, they would lapse at their paid-through day and never renew.
+			\WPLM\Support\Logger::error( sprintf( 'AddonService: order %d left add-on lines %s on licence %d unrecorded, on add-ons subscription %d, which has ended; nothing was changed.', $order->get_id(), implode( ', ', $left ), $license->id, $found->id ) );
+			throw new AddonRefusal(
+				sprintf(
+					/* translators: 1: line ids, 2: licence label, 3: subscription id */
+					__( 'an earlier attempt added lines #%1$s to %2$s and was cut off before recording them. They are on add-ons subscription #%3$d, which has ended, so they would never renew. Nothing was changed and nothing was added; the lines stay on the licence until the day they are paid through', 'wp-license-manager' ),
+					implode( ', #', $left ),
+					self::licence_label( $license ),
+					$found->id
+				)
+			);
+		}
+		list( $plan, $addons ) = $found;
+		$sub_items             = array();
+		foreach ( $plan as $u => list( $sub, $existing, $ids ) ) {
 			$meta = (array) ( $units[ $u ]['meta'] ?? array() );
 			if ( $sub->is_addons_only() ) {
 				$meta['addons_only'] = true;
 			}
-			$sub_items[] = $found ?? $this->attach( $sub, $order, $item, max( 1, (int) $units[ $u ]['qty'] ), (float) $units[ $u ]['line_total'], $meta, $license, $ids );
+			$sub_items[] = $existing ?? $this->attach( $sub, $order, $item, max( 1, (int) $units[ $u ]['qty'] ), (float) $units[ $u ]['line_total'], $meta, $license, $ids );
 		}
 
 		if ( array() !== $sub_items ) {
@@ -1420,6 +1377,85 @@ class AddonService {
 			throw $refusal;
 		}
 		return null;
+	}
+
+	/**
+	 * How {@see adopt_unstamped()} records leftovers that are exactly a line's units ({@see match_rows()}):
+	 * each unit billed on a subscription has its item there; one the attempt did not get to is attached,
+	 * to the subscription its lines are on — once everything has been checked. Reads only.
+	 *
+	 * @param \WC_Order_Item_Product      $item   The line.
+	 * @param array[]                     $units  The units it writes.
+	 * @param array<int, Entitlement[]>   $by_row The leftovers by unit.
+	 * @return array{0: array<int, array{0: Subscription, 1: int|null, 2: int[]}>, 1: array<int, bool>}|Subscription|null
+	 *         The plan (unit => subscription, its existing item id or null, line ids) and the add-ons
+	 *         subscriptions to start; an add-ons subscription that has ended the leftovers are on; or
+	 *         null when they are not this line's to record.
+	 */
+	private function adoption_plan( $item, array $units, array $by_row ) {
+		$plan   = array();
+		$addons = array();
+		foreach ( array_keys( $units ) as $u ) {
+			$unit_lines = $by_row[ $u ] ?? array();
+			$sub_ids    = array_unique( array_map( static fn( Entitlement $l ) => (int) $l->subscription_id, $unit_lines ) );
+			if ( count( $sub_ids ) > 1 ) {
+				return null;
+			}
+			$sub_id = (int) reset( $sub_ids );
+			if ( $sub_id <= 0 ) {
+				continue; // For life, or a dated pack: never on a subscription.
+			}
+			$sub = $this->subscriptions->find_by_id( $sub_id );
+			if ( null === $sub ) {
+				return null;
+			}
+			if ( $sub->is_addons_only() && in_array( $sub->status, array( 'cancelled', 'expired' ), true ) ) {
+				return $sub;
+			}
+			$ids = array_map( static fn( Entitlement $l ) => (int) $l->id, $unit_lines );
+			sort( $ids );
+			$found = null;
+			foreach ( $this->subscriptions->get_items( $sub_id ) as $sub_item ) {
+				$billed = array_map( 'intval', (array) ( $sub_item->meta['entitlement_ids'] ?? array() ) );
+				sort( $billed );
+				if ( empty( $sub_item->meta['addon'] ) || array() === array_intersect( $billed, $ids ) ) {
+					continue;
+				}
+				if ( $billed !== $ids || (int) ( $sub_item->meta['order_item_id'] ?? 0 ) !== (int) $item->get_id() ) {
+					return null; // Billed for another line: not this line's to adopt.
+				}
+				$found = (int) $sub_item->id;
+			}
+			$plan[ $u ] = array( $sub, $found, $ids );
+			if ( $sub->is_addons_only() ) {
+				$addons[ $sub_id ] = true;
+			}
+		}
+		return array( $plan, $addons );
+	}
+
+	/**
+	 * This order's add-on lines on a licence that no line of the order records (`_wplm_entitlement_ids`):
+	 * what an attempt cut off before recording them left there. Oldest first.
+	 *
+	 * @param \WC_Order $order      The order.
+	 * @param int       $license_id The licence.
+	 * @return int[]
+	 */
+	private function unrecorded_line_ids( \WC_Order $order, int $license_id ): array {
+		$stamped = array();
+		foreach ( $order->get_items() as $other ) {
+			if ( ! $other instanceof \WC_Order_Item_Product ) {
+				continue;
+			}
+			$ids = json_decode( (string) $other->get_meta( '_wplm_entitlement_ids' ), true );
+			if ( is_array( $ids ) ) {
+				$stamped = array_merge( $stamped, array_map( 'intval', $ids ) );
+			}
+		}
+		$left = array_values( array_diff( $this->order_line_ids( $order->get_id(), $license_id ), $stamped ) );
+		sort( $left );
+		return $left;
 	}
 
 	/**
@@ -1471,9 +1507,12 @@ class AddonService {
 			$theirs = false;
 			foreach ( $order->get_items() as $other ) {
 				if ( ! $other instanceof \WC_Order_Item_Product || $other->get_id() === $item->get_id()
-					|| '' !== (string) $other->get_meta( '_wplm_entitlement_ids' ) || self::released( $other )
+					|| '' !== (string) $other->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $other->get_meta( '_wplm_addon_reverted' )
 					|| self::refunded_in_full( $order, $other ) ) {
-					continue; // A line refunded in full is never added: nothing left over is its.
+					// A line refunded in full is never added: nothing left over is its. A reverted one had its
+					// lines taken back. A line the shop settled may still have left lines here (that is often
+					// why it was settled): it stays their owner, so they never refuse a sibling line.
+					continue;
 				}
 				$other_units = $this->line_units( $other, $license );
 				if ( null === $other_units ) {
@@ -2412,13 +2451,28 @@ class AddonService {
 	 * @return bool Whether it was cancelled.
 	 */
 	public function end_unbilled_addons_subscription( int $id ): bool {
-		$sub = $id > 0 ? $this->subscriptions->find_by_id( $id ) : null;
-		if ( null === $sub || ! $sub->is_addons_only() || 'pending' !== $sub->status || array() !== $this->subscriptions->get_items( $sub->id )
-			|| array() !== $this->lines->get_by_subscription( $sub->id ) ) {
+		$sub = $this->unbilled_addons_subscription( $id );
+		if ( null === $sub ) {
 			return false;
 		}
 		$this->subscription_service()->cancel( $sub->id );
 		return true;
+	}
+
+	/**
+	 * An add-ons subscription that never billed anything and holds nothing — add-ons-only, still pending,
+	 * no items, no lines ({@see end_unbilled_addons_subscription()}) — or null when it is not one.
+	 *
+	 * @param int $id Subscription id.
+	 * @return Subscription|null
+	 */
+	public function unbilled_addons_subscription( int $id ): ?Subscription {
+		$sub = $id > 0 ? $this->subscriptions->find_by_id( $id ) : null;
+		if ( null === $sub || ! $sub->is_addons_only() || 'pending' !== $sub->status || array() !== $this->subscriptions->get_items( $sub->id )
+			|| array() !== $this->lines->get_by_subscription( $sub->id ) ) {
+			return null;
+		}
+		return $sub;
 	}
 
 	/**
@@ -2892,7 +2946,9 @@ class AddonService {
 	 * are still to be added — not added, taken back, or refunded in full — on a line that adds to a
 	 * licence: package extras or a stored add-on for a licence the customer already has
 	 * ({@see adds_to_licence()}), or the extras of a licence bought with them, once that licence is
-	 * issued (only the extras are settled: a licence still to be issued never is).
+	 * issued (only the extras are settled: a licence still to be issued never is). Never a line whose
+	 * add-ons are on the licence already, written by an attempt cut off before recording them, that
+	 * completing the order again records ({@see retry_records()}): they are added, and billed.
 	 *
 	 * @param \WC_Order     $order The order.
 	 * @param \WC_Order_Item $item  Its line.
@@ -2905,10 +2961,81 @@ class AddonService {
 			return false;
 		}
 		if ( $this->adds_to_licence( $item ) ) {
-			return (int) $item->get_meta( '_wplm_addon_license_id' ) > 0;
+			if ( (int) $item->get_meta( '_wplm_addon_license_id' ) <= 0 ) {
+				return false;
+			}
+		} else {
+			$ids = json_decode( (string) $item->get_meta( '_wplm_license_ids' ), true );
+			if ( '' === (string) $item->get_meta( '_wplm_extras' ) || ! is_array( $ids ) || array() === $ids ) {
+				return false;
+			}
 		}
-		$ids = json_decode( (string) $item->get_meta( '_wplm_license_ids' ), true );
-		return '' !== (string) $item->get_meta( '_wplm_extras' ) && is_array( $ids ) && array() !== $ids;
+		return ! $this->retry_records( $order, $item );
+	}
+
+	/**
+	 * The licence an order line's add-ons go on: the one it adds to ({@see adds_to_licence()}), or the
+	 * one issued for it (a licence bought with extras). Null when there is none (yet).
+	 *
+	 * @param \WC_Order_Item_Product $item The line.
+	 * @return License|null
+	 */
+	public function line_licence( \WC_Order_Item_Product $item ): ?License {
+		if ( $this->adds_to_licence( $item ) ) {
+			$id = (int) $item->get_meta( '_wplm_addon_license_id' );
+		} else {
+			$ids = json_decode( (string) $item->get_meta( '_wplm_license_ids' ), true );
+			$id  = is_array( $ids ) && array() !== $ids ? (int) reset( $ids ) : 0;
+		}
+		return $id > 0 ? $this->licenses->find_by_id( $id ) : null;
+	}
+
+	/**
+	 * This order's add-on lines on the licence a line adds to that no line of the order records: left by
+	 * an attempt cut off before recording them ({@see adopt_unstamped()}). Settling a line takes none of
+	 * them back; the shop is told about them.
+	 *
+	 * @param \WC_Order              $order The order.
+	 * @param \WC_Order_Item_Product $item  Its line.
+	 * @return int[] Line ids, oldest first.
+	 */
+	public function unrecorded_lines( \WC_Order $order, \WC_Order_Item_Product $item ): array {
+		$license = $this->line_licence( $item );
+		return null === $license ? array() : $this->unrecorded_line_ids( $order, $license->id );
+	}
+
+	/**
+	 * Whether completing the order again records a line's add-ons rather than adding them: an attempt
+	 * cut off before recording them wrote exactly what the line adds, and {@see adopt_unstamped()} would
+	 * adopt them (not on an add-ons subscription that has ended, not billed for another line). Then the
+	 * line was added — and is billed — so it is never settled. Reads only.
+	 *
+	 * @param \WC_Order              $order The order.
+	 * @param \WC_Order_Item_Product $item  Its line.
+	 * @return bool
+	 */
+	public function retry_records( \WC_Order $order, \WC_Order_Item_Product $item ): bool {
+		$license = $this->line_licence( $item );
+		if ( null === $license ) {
+			return false;
+		}
+		$left = $this->unrecorded_line_ids( $order, $license->id );
+		if ( array() === $left ) {
+			return false;
+		}
+		$lines = array();
+		foreach ( $left as $id ) {
+			$line = $this->lines->find_by_id( (int) $id );
+			if ( null !== $line ) {
+				$lines[] = $line;
+			}
+		}
+		$units = count( $lines ) === count( $left ) ? $this->line_units( $item, $license ) : null;
+		if ( null === $units ) {
+			return false;
+		}
+		$by_row = self::match_rows( $lines, $units, true );
+		return null !== $by_row && is_array( $this->adoption_plan( $item, $units, $by_row ) );
 	}
 
 	/**

@@ -23,9 +23,14 @@ use WPLM\Services\AddonService;
  *   order action with an optional note (`woocommerce_order_actions`, `woocommerce_order_actions_end`) —
  *   the same on the posts and the HPOS order screen;
  * - settling stamps the line `_wplm_addon_settled` (JSON: `by` user id, `at` UTC, `note`) and notes it
- *   on the order. Nothing else: no line is written, no subscription changed, no money moved. The line
- *   then holds nothing and is never added ({@see AddonService::released()}), and once every line of the
- *   order is done the order is marked fulfilled (`_wplm_plan_fulfilled`).
+ *   on the order. Nothing else: no line is written or removed, no subscription changed, no money moved.
+ *   The line then holds no module or cycle and is never added ({@see AddonService::released()}), and once
+ *   every line of the order is done the order is marked fulfilled (`_wplm_plan_fulfilled`). The note
+ *   names what settling leaves as it is: add-on lines an attempt cut off before recording them left on
+ *   the licence ({@see AddonService::unrecorded_lines()}), and an add-ons subscription the line opened
+ *   that never billed — still pending, it keeps the licence's add-ons on its cycle until cancelled;
+ * - a line whose add-ons are on the licence already, which completing the order again records
+ *   ({@see AddonService::retry_records()}), is never settled.
  *
  * Needs `manage_woocommerce` and this form's nonce. Settling a line twice changes nothing.
  */
@@ -106,7 +111,7 @@ class AddonSettlement {
 		echo '<li class="wide wplm-settle-addons">';
 		echo '<label for="wplm_settle_note"><strong>' . esc_html__( 'Mark add-ons settled', 'wp-license-manager' ) . '</strong></label>';
 		echo '<textarea id="wplm_settle_note" name="wplm_settle_note" rows="2" style="width:100%;" placeholder="' . esc_attr__( 'Note (optional), e.g. refunded by bank transfer', 'wp-license-manager' ) . '"></textarea>';
-		echo '<p class="description">' . esc_html__( 'For add-on lines that could not be added and will not be: tick them in the items list, choose "Mark add-ons settled" above, then Update. Nothing is added, billed or refunded; the lines stop holding their modules and are never added later.', 'wp-license-manager' ) . '</p>';
+		echo '<p class="description">' . esc_html__( 'For add-on lines that could not be added and will not be: tick them in the items list, choose "Mark add-ons settled" above, then Update. Settling adds, removes, bills and refunds nothing; the lines stop holding their modules and are never added later.', 'wp-license-manager' ) . '</p>';
 		wp_nonce_field( self::ACTION . '_' . $order->get_id(), 'wplm_settle_nonce', false );
 		echo '</li>';
 	}
@@ -197,7 +202,9 @@ class AddonSettlement {
 	 * Mark the add-ons of order lines settled. Each line must be the order's and settleable now
 	 * ({@see AddonService::settleable()}); a line already settled is left as it is (no second note).
 	 * Claims the order's fulfilment lock, so a completion running now can neither add a line being
-	 * settled nor be overtaken. Writes no line, changes no subscription, moves no money.
+	 * settled nor be overtaken. Writes or removes no line, changes no subscription, moves no money; add-on
+	 * lines left on the licence unrecorded, and an add-ons subscription the line opened that never billed,
+	 * are named in the note and the message.
 	 *
 	 * @param int    $order_id The order.
 	 * @param int[]  $item_ids Its lines.
@@ -220,19 +227,38 @@ class AddonSettlement {
 			if ( ! $order instanceof \WC_Order ) {
 				return self::result( false, __( 'That order no longer exists.', 'wp-license-manager' ) );
 			}
-			$items   = $order->get_items();
-			$by      = self::user_name( $user_id );
-			$note    = trim( $note );
-			$settled = array();
-			$refused = array();
+			$items      = $order->get_items();
+			$by         = self::user_name( $user_id );
+			$note       = trim( $note );
+			$settled    = array();
+			$refused    = array();
+			$recordable = array();
+			$left_over  = array();
 			foreach ( $item_ids as $id ) {
 				$item = $items[ $id ] ?? null;
 				if ( $item instanceof \WC_Order_Item_Product && AddonService::settled( $item ) ) {
 					continue; // Settled before: nothing to do.
 				}
 				if ( ! $item instanceof \WC_Order_Item_Product || ! $this->addons->settleable( $order, $item ) ) {
-					$refused[] = $item instanceof \WC_Order_Item_Product ? $item->get_name() : '#' . $id;
+					if ( $item instanceof \WC_Order_Item_Product && $this->addons->retry_records( $order, $item ) ) {
+						$recordable[] = $item->get_name();
+					} else {
+						$refused[] = $item instanceof \WC_Order_Item_Product ? $item->get_name() : '#' . $id;
+					}
 					continue;
+				}
+				$left      = $this->addons->unrecorded_lines( $order, $item );
+				$licence   = array() !== $left ? $this->addons->line_licence( $item ) : null;
+				$unbilled  = $this->addons->unbilled_addons_subscription( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
+				$left_note = '';
+				if ( array() !== $left && null !== $licence ) {
+					$left_note = sprintf(
+						/* translators: 1: line ids, 2: licence label */
+						__( 'Add-on lines #%1$s, which an earlier attempt of this order left on %2$s without recording them, are recorded on no line and stay on the licence: remove them on the licence screen if they should go.', 'wp-license-manager' ),
+						implode( ', #', $left ),
+						AddonService::licence_label( $licence )
+					);
+					$left_over[ $left_note ] = true;
 				}
 				$item->update_meta_data(
 					self::META,
@@ -245,22 +271,32 @@ class AddonSettlement {
 					)
 				);
 				$item->save_meta_data();
-				$order->add_order_note(
-					'' !== $note
-						? sprintf(
-							/* translators: 1: order line name, 2: user name, 3: the note */
-							__( 'WPLM: add-ons on line "%1$s" marked settled by %2$s: %3$s. Nothing was added, billed or refunded; the line no longer holds its modules or add-ons cycle and is never added later.', 'wp-license-manager' ),
-							$item->get_name(),
-							$by,
-							$note
-						)
-						: sprintf(
-							/* translators: 1: order line name, 2: user name */
-							__( 'WPLM: add-ons on line "%1$s" marked settled by %2$s. Nothing was added, billed or refunded; the line no longer holds its modules or add-ons cycle and is never added later.', 'wp-license-manager' ),
-							$item->get_name(),
-							$by
-						)
-				);
+				$text = '' !== $note
+					? sprintf(
+						/* translators: 1: order line name, 2: user name, 3: the note */
+						__( 'WPLM: add-ons on line "%1$s" marked settled by %2$s: %3$s.', 'wp-license-manager' ),
+						$item->get_name(),
+						$by,
+						$note
+					)
+					: sprintf(
+						/* translators: 1: order line name, 2: user name */
+						__( 'WPLM: add-ons on line "%1$s" marked settled by %2$s.', 'wp-license-manager' ),
+						$item->get_name(),
+						$by
+					);
+				$text .= ' ' . ( null === $unbilled
+					? __( 'Settling added, removed, billed and refunded nothing; the line no longer holds its modules or add-ons cycle and is never added later.', 'wp-license-manager' )
+					: sprintf(
+						/* translators: 1: subscription id, 2: cycle (month or year) */
+						__( 'Settling added, removed, billed and refunded nothing; the line no longer holds its modules and is never added later. Add-ons subscription #%1$d, opened for it, never billed and stays pending: until it is cancelled, the licence\'s monthly / yearly add-ons stay on its cycle (every %2$s).', 'wp-license-manager' ),
+						$unbilled->id,
+						$unbilled->billing_period
+					) );
+				if ( '' !== $left_note ) {
+					$text .= ' ' . $left_note;
+				}
+				$order->add_order_note( $text );
 				$settled[] = $id;
 			}
 
@@ -274,15 +310,20 @@ class AddonSettlement {
 			\WPLM\Support\Lock::release( $lock );
 		}
 
-		if ( array() !== $refused ) {
-			return self::result(
-				false,
-				/* translators: %s: order line names */
-				sprintf( __( 'These lines have no add-ons waiting to be added, so they were not marked settled: %s.', 'wp-license-manager' ), implode( ', ', $refused ) ),
-				$settled
-			);
+		$problems = array();
+		if ( array() !== $recordable ) {
+			/* translators: %s: order line names */
+			$problems[] = sprintf( __( 'The add-ons of these lines are on the licence already, written by an earlier attempt that was cut off before recording them, so they were not marked settled: %s. Set the order to Completed again to record them.', 'wp-license-manager' ), implode( ', ', $recordable ) );
 		}
-		return self::result( true, __( 'Add-ons marked settled.', 'wp-license-manager' ), $settled );
+		if ( array() !== $refused ) {
+			/* translators: %s: order line names */
+			$problems[] = sprintf( __( 'These lines have no add-ons waiting to be added, so they were not marked settled: %s.', 'wp-license-manager' ), implode( ', ', $refused ) );
+		}
+		$problems = array_merge( $problems, array_keys( $left_over ) );
+		if ( array() !== $recordable || array() !== $refused ) {
+			return self::result( false, implode( ' ', $problems ), $settled );
+		}
+		return self::result( true, trim( __( 'Add-ons marked settled.', 'wp-license-manager' ) . ' ' . implode( ' ', $problems ) ), $settled );
 	}
 
 	// -------------------------------------------------------------------------

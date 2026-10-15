@@ -192,14 +192,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     **Mark add-ons settled** order action with an optional note. Needs `manage_woocommerce` and the
     form's nonce.
   - Settling stamps the line `_wplm_addon_settled` (JSON: `by` user id, `at` UTC, `note`) and adds an
-    order note ("add-ons on line "X" marked settled by Y: note"). It writes no line, changes no
-    subscription and moves no money.
-  - A settled line holds nothing anywhere (product page, add to cart, checkout, order-pay, the Store
-    API) and is never added later, however often the order is completed again: it reads as taken back,
-    exactly like a refunded one (`AddonService::released()`). Once every line of the order is done, the
-    order is marked fulfilled (`_wplm_plan_fulfilled`).
+    order note ("add-ons on line "X" marked settled by Y: note"). It writes and removes no line, changes
+    no subscription and moves no money.
+  - A settled line no longer holds its modules or its add-ons cycle anywhere (product page, add to cart,
+    checkout, order-pay, the Store API) and is never added later, however often the order is completed
+    again (`AddonService::released()`). Once every line of the order is done, the order is marked
+    fulfilled (`_wplm_plan_fulfilled`).
+  - What settling leaves as it is, the order note (and the message on the order screen) names: add-on
+    lines an earlier attempt of the order left on the licence without recording them stay there ("remove
+    them on the licence screen if they should go"), and still count as the settled line's, so a sibling
+    line of the order is written as usual on the next completion; an add-ons subscription the line opened
+    that never billed stays pending, and until it is cancelled the licence's monthly / yearly add-ons
+    stay on its cycle. Unlike a full refund, settling does not cancel that subscription.
+  - A line whose add-ons are on the licence already — an attempt wrote exactly what it adds and was cut
+    off before recording them — is never settled (no tick, no action): completing the order again
+    records them (`AddonService::retry_records()`), and they are billed.
   - Settling twice changes nothing and adds no second note. It claims the order's fulfilment lock, so
-    it never races a completion.
+    it never races a completion. There is no undo.
 
 ### Changed
 - `AddonService::apply()` now writes through one private line writer, shared with the new
@@ -345,7 +354,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   were priced on another cycle than the licence's add-ons are now billed, or an earlier attempt left
   lines on the licence for the owner, fulfilment throws `WPLM\Services\AddonRefusal` and the order note
   ends "A retry cannot add them: refund this line, or use Mark add-ons settled." (for a new licence's
-  extras: "refund the add-ons' part of this line"), never "set the order to Completed again". Refusals a
+  extras, where refunding only the add-ons' part never closes the line: "use Mark add-ons settled, and
+  refund the add-ons' part of this line if it is owed"), never "set the order to Completed again". Refusals a
   retry can cure (another order adding to the licence right now, a failed write, a paused or overdue
   add-ons subscription) still say to complete the order again.
 

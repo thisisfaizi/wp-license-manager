@@ -51,7 +51,7 @@ Client software (desktop apps, plugins, SaaS) calls the REST API to enforce lice
 * Licensing tab on any product: assign a subscription plan, or enable simple one-time licensing.
 * Auto-issue and deliver keys on order completion; resend on demand.
 * Customer "My Account" portal for keys, devices, and subscriptions.
-* Mark add-ons settled: on the order screen, close an add-on line that could not be added (the licence already has it, its add-ons subscription ended) once you have dealt with the customer. Nothing is added, billed or refunded; the line stops holding its modules and is never added later.
+* Mark add-ons settled: on the order screen, close an add-on line that could not be added (the licence already has it, its add-ons subscription ended) once you have dealt with the customer. Settling adds, removes, bills and refunds nothing; the line stops holding its modules and is never added later, and the order note names anything settling leaves as it is.
 
 = REST API & developer tools =
 

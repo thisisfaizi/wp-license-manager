@@ -1953,7 +1953,7 @@ class PlanCheckout {
 				sprintf(
 					$e instanceof AddonRefusal
 						/* translators: 1: package name, 2: error message */
-						? __( 'WPLM: the licence for "%1$s" was issued, but its add-ons could not be added — %2$s. A retry cannot add them: refund the add-ons\' part of this line, or use Mark add-ons settled.', 'wp-license-manager' )
+						? __( 'WPLM: the licence for "%1$s" was issued, but its add-ons could not be added — %2$s. A retry cannot add them: use Mark add-ons settled, and refund the add-ons\' part of this line if it is owed (that refund alone does not close the line).', 'wp-license-manager' )
 						/* translators: 1: package name, 2: error message */
 						: __( 'WPLM: the licence for "%1$s" was issued, but its add-ons could not be added — %2$s. Fix the cause, then set the order to Completed again: only the add-ons are added, no second key is issued.', 'wp-license-manager' ),
 					$pkg->name,

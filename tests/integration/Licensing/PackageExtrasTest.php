@@ -1489,6 +1489,7 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( 'no longer billed on subscription #999999', $this->notes( $order['order'] ) );
 		$this->assertStringContainsString( 'A retry cannot add them: refund this line, or use Mark add-ons settled.', $this->note_with( $order['order'], 'no longer billed on subscription #999999' ), 'A retry cannot cure it.' );
 		$this->assertStringNotContainsString( 'Completed again', $this->note_with( $order['order'], 'no longer billed on subscription #999999' ) );
+		$this->assertSettleable( $order['order'], $order['item'], 'The note offers Mark add-ons settled: the line can be settled.' );
 		// Until the shop refunds that line, it still holds Factory: a new order for it is refused.
 		wp_set_current_user( $base['customer'] );
 		$factory = array(
@@ -2458,8 +2459,9 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( '', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
 		$this->assertStringContainsString( 'cut off part-way', $this->notes( $order ) );
 		$this->assertStringContainsString( '#' . $factory->id, $this->notes( $order ) );
-		$this->assertStringContainsString( 'A retry cannot add them: refund the add-ons\' part of this line, or use Mark add-ons settled.', $this->note_with( $order, 'cut off part-way' ), 'A retry cannot cure it.' );
+		$this->assertStringContainsString( 'A retry cannot add them: use Mark add-ons settled, and refund the add-ons\' part of this line if it is owed (that refund alone does not close the line).', $this->note_with( $order, 'cut off part-way' ), 'A retry cannot cure it.' );
 		$this->assertStringNotContainsString( 'Completed again', $this->note_with( $order, 'cut off part-way' ) );
+		$this->assertSettleable( $order, $bought['item'], 'The note offers Mark add-ons settled: the line can be settled.' );
 	}
 
 	public function test_a_line_retried_beside_another_lines_unrecorded_addons_leaves_them_to_that_line(): void {
@@ -2611,6 +2613,7 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( 'no longer billed on subscription #' . $addons->id, $this->notes( $order ) );
 		$this->assertStringContainsString( 'A retry cannot add them: refund this line, or use Mark add-ons settled.', $this->note_with( $order, 'no longer billed on subscription #' ), 'A retry cannot cure it.' );
 		$this->assertStringNotContainsString( 'Completed again', $this->note_with( $order, 'no longer billed on subscription #' ) );
+		$this->assertSettleable( $order, $second['item'], 'The note offers Mark add-ons settled: the line can be settled.' );
 	}
 
 	/**
@@ -2671,7 +2674,18 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( 'add-ons subscription #' . $opened . ', which has ended', $this->notes( $order ) );
 		$this->assertStringContainsString( 'A retry cannot add them: refund this line, or use Mark add-ons settled.', $this->note_with( $order, ', which has ended' ), 'A retry cannot cure it.' );
 		$this->assertStringNotContainsString( 'Completed again', $this->note_with( $order, ', which has ended' ) );
+		$this->assertSettleable( $order, $second['item'], 'Leftovers on an ended subscription are never recorded: the line can be settled, as its note says.' );
 		$this->assertStringNotContainsString( 'nothing was added or billed twice', $this->notes( $order ) );
+
+		// Settled, as the note offers: the leftover stays on the licence, and the note and message say so.
+		$result = $this->settlement()->settle( $order->get_id(), array( $second['item']->get_id() ), $this->shop_owner() );
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$this->assertStringContainsString( 'Add-on lines #' . $seats[0]->id . ', which an earlier attempt of this order left on', $result['message'] );
+		$settled = $this->note_with( wc_get_order( $order->get_id() ), 'marked settled' );
+		$this->assertStringContainsString( 'Add-on lines #' . $seats[0]->id . ', which an earlier attempt of this order left on', $settled );
+		$this->assertStringContainsString( 'remove them on the licence screen if they should go', $settled );
+		$this->assertStringNotContainsString( 'Nothing was added', $settled, 'Never claims nothing was added while a line it left is on the licence.' );
+		$this->assertSame( array( $seats[0]->id ), array_map( static fn( $l ) => $l->id, $this->addon_lines( $base['license_id'], 'seats' ) ), 'Settling removes nothing.' );
 	}
 
 	public function test_the_first_addons_period_starts_when_the_addons_are_written_not_when_the_subscription_was_opened(): void {
@@ -4173,8 +4187,9 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( array(), $this->items( $other->id ) );
 		$this->assertStringContainsString( 'billed on subscription #' . $other->id . ' every year', $this->notes( wc_get_order( $first['order']->get_id() ) ) );
 		$refusal = $this->note_with( wc_get_order( $first['order']->get_id() ), ' every year; these were priced otherwise' );
-		$this->assertStringContainsString( 'A retry cannot add them: refund the add-ons\' part of this line, or use Mark add-ons settled.', $refusal, 'A retry cannot cure it.' );
+		$this->assertStringContainsString( 'A retry cannot add them: use Mark add-ons settled, and refund the add-ons\' part of this line if it is owed (that refund alone does not close the line).', $refusal, 'A retry cannot cure it.' );
 		$this->assertStringNotContainsString( 'Completed again', $refusal );
+		$this->assertSettleable( wc_get_order( $first['order']->get_id() ), $first['item'], 'The note offers Mark add-ons settled: the line can be settled.' );
 	}
 	public function test_a_new_purchase_whose_recurring_extras_await_a_retry_holds_their_cycle(): void {
 		$first = $this->new_purchase_awaiting_its_extras( 'Lifetime', array(), 'month' );
@@ -4244,6 +4259,11 @@ class PackageExtrasTest extends TestCase {
 
 	private function fresh_item( \WC_Order_Item_Product $item ): \WC_Order_Item_Product {
 		return \WC_Order_Factory::get_order_item( $item->get_id() );
+	}
+
+	/** A line whose refusal note offers "Mark add-ons settled" really can be settled. */
+	private function assertSettleable( \WC_Order $order, \WC_Order_Item_Product $item, string $why ): void {
+		$this->assertTrue( $this->make( AddonService::class )->settleable( wc_get_order( $order->get_id() ), $this->fresh_item( $item ) ), $why );
 	}
 
 	/** Two existing-licence orders for Factory: the second, completed after the first, is refused "already has". */
@@ -4369,7 +4389,7 @@ class PackageExtrasTest extends TestCase {
 		$this->complete_again( $first['order'] );
 		$order   = wc_get_order( $first['order']->get_id() );
 		$refusal = $this->note_with( $order, 'already has Factory' );
-		$this->assertStringContainsString( 'A retry cannot add them: refund the add-ons\' part of this line, or use Mark add-ons settled.', $refusal );
+		$this->assertStringContainsString( 'A retry cannot add them: use Mark add-ons settled, and refund the add-ons\' part of this line if it is owed (that refund alone does not close the line).', $refusal );
 		$this->assertStringNotContainsString( 'Completed again', $refusal );
 		$license = $this->make( LicenseRepository::class )->find_by_id( $first['license_id'] );
 		$this->assertArrayHasKey( 'factory', $this->make( AddonService::class )->unfulfilled_addon_modules( $license ) );
@@ -4473,5 +4493,168 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( '1', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
 		$this->assertSame( array(), $this->make( AddonService::class )->unfulfilled_addon_modules( $license ) );
 		$this->assertStringContainsString( 'marked settled by Shop Owner: HPOS', $this->notes( $order ) );
+	}
+
+	public function test_settling_a_line_cut_off_part_way_never_strands_its_sibling_line_and_names_what_it_left(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		wp_set_current_user( $base['customer'] );
+		// Line 1: a phone (+1 phones, +1 users). Line 2: a user (+1 users).
+		foreach ( array( array( 'phone' => '1' ), array( 'user' => '1' ) ) as $extras ) {
+			$_POST['wplm_extras']            = $extras;
+			$_POST['wplm_target_license_id'] = (string) $base['license_id'];
+			$this->assertTrue( apply_filters( 'woocommerce_add_to_cart_validation', true, $product->get_id(), 1 ) );
+			$this->assertNotFalse( WC()->cart->add_to_cart( $product->get_id(), 1 ) );
+			unset( $_POST['wplm_extras'], $_POST['wplm_target_license_id'] );
+		}
+		WC()->cart->calculate_totals();
+		$order = new \WC_Order();
+		$order->set_customer_id( $base['customer'] );
+		WC()->checkout()->create_order_line_items( $order, WC()->cart );
+		$order->set_payment_method( 'bacs' );
+		$order->calculate_totals();
+		$order->save();
+		WC()->cart->empty_cart();
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+		$items = array_values( wc_get_order( $order->get_id() )->get_items() );
+		// The first attempt died inside line 1, after its phones line: its users line and line 2 never written.
+		$repo   = $this->make( EntitlementRepository::class );
+		$orphan = null;
+		foreach ( $items as $n => $item ) {
+			foreach ( json_decode( (string) $item->get_meta( '_wplm_entitlement_ids' ), true ) as $id ) {
+				$line = $repo->find_by_id( (int) $id );
+				if ( 0 === $n && 'phones' === $line->code ) {
+					$orphan = $line->id;
+				} else {
+					$repo->delete( (int) $id );
+				}
+			}
+			$this->lose_the_stamp( $item );
+		}
+		$this->unfulfil( $order );
+		$this->assertSettleable( $order, $items[0], 'A line cut off part-way can be settled.' );
+
+		// The shop settles line 1 before retrying, as its refusal note invites.
+		$result = $this->settlement()->settle( $order->get_id(), array( $items[0]->get_id() ), $this->shop_owner(), 'refunded' );
+
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$this->assertStringContainsString( 'Add-on lines #' . $orphan . ', which an earlier attempt of this order left on', $result['message'] );
+		$settled = $this->note_with( wc_get_order( $order->get_id() ), 'marked settled' );
+		$this->assertStringContainsString( 'Add-on lines #' . $orphan . ', which an earlier attempt of this order left on', $settled, 'The shop learns the leftover stays on the licence.' );
+		$this->assertStringContainsString( 'remove them on the licence screen if they should go', $settled );
+		$this->assertStringNotContainsString( 'Nothing was added', $settled );
+
+		$this->complete_again( $order );
+
+		$fresh = wc_get_order( $order->get_id() );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'users' ), 'Line 2 is written: the settled line still owns its leftover.' );
+		$this->assertNotSame( '', (string) $this->fresh_item( $items[1] )->get_meta( '_wplm_entitlement_ids' ) );
+		$this->assertSame( '', (string) $this->fresh_item( $items[0] )->get_meta( '_wplm_entitlement_ids' ), 'The settled line is never written.' );
+		$this->assertSame( array( $orphan ), array_map( static fn( $l ) => $l->id, $this->addon_lines( $base['license_id'], 'phones' ) ), 'Its leftover is neither removed nor written again.' );
+		$this->assertSame( '1', (string) $fresh->get_meta( '_wplm_plan_fulfilled' ), 'Every line is done.' );
+	}
+
+	public function test_a_line_whose_addons_were_written_but_never_recorded_is_never_settled_and_a_retry_records_it(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		$order   = $this->add_to_licence(
+			$product,
+			$base,
+			array(
+				'user'       => '2',
+				'module:fbr' => '1',
+			)
+		);
+		$addons  = $this->make( SubscriptionRepository::class )->find_addons_for_license( $base['license_id'] );
+		// A crash right after writing them: on the licence, billed, but never recorded on the line.
+		$this->lose_the_stamp( $order['item'] );
+		$this->unfulfil( $order['order'] );
+		$service = $this->make( AddonService::class );
+		$screen  = wc_get_order( $order['order']->get_id() );
+
+		$this->assertTrue( $service->retry_records( $screen, $this->fresh_item( $order['item'] ) ) );
+		$this->assertFalse( $service->settleable( $screen, $this->fresh_item( $order['item'] ) ), 'Its add-ons were added: it is never settled.' );
+		wp_set_current_user( $this->shop_owner() );
+		$this->assertArrayNotHasKey( AddonSettlement::ACTION, $this->settlement()->order_actions( array(), $screen ) );
+		ob_start();
+		do_action( 'woocommerce_after_order_itemmeta', $order['item']->get_id(), $this->fresh_item( $order['item'] ), null );
+		$this->assertStringNotContainsString( 'wplm_settle_items', (string) ob_get_clean(), 'No tick.' );
+
+		$result = $this->settlement()->settle( $order['order']->get_id(), array( $order['item']->get_id() ), get_current_user_id() );
+
+		$this->assertFalse( $result['ok'] );
+		$this->assertStringContainsString( 'on the licence already', $result['message'] );
+		$this->assertStringContainsString( 'Set the order to Completed again to record them', $result['message'] );
+		$this->assertSame( array(), AddonSettlement::stamp( $this->fresh_item( $order['item'] ) ) );
+		$this->assertSame( '', (string) wc_get_order( $order['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ), 'Not marked fulfilled: the retry still records them.' );
+
+		$this->complete_again( $order['order'] );
+
+		$this->assertNotSame( '', (string) $this->fresh_item( $order['item'] )->get_meta( '_wplm_entitlement_ids' ), 'Recorded.' );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'users' ), 'Once.' );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'fbr' ) );
+		$this->assertCount( 1, $this->items( $addons->id ) );
+		$this->assertSame( 1000.0, $this->total( $addons->id ), 'Billed once.' );
+		$this->assertSame( '1', (string) wc_get_order( $order['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+	}
+
+	public function test_settling_a_line_whose_addons_subscription_never_billed_says_that_subscription_keeps_the_cycle(): void {
+		$this->add_seat_plan_offer();
+		$product          = $this->addon_product();
+		$base             = $this->customer_with( 'Lifetime' );
+		$this->break_next = true;
+		$first            = $this->add_to_licence( $product, $base, array( 'module:fbr' => '1' ) );
+		$opened           = (int) $this->fresh_item( $first['item'] )->get_meta( '_wplm_addons_subscription_id' );
+		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'], 'Opened, its add-ons not written.' );
+
+		$result = $this->settlement()->settle( $first['order']->get_id(), array( $first['item']->get_id() ), $this->shop_owner(), 'credited' );
+
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$this->assertSame( 'pending', $this->subscription_row( $opened )['status'], 'Settling changes no subscription.' );
+		$license = $this->make( LicenseRepository::class )->find_by_id( $base['license_id'] );
+		$this->assertSame( 'month', $this->make( AddonService::class )->addons_cycle( $license ), 'That subscription still sets the cycle.' );
+		$settled = $this->note_with( wc_get_order( $first['order']->get_id() ), 'marked settled' );
+		$this->assertStringContainsString( 'Add-ons subscription #' . $opened . ', opened for it, never billed and stays pending: until it is cancelled, the licence\'s monthly / yearly add-ons stay on its cycle (every month).', $settled, 'The note says what still holds the cycle.' );
+		$this->assertStringNotContainsString( 'no longer holds its modules or add-ons cycle', $settled, 'Never claims the cycle is free while it is not.' );
+	}
+
+	public function test_refunding_only_the_addons_part_of_a_new_licence_line_does_not_close_it_but_settling_does(): void {
+		$product = $this->addon_product();
+		$first   = $this->new_purchase_awaiting_its_extras( 'Lifetime', array( 'module:factory' => '1' ) );
+		$base    = array(
+			'license_id' => $first['license_id'],
+			'customer'   => $first['customer'],
+		);
+		$this->paid_before_the_hold( $first['order'], fn() => $this->add_to_licence( $product, $base, array( 'module:factory' => '1' ) ) );
+		$this->complete_again( $first['order'] );
+		$order = wc_get_order( $first['order']->get_id() );
+		$item  = $this->fresh_item( $first['item'] );
+		$snap  = json_decode( (string) $item->get_meta( '_wplm_extras' ), true );
+		$part  = round( (float) $item->get_total() - (float) ( $snap['base_price'] ?? 0 ), 2 );
+		$this->assertGreaterThan( 0, $part );
+		$refund = wc_create_refund(
+			array(
+				'order_id'   => $order->get_id(),
+				'amount'     => $part,
+				'line_items' => array(
+					$item->get_id() => array(
+						'qty'          => 0,
+						'refund_total' => $part,
+					),
+				),
+			)
+		);
+		$this->assertNotWPError( $refund );
+		$license = $this->make( LicenseRepository::class )->find_by_id( $first['license_id'] );
+
+		$this->assertArrayHasKey( 'factory', $this->make( AddonService::class )->unfulfilled_addon_modules( $license ), 'That refund alone does not close the line, as the note says.' );
+		$this->assertSame( '', (string) wc_get_order( $order->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+
+		$result = $this->settlement()->settle( $order->get_id(), array( $item->get_id() ), $this->shop_owner(), 'add-ons part refunded' );
+
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$this->assertSame( array(), $this->make( AddonService::class )->unfulfilled_addon_modules( $license ), 'Settled: released.' );
+		$this->assertSame( '1', (string) wc_get_order( $order->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
 	}
 }
