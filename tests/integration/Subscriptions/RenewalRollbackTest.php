@@ -34,6 +34,12 @@ class RenewalRollbackTest extends TestCase {
 	/** @var array|\WP_Error What the fake card gateway returns. */
 	private $charge_result;
 
+	/** @var float[] Amounts the fake card gateway was asked to charge. */
+	private array $charges = array();
+
+	/** @var int[] Subscriptions the cron found due for a manual (invoiced) renewal. */
+	private array $due = array();
+
 	public function set_up(): void {
 		parent::set_up();
 		add_action(
@@ -62,6 +68,22 @@ class RenewalRollbackTest extends TestCase {
 		);
 		$this->charge_result = array( 'txn' => 'txn_ok' );
 		add_filter( 'wplm_gateway_charge', fn() => $this->charge_result );
+		add_filter(
+			'wplm_gateway_charge',
+			function ( $result, $token, $amount ) {
+				unset( $token );
+				$this->charges[] = (float) $amount;
+				return $result;
+			},
+			20,
+			3
+		);
+		add_action(
+			'wplm_subscription_manual_renewal_due',
+			function ( $sub ) {
+				$this->due[] = $sub->id;
+			}
+		);
 	}
 
 	public function tear_down(): void {
@@ -234,7 +256,7 @@ class RenewalRollbackTest extends TestCase {
 		$this->assertSame( $before['next_payment'], $row['next_payment'] );
 		$this->assertSame( $before['last_payment'], $row['last_payment'], 'The latest renewal: last payment restored.' );
 		$this->assertSame( 2, (int) $row['failed_attempts'], 'And its failed attempts.' );
-		$this->assertSame( 'active', $row['status'], 'Status is left to the renewal cron and dunning.' );
+		$this->assertSame( 'on-hold', $row['status'], 'The latest renewal refunded: put on hold, nothing is billed again until resumed.' );
 		$this->assertSame( array( 'invoice:refunded', 'renewal:refunded' ), array_map( static fn( $r ) => $r['type'] . ':' . $r['status'], $this->rows( $order->get_id() ) ) );
 		$stamp = json_decode( (string) $order->get_meta( RenewalProcessor::ROLLED_BACK_META ), true );
 		$this->assertIsArray( $stamp );
@@ -292,7 +314,8 @@ class RenewalRollbackTest extends TestCase {
 		$row = $this->license_row( $bought['license_id'] );
 		$this->assertSame( $lapsed, $row['expires_at'] );
 		$this->assertSame( 3, (int) $row['status'], 'Past its grace again: expired, as validation would mark it.' );
-		$this->assertStringContainsString( 'unless the subscription is put on hold or cancelled, the renewal cron sends the customer a new renewal invoice on its next run', $this->notes( $order ), 'A manual payer is invoiced again.' );
+		$this->assertStringContainsString( 'Renewal refunded — subscription put on hold; resume it to keep billing.', $this->notes( $order ), 'A manual payer is not invoiced again: the subscription is on hold.' );
+		$this->assertSame( 'on-hold', $this->subscription_row( $bought['subscription_id'] )['status'] );
 		$key = $this->make( LicenseService::class )->get_by_id( $bought['license_id'] )->license_key;
 		$this->assertSame( 'expired', $this->make( LicenseService::class )->validate( $key )['code'] );
 	}
@@ -381,6 +404,8 @@ class RenewalRollbackTest extends TestCase {
 			$this->assertNull( $this->make( EntitlementRepository::class )->find_by_id( $line->id )->paid_through, 'Its lifetime lines never move.' );
 		}
 		$this->assertStringContainsString( 'subscription #' . $addons . ' (Add-ons for licence ending', $this->notes( $order ) );
+		$this->assertSame( 'on-hold', $this->subscription_row( $addons )['status'], 'The add-ons subscription is put on hold.' );
+		$this->assertSame( 1, (int) $this->license_row( $license_id )['status'], 'Its lifetime licence stays active.' );
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -891,7 +916,8 @@ class RenewalRollbackTest extends TestCase {
 		$this->assertSame( array( 'renewal:refunded' ), array_map( static fn( $r ) => $r['type'] . ':' . $r['status'], $this->rows( $created ) ) );
 		$this->assertCount( 1, $this->rolled );
 		$this->assertSame( 1, (int) $this->license_row( $bought['license_id'] )['status'], 'Inside grace: still active.' );
-		$this->assertStringContainsString( 'unless the subscription is put on hold or cancelled, the renewal cron charges the saved card again on its next run', $this->notes( $order ), 'The shop is told the card will be charged again.' );
+		$this->assertStringContainsString( 'Renewal refunded — subscription put on hold; resume it to keep billing.', $this->notes( $order ), 'The card is not charged again: the subscription is on hold.' );
+		$this->assertStringNotContainsString( 'charges the saved card again', $this->notes( $order ) );
 	}
 
 	public function test_a_plan_switch_after_the_renewal_does_not_count_as_a_later_payment(): void {
@@ -955,6 +981,149 @@ class RenewalRollbackTest extends TestCase {
 		$this->assertSame( $e0, $row['next_payment'] );
 		$this->assertSame( $last, $row['last_payment'], 'A switch is not a payment: the refunded one is still the latest, so the payment before it comes back.' );
 		$this->assertSame( 2, (int) $row['failed_attempts'] );
-		$this->assertStringContainsString( 'charges the saved card again on its next run', $this->notes( $order ), 'The shop is still told the card will be charged again.' );
+		$this->assertStringContainsString( 'subscription put on hold', $this->notes( $order ), 'Still the latest renewal: the subscription is put on hold.' );
+		$this->assertSame( 'on-hold', $row['status'] );
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// After the refund of the latest renewal: on hold, nothing billed until resumed
+	// ---------------------------------------------------------------------------------------------
+
+	/** A stored card on the subscription, due now; a gateway module builds the order each charge is recorded on. */
+	private function card_due( array $bought, array &$created ): void {
+		$customer = (int) $this->subscription_row( $bought['subscription_id'] )['user_id'];
+		$token    = new \WC_Payment_Token_CC();
+		$token->set_token( 'tok_test' );
+		$token->set_gateway_id( 'm527card' );
+		$token->set_card_type( 'visa' );
+		$token->set_last4( '4242' );
+		$token->set_expiry_month( '12' );
+		$token->set_expiry_year( gmdate( 'Y', strtotime( '+2 years' ) ) );
+		$token->set_user_id( $customer );
+		$token->save();
+		$this->set_row( 'subscriptions', $bought['subscription_id'], array( 'payment_token_id' => $token->get_id() ) );
+		add_filter(
+			'wplm_create_renewal_order',
+			static function ( $id ) use ( $customer, &$created ) {
+				unset( $id );
+				$order = wc_create_order( array( 'customer_id' => $customer ) );
+				$order->set_total( 1000 );
+				$order->set_status( 'completed' );
+				$order->save();
+				$created[] = $order->get_id();
+				return $order->get_id();
+			}
+		);
+	}
+
+	public function test_after_the_latest_card_renewal_is_refunded_the_cron_charges_nothing_until_resumed(): void {
+		$bought  = $this->buy_classic();
+		$sub_id  = $bought['subscription_id'];
+		$created = array();
+		$this->card_due( $bought, $created );
+		$e0 = $this->utc( -MINUTE_IN_SECONDS );
+		$this->set_row( 'subscriptions', $sub_id, array( 'next_payment' => $e0 ) );
+		$this->set_row( 'licenses', $bought['license_id'], array( 'expires_at' => $e0 ) );
+		do_action( 'wplm_process_renewals' );
+		$this->assertCount( 1, $this->charges, 'The cron charged the card once.' );
+		$this->assertCount( 1, $created );
+
+		$this->refund( wc_get_order( $created[0] ) );
+
+		$this->assertSame( 'on-hold', $this->subscription_row( $sub_id )['status'] );
+		$this->assertSame( $e0, $this->subscription_row( $sub_id )['next_payment'], 'Due again by its dates…' );
+		$this->charges = array();
+		do_action( 'wplm_process_renewals' );
+		do_action( 'wplm_process_renewals' );
+		$this->assertSame( array(), $this->charges, '…but on hold: the card is not charged.' );
+		$this->assertSame( array(), $this->due, 'Nor is an invoice sent.' );
+		$this->assertCount( 1, $created, 'No renewal order is made.' );
+		$this->assertSame( $e0, $this->license_row( $bought['license_id'] )['expires_at'] );
+
+		// The owner resumes it: billing comes back on the next run.
+		$this->make( \WPLM\Services\Subscriptions\SubscriptionService::class )->resume( $sub_id );
+		do_action( 'wplm_process_renewals' );
+
+		$this->assertCount( 1, $this->charges, 'Resumed: charged on the next run.' );
+		$this->assertSame( gmdate( 'Y-m-d H:i:s', strtotime( $e0 . ' UTC +1 month' ) ), $this->license_row( $bought['license_id'] )['expires_at'] );
+		$this->assertSame( 'active', $this->subscription_row( $sub_id )['status'] );
+	}
+
+	public function test_after_the_latest_invoiced_renewal_is_refunded_no_invoice_is_sent_until_resumed(): void {
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$p0     = EntitlementService::add_period( wp_date( 'Y-m-d' ), -1, 'day' );
+		$this->lines_through( $sub_id, $p0 );
+		$order = $this->renew( $sub_id );
+		$this->assertSame( $this->next_month( $p0 ), $this->one_date( $sub_id ) );
+
+		$order = $this->refund( $order );
+
+		$this->assertSame( $p0, $this->one_date( $sub_id ) );
+		$row = $this->subscription_row( $sub_id );
+		$this->assertSame( 'on-hold', $row['status'] );
+		$this->assertLessThanOrEqual( time(), strtotime( $row['next_payment'] . ' UTC' ), 'Due again by its dates…' );
+		$orders = count( $this->renewal_orders( $sub_id ) );
+		do_action( 'wplm_process_renewals' );
+		$this->assertSame( array(), $this->due, '…but on hold: no invoice.' );
+		$this->assertCount( $orders, $this->renewal_orders( $sub_id ) );
+		$this->assertStringContainsString( 'Renewal refunded — subscription put on hold; resume it to keep billing.', $this->notes( $order ) );
+
+		$this->make( \WPLM\Services\Subscriptions\SubscriptionService::class )->resume( $sub_id );
+		do_action( 'wplm_process_renewals' );
+
+		$this->assertSame( array( $sub_id ), $this->due, 'Resumed: invoiced on the next run.' );
+		$this->assertCount( $orders + 1, $this->renewal_orders( $sub_id ), 'One new renewal invoice.' );
+	}
+
+	public function test_refunding_a_renewal_that_is_not_the_latest_leaves_the_status_alone(): void {
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$first  = $this->renew( $sub_id );
+		$this->renew( $sub_id );
+
+		$first = $this->refund( $first );
+
+		$this->assertSame( 'active', $this->subscription_row( $sub_id )['status'], 'A later renewal still stands: billing goes on.' );
+		$this->assertStringNotContainsString( 'put on hold', $this->notes( $first ) );
+	}
+
+	/** @dataProvider statuses_at_refund */
+	public function test_only_an_active_or_trial_subscription_is_put_on_hold( string $status, string $after ): void {
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$order  = $this->renew( $sub_id );
+		$this->set_row( 'subscriptions', $sub_id, array( 'status' => $status ) );
+
+		$order = $this->refund( $order );
+
+		$this->assertSame( $after, $this->subscription_row( $sub_id )['status'] );
+		$this->assertSame( 'on-hold' === $after && 'on-hold' !== $status, false !== strpos( $this->notes( $order ), 'subscription put on hold' ) );
+	}
+
+	public function statuses_at_refund(): array {
+		return array(
+			'active'         => array( 'active', 'on-hold' ),
+			'trial'          => array( 'trial', 'on-hold' ),
+			'on-hold'        => array( 'on-hold', 'on-hold' ),
+			'pending'        => array( 'pending', 'pending' ),
+			'pending-cancel' => array( 'pending-cancel', 'pending-cancel' ),
+			'cancelled'      => array( 'cancelled', 'cancelled' ),
+			'expired'        => array( 'expired', 'expired' ),
+		);
+	}
+
+	public function test_a_refunded_renewal_completed_again_makes_the_subscription_active_again(): void {
+		$bought = $this->buy_profile( 'month' );
+		$sub_id = $bought['subscription_id'];
+		$from   = $this->through( $sub_id );
+		$p0     = (string) reset( $from );
+		$order  = $this->refund( $this->renew( $sub_id ) );
+		$this->assertSame( 'on-hold', $this->subscription_row( $sub_id )['status'] );
+
+		$order->update_status( 'completed' );
+
+		$this->assertSame( 'active', $this->subscription_row( $sub_id )['status'], 'Paid again: active again.' );
+		$this->assertSame( $this->all( $from, $this->next_month( $p0 ) ), $this->through( $sub_id ), 'Extended once.' );
 	}
 }

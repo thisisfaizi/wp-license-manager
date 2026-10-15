@@ -328,10 +328,13 @@ class RenewalProcessor {
 	 * The subscription is read again before it is written. While no later renewal was paid, its next
 	 * payment, last payment and failed attempts come back as they were; else its next payment follows the
 	 * dates moved back, as a payment sets it (the start of the day after the latest line, or the licence's
-	 * expiry). Its status is left to the renewal cron and dunning — the note says when that payment is due
-	 * again at once. When this was the latest renewal and a classic licence now ends before its grace is
-	 * over, it is marked expired as validation would ({@see LicenseService::validate()}). An add-ons-only
-	 * subscription moves only its own lines; a licence's status is never changed for it.
+	 * expiry). When this was the latest renewal, an `active` or `trial` subscription is put on hold
+	 * ({@see SubscriptionService::update_status()}): the cron neither charges a saved card nor invoices an
+	 * on-hold subscription, so nothing is billed again until the owner resumes it (or the lines lapse after
+	 * grace). Any other status is left as it is. When this was the latest renewal and a classic licence now
+	 * ends before its grace is over, it is marked expired as validation would
+	 * ({@see LicenseService::validate()}). An add-ons-only subscription moves only its own lines; a
+	 * licence's status is never changed for it.
 	 *
 	 * Nothing moves, and the order is not stamped — so it can be done once checked — when a dated line
 	 * joined the subscription after the renewal and is paid past where the others would go back to (the
@@ -481,7 +484,7 @@ class RenewalProcessor {
 			}
 		}
 
-		$this->finish_roll_back( $order, $sub_id, $snapshot, $sub, $lines, $license, $next, $skipped, $over, $latest, $now );
+		$this->finish_roll_back( $order, $sub_id, $snapshot, $sub, $lines, $license, $next, $skipped, $over, $latest );
 		return true;
 	}
 
@@ -739,7 +742,7 @@ class RenewalProcessor {
 		}
 		$this->sub_repo->update( $sub->id, array( 'next_payment' => $cycle ) );
 
-		$this->finish_roll_back( $order, $sub->id, $snapshot, $sub, $lines, $licensed, $cycle, $skipped, 0, true, $now );
+		$this->finish_roll_back( $order, $sub->id, $snapshot, $sub, $lines, $licensed, $cycle, $skipped, 0, true );
 		return true;
 	}
 
@@ -757,11 +760,25 @@ class RenewalProcessor {
 	 * @param int               $skipped  Lines left as they were: removed, or moved back already.
 	 * @param int               $over     Lines (or the licence) renewed afresh after this period ended.
 	 * @param bool              $latest   Whether no later renewal was paid.
-	 * @param int|null          $now      Unix time (tests).
 	 * @return void
 	 */
-	private function finish_roll_back( \WC_Order $order, int $sub_id, array $snapshot, ?Subscription $sub, array $lines, ?array $license, ?string $next, int $skipped, int $over, bool $latest, ?int $now ): void {
+	private function finish_roll_back( \WC_Order $order, int $sub_id, array $snapshot, ?Subscription $sub, array $lines, ?array $license, ?string $next, int $skipped, int $over, bool $latest ): void {
 		$this->renewal_repo->mark_order_refunded( $order->get_id() );
+
+		// The latest renewal refunded: nothing is billed again until the owner resumes the subscription.
+		$current = $sub_id > 0 ? $this->sub_repo->find_by_id( $sub_id ) : null;
+		$held    = $latest && null !== $current && in_array( $current->status, array( 'active', 'trial' ), true );
+		if ( $held ) {
+			$this->sub_service->update_status( $sub_id, 'on-hold' );
+			$this->sub_service->add_note(
+				$sub_id,
+				sprintf(
+					/* translators: %d: order id */
+					__( 'Renewal order #%d refunded — subscription put on hold; resume it to keep billing.', 'wp-license-manager' ),
+					$order->get_id()
+				)
+			);
+		}
 
 		/**
 		 * Fires after a refunded renewal order took its period back.
@@ -816,13 +833,8 @@ class RenewalProcessor {
 				$skipped
 			);
 		}
-		// Owner decision pending: the subscription's status is left as it is, so say what the cron does next.
-		$current = $sub_id > 0 ? $this->sub_repo->find_by_id( $sub_id ) : null;
-		if ( $latest && null !== $current && null !== $next && in_array( $current->status, array( 'active', 'trial' ), true )
-			&& strtotime( $next . ' UTC' ) <= ( $now ?? time() ) ) {
-			$note .= ' ' . ( null !== $current->payment_token_id
-				? __( 'That payment is due again now: unless the subscription is put on hold or cancelled, the renewal cron charges the saved card again on its next run.', 'wp-license-manager' )
-				: __( 'That payment is due again now: unless the subscription is put on hold or cancelled, the renewal cron sends the customer a new renewal invoice on its next run.', 'wp-license-manager' ) );
+		if ( $held ) {
+			$note .= ' ' . __( 'Renewal refunded — subscription put on hold; resume it to keep billing.', 'wp-license-manager' );
 		}
 		$order->add_order_note( $note );
 	}
