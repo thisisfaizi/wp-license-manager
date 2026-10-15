@@ -699,7 +699,7 @@ class AddonService {
 				continue;
 			}
 			/* translators: 1: order number, 2: licence label (licence ending ABCD), 3: billing schedule (every month) */
-			$what = sprintf( __( 'Your order #%1$s adds monthly / yearly add-ons to your %2$s, billed %3$s.', 'wp-license-manager' ), $order->get_order_number(), self::licence_label( $license ), self::schedule( 1, $cycle ) );
+			$what   = sprintf( __( 'Your order #%1$s adds monthly / yearly add-ons to your %2$s, billed %3$s.', 'wp-license-manager' ), $order->get_order_number(), self::licence_label( $license ), self::schedule( 1, $cycle ) );
 			$addons = $this->addons_subscription( $license );
 			$sold   = $snapshot['addons_subscription_id'] ?? null;
 			if ( null !== $sold && ( null === $addons || (int) $sold !== (int) $addons->id ) && ! $this->ended_unbilled( (int) $sold ) ) {
@@ -1442,7 +1442,7 @@ class AddonService {
 			return $adopted;
 		}
 		list( , $snapshot, $sub, $through ) = $this->checked_extras( $order, $license, $plan, $json, $now );
-		$sold_through = $snapshot['target_paid_through'] ?? null;
+		$sold_through                       = $snapshot['target_paid_through'] ?? null;
 
 		// Recurring add-ons on a lifetime licence (v2): join its add-ons subscription, or open one.
 		$addons         = null;
@@ -2023,7 +2023,7 @@ class AddonService {
 				if ( null !== $line && 'addon' === $line->source && $this->entitlements->delete_line( $line->id ) ) {
 					$on_subs[] = (int) $line->subscription_id;
 					$issued   += 'issued' === $kind ? 1 : 0;
-					$added  += 'added' === $kind ? 1 : 0;
+					$added    += 'added' === $kind ? 1 : 0;
 				}
 			}
 			// The billing goes with the lines; this also covers an item whose lines were removed by hand.
