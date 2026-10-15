@@ -220,12 +220,17 @@ class SelfServiceRenewal {
 			return null;
 		}
 
+		// An add-on already paid through the period this renewal buys is not invoiced this time
+		// (RenewalProcessor::items_paid_ahead()); the order records it, so paying it extends the rest only.
+		$skip   = $this->renewals->items_paid_ahead( $sub );
+		$amount = $this->renewals->renewal_amount( $sub, $skip );
+
 		// Deliberately NOT copying _wplm_package_id onto this line item —
 		// PlanCheckout::fulfill_order() would issue a brand-new license if it saw
 		// a package id. Renewal orders must NOT re-fulfill.
 		// An add-ons-only subscription bills the add-ons of a lifetime licence: the invoice lists them,
 		// never the product the licence was bought as (that was paid once, for life).
-		$item_added = $sub->is_addons_only() && $this->add_addons_lines( $order, $sub );
+		$item_added = $sub->is_addons_only() && $this->add_addons_lines( $order, $sub, array_keys( $skip ) );
 		$product_id = $item_added || $sub->is_addons_only() ? 0 : $this->resolve_product_id( $sub );
 
 		if ( $product_id > 0 ) {
@@ -235,8 +240,8 @@ class SelfServiceRenewal {
 					$product,
 					1,
 					array(
-						'subtotal' => $sub->recurring_total,
-						'total'    => $sub->recurring_total,
+						'subtotal' => $amount,
+						'total'    => $amount,
 					)
 				);
 				$item_added = true;
@@ -246,7 +251,7 @@ class SelfServiceRenewal {
 		if ( ! $item_added ) {
 			$fee = new \WC_Order_Item_Fee();
 			$fee->set_name( $sub->is_addons_only() ? \WPLM\Services\AddonService::label_for( $sub ) : __( 'License Renewal', 'wp-license-manager' ) );
-			$fee->set_total( $sub->recurring_total );
+			$fee->set_total( $amount );
 			$order->add_item( $fee );
 		}
 
@@ -261,6 +266,7 @@ class SelfServiceRenewal {
 
 		$order->set_currency( $sub->currency ?: get_woocommerce_currency() );
 		$this->stamp_renewal( $order, $sub );
+		$this->renewals->stamp_skipped( $order, $skip );
 		$order->calculate_totals();
 		$order->save();
 
@@ -401,11 +407,14 @@ class SelfServiceRenewal {
 	 * ABCD"), at what it bills. Nothing is added (false) when its items do not add up to its recurring
 	 * total: the caller then bills the total on one line.
 	 *
+	 * Items this renewal does not charge for (already paid ahead) are left off.
+	 *
 	 * @param \WC_Order     $order The renewal order.
 	 * @param Subscription $sub   The add-ons-only subscription.
+	 * @param int[]        $skip  Items not charged this time.
 	 * @return bool Whether the lines were added.
 	 */
-	private function add_addons_lines( \WC_Order $order, Subscription $sub ): bool {
+	private function add_addons_lines( \WC_Order $order, Subscription $sub, array $skip = array() ): bool {
 		$items = $this->sub_repo->get_items( $sub->id );
 		$sum   = 0.0;
 		foreach ( $items as $sub_item ) {
@@ -416,6 +425,9 @@ class SelfServiceRenewal {
 		}
 		$for = \WPLM\Services\AddonService::label_for( $sub );
 		foreach ( $items as $sub_item ) {
+			if ( in_array( (int) $sub_item->id, array_map( 'intval', $skip ), true ) ) {
+				continue;
+			}
 			$label = (string) ( $sub_item->meta['label'] ?? '' );
 			if ( '' === $label ) {
 				$label = __( 'Add-on', 'wp-license-manager' );

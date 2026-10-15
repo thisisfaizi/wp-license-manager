@@ -207,17 +207,21 @@ class EntitlementService {
 	 * @param array|null $moved           Filled, when given, with what moved: line id => `from` (the old
 	 *                                    paid-through date) and `to` (the new one), both Y-m-d — what a
 	 *                                    refund of this renewal takes back ({@see roll_back_line()}).
+	 * @param int[]      $skip            Lines this payment did not pay for (an add-on already paid
+	 *                                    through the period it buys: {@see \WPLM\Services\Subscriptions\RenewalProcessor::items_paid_ahead()}):
+	 *                                    left as they are, and not counted for the next payment.
 	 * @return string|null The next payment (UTC datetime): the start of the day after the latest new
 	 *                     paid-through date, in the site's time zone. Null when no dated line moved.
 	 */
-	public function extend_subscription_lines( int $subscription_id, int $interval, string $period, ?int $now = null, ?array &$moved = null ): ?string {
+	public function extend_subscription_lines( int $subscription_id, int $interval, string $period, ?int $now = null, ?array &$moved = null, array $skip = array() ): ?string {
 		$now    = $now ?? time();
 		$today  = wp_date( 'Y-m-d', $now );
 		$latest = null;
 		$grace  = array();
+		$skip   = array_map( 'intval', $skip );
 
 		foreach ( $this->repo->get_by_subscription( $subscription_id ) as $line ) {
-			if ( null === $line->paid_through ) {
+			if ( null === $line->paid_through || in_array( (int) $line->id, $skip, true ) ) {
 				continue;
 			}
 
@@ -254,6 +258,41 @@ class EntitlementService {
 		return ( new \DateTimeImmutable( self::add_period( $latest, 1, 'day' ) . ' 00:00:00', wp_timezone() ) )
 			->setTimezone( new \DateTimeZone( 'UTC' ) )
 			->format( 'Y-m-d H:i:s' );
+	}
+
+	/**
+	 * The paid-through date a renewal paid now would give a subscription's lines: the earliest of what
+	 * {@see extend_subscription_lines()} would set each dated line to (the renewal rule, with each
+	 * licence profile's grace). Null when the subscription has no dated line on a profile licence.
+	 *
+	 * @param int      $subscription_id Subscription.
+	 * @param int      $interval        Billing interval.
+	 * @param string   $period          day|week|month|year.
+	 * @param int|null $now             Unix time (default: now).
+	 * @return string|null Y-m-d
+	 */
+	public function renewal_target( int $subscription_id, int $interval, string $period, ?int $now = null ): ?string {
+		$today  = wp_date( 'Y-m-d', $now ?? time() );
+		$target = null;
+		$grace  = array();
+		foreach ( $this->repo->get_by_subscription( $subscription_id ) as $line ) {
+			if ( null === $line->paid_through ) {
+				continue;
+			}
+			if ( ! array_key_exists( $line->license_id, $grace ) ) {
+				$license                    = $this->licenses->find_by_id( $line->license_id );
+				$profile                    = null !== $license ? $this->profiles->get( $license->profile ) : null;
+				$grace[ $line->license_id ] = null !== $profile ? $profile->grace_days() : null;
+			}
+			if ( null === $grace[ $line->license_id ] ) {
+				continue;
+			}
+			$through = self::renewed_paid_through( $line->paid_through, $today, $grace[ $line->license_id ], $interval, $period );
+			if ( null === $target || strcmp( $through, $target ) < 0 ) {
+				$target = $through;
+			}
+		}
+		return $target;
 	}
 
 	/**

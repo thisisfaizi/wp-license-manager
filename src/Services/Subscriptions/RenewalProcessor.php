@@ -31,6 +31,9 @@ class RenewalProcessor {
 	/** Order meta: what a renewal payment moved (JSON), written by apply_payment(). */
 	public const SNAPSHOT_META = '_wplm_renewal_snapshot';
 
+	/** Order meta: the subscription items a renewal did not charge for, already paid ahead (JSON, {@see items_paid_ahead()}). */
+	public const SKIPPED_META = '_wplm_renewal_skipped';
+
 	/** Order meta: a refunded renewal taken back (JSON: `at` UTC, `by` user id). */
 	public const ROLLED_BACK_META = '_wplm_renewal_rolled_back';
 
@@ -157,10 +160,15 @@ class RenewalProcessor {
 			return;
 		}
 
+		// An add-on already paid through the period this renewal buys is not charged this time.
+		$now    = time();
+		$skip   = $this->items_paid_ahead( $sub, $now );
+		$amount = $this->renewal_amount( $sub, $skip );
+
 		// Attempt the automatic charge.
 		$result = $this->gateway->charge(
 			$sub->payment_token_id,
-			$sub->recurring_total,
+			$amount,
 			$sub->currency,
 			$sub->id
 		);
@@ -186,11 +194,14 @@ class RenewalProcessor {
 		$order = $order_id > 0 ? wc_get_order( $order_id ) : null;
 		if ( $order instanceof \WC_Order ) {
 			$this->stamp_renewal_order( $order, $sub );
+			$this->stamp_skipped( $order, $skip );
 			$order->update_meta_data( '_wplm_renewal_applied', '1' );
 			$order->save();
+		} elseif ( array() !== $skip ) {
+			$this->sub_service->add_note( $sub->id, $this->skipped_note( $skip ) );
 		}
 
-		$renewal = $this->apply_payment( $sub, $order_id > 0 ? $order_id : null, $sub->recurring_total, (string) ( $result['txn'] ?? '' ) );
+		$renewal = $this->apply_payment( $sub, $order_id > 0 ? $order_id : null, $amount, (string) ( $result['txn'] ?? '' ), $now, $skip );
 
 		/**
 		 * Fires after a subscription renewal charge is successfully processed.
@@ -217,27 +228,44 @@ class RenewalProcessor {
 	 * ({@see roll_back()}); the order is stamped `_wplm_renewal_applied`, and a rollback stamp left by an
 	 * earlier refund of it is cleared (completing a refunded renewal again applies it again).
 	 *
+	 * An add-on item the renewal did not charge for ({@see items_paid_ahead()}) keeps its lines as they are:
+	 * `$skip`, or else what the order recorded when it was issued ({@see SKIPPED_META}), so what was billed
+	 * and what is extended always agree, however late the invoice is paid. The snapshot keeps it
+	 * (`skipped`).
+	 *
 	 * @param Subscription $sub      The subscription being paid.
 	 * @param int|null     $order_id WooCommerce order that carried the payment, if any.
 	 * @param float        $amount   Amount received.
 	 * @param string       $txn      Gateway transaction reference.
 	 * @param int|null     $now      Unix time of the payment (default: now).
+	 * @param array|null   $skip     Items not charged for: item id => line_ids, … (null: the order's record).
 	 * @return Renewal The recorded renewal.
 	 */
-	public function apply_payment( Subscription $sub, ?int $order_id, float $amount, string $txn = '', ?int $now = null ): Renewal {
+	public function apply_payment( Subscription $sub, ?int $order_id, float $amount, string $txn = '', ?int $now = null, ?array $skip = null ): Renewal {
 		$now      = $now ?? time();
 		$now_utc  = gmdate( 'Y-m-d H:i:s', $now );
 		$interval = $this->scheduler->period_to_interval( $sub->billing_interval, $sub->billing_period );
 
 		// What the payment is about to move, kept on its order before anything moves.
-		$order    = null !== $order_id && $order_id > 0 && function_exists( 'wc_get_order' ) ? wc_get_order( $order_id ) : null;
-		$order    = $order instanceof \WC_Order ? $order : null;
+		$order = null !== $order_id && $order_id > 0 && function_exists( 'wc_get_order' ) ? wc_get_order( $order_id ) : null;
+		$order = $order instanceof \WC_Order ? $order : null;
+		if ( null === $skip ) {
+			$skip = null !== $order ? json_decode( (string) $order->get_meta( self::SKIPPED_META ), true ) : null;
+			$skip = is_array( $skip ) ? $skip : array();
+		}
+		$skip_lines = array();
+		foreach ( $skip as $skipped ) {
+			$skip_lines = array_merge( $skip_lines, array_map( 'intval', (array) ( $skipped['line_ids'] ?? array() ) ) );
+		}
 		$snapshot = array(
 			'subscription_id' => $sub->id,
 			'interval'        => $sub->billing_interval,
 			'period'          => $sub->billing_period,
 			'before'          => self::state_of( $this->sub_repo->find_by_id( $sub->id ) ?? $sub ),
 		);
+		if ( array() !== $skip ) {
+			$snapshot['skipped'] = $skip;
+		}
 		if ( null !== $order ) {
 			$order->update_meta_data( self::SNAPSHOT_META, wp_json_encode( $snapshot ) );
 			$order->update_meta_data( '_wplm_renewal_applied', '1' );
@@ -260,7 +288,7 @@ class RenewalProcessor {
 		}
 		if ( null === $next ) {
 			$moved             = array();
-			$next              = $this->entitlements->extend_subscription_lines( $sub->id, $sub->billing_interval, $sub->billing_period, $now, $moved );
+			$next              = $this->entitlements->extend_subscription_lines( $sub->id, $sub->billing_interval, $sub->billing_period, $now, $moved, $skip_lines );
 			$snapshot['lines'] = $moved;
 		}
 		if ( null === $next ) {
@@ -331,6 +359,114 @@ class RenewalProcessor {
 		$order->update_meta_data( '_wplm_subscription_id', (string) $sub->id );
 		$order->update_meta_data( '_wplm_renewal_term_days', (string) $this->term_days( $sub ) );
 		$order->update_meta_data( '_wplm_renewal_cycle', $this->cycle_key( $sub ) );
+	}
+
+	/**
+	 * The subscription items a renewal paid now would not charge for: add-on items whose lines are all
+	 * already paid through (or past) the date the renewal would give the subscription's lines
+	 * ({@see EntitlementService::renewal_target()}) — an add-on that joined after a renewal that was then
+	 * refunded keeps the period it was bought for, so the next renewal skips it once and the lines are
+	 * in step again; from the renewal after, everything renews together.
+	 *
+	 * Only items that name their lines (`meta.entitlement_ids`, as add-ons do) are considered; the plan's
+	 * own item, an adjustment and a line no item names are always charged. Nothing is skipped when it
+	 * would leave nothing to charge.
+	 *
+	 * @param Subscription $sub The subscription.
+	 * @param int|null     $now Unix time (default: now).
+	 * @return array<int, array{line_ids: int[], amount: float, through: string, label: string}> Item id => what it is.
+	 */
+	public function items_paid_ahead( Subscription $sub, ?int $now = null ): array {
+		$target = $this->entitlements->renewal_target( $sub->id, $sub->billing_interval, $sub->billing_period, $now );
+		if ( null === $target ) {
+			return array();
+		}
+		$lines = array();
+		foreach ( $this->entitlements->subscription_lines( $sub->id ) as $line ) {
+			$lines[ (int) $line->id ] = $line;
+		}
+		$skip = array();
+		foreach ( $this->sub_repo->get_items( $sub->id ) as $item ) {
+			$ids   = array_values( array_unique( array_map( 'intval', (array) ( $item->meta['entitlement_ids'] ?? array() ) ) ) );
+			$ahead = array();
+			foreach ( $ids as $id ) {
+				if ( isset( $lines[ $id ] ) ) {
+					$ahead[] = $lines[ $id ];
+				}
+			}
+			if ( array() === $ahead ) {
+				continue; // Names no line of this subscription (or none): charged as usual.
+			}
+			$through = null;
+			$labels  = array();
+			foreach ( $ahead as $line ) {
+				if ( null === $line->paid_through || strcmp( $line->paid_through, $target ) < 0 ) {
+					continue 2; // A line the renewal would move: the item is charged.
+				}
+				$through  = null === $through || strcmp( $line->paid_through, $through ) < 0 ? $line->paid_through : $through;
+				$labels[] = $this->entitlements->line_label( $line );
+			}
+			$skip[ $item->id ] = array(
+				'line_ids' => array_map( static fn( $l ) => (int) $l->id, $ahead ),
+				'amount'   => round( (float) $item->line_total, 4 ),
+				'through'  => (string) $through,
+				'label'    => implode( ', ', array_values( array_unique( $labels ) ) ),
+			);
+		}
+		if ( array() !== $skip && $this->renewal_amount( $sub, $skip ) <= 0.0 ) {
+			return array(); // Nothing would be left to charge: bill it whole, as before.
+		}
+		return $skip;
+	}
+
+	/**
+	 * What a renewal charges: the recurring total, less the items it does not charge for.
+	 *
+	 * @param Subscription $sub  The subscription.
+	 * @param array        $skip Items not charged ({@see items_paid_ahead()}).
+	 * @return float
+	 */
+	public function renewal_amount( Subscription $sub, array $skip ): float {
+		$amount = (float) $sub->recurring_total;
+		foreach ( $skip as $skipped ) {
+			$amount -= (float) ( $skipped['amount'] ?? 0 );
+		}
+		return round( max( 0.0, $amount ), 4 );
+	}
+
+	/**
+	 * Record on a renewal order the items it does not charge for, and say so in a note. Nothing when
+	 * there are none. The caller saves.
+	 *
+	 * @param \WC_Order $order The renewal order.
+	 * @param array     $skip  Items not charged ({@see items_paid_ahead()}).
+	 * @return void
+	 */
+	public function stamp_skipped( \WC_Order $order, array $skip ): void {
+		if ( array() === $skip ) {
+			return;
+		}
+		$order->update_meta_data( self::SKIPPED_META, wp_json_encode( $skip ) );
+		$order->add_order_note( $this->skipped_note( $skip ) );
+	}
+
+	/**
+	 * "WPLM: Factory not charged this time — already paid through 2026-11-14."
+	 *
+	 * @param array $skip Items not charged ({@see items_paid_ahead()}).
+	 * @return string
+	 */
+	public function skipped_note( array $skip ): string {
+		$parts = array();
+		foreach ( $skip as $skipped ) {
+			$parts[] = sprintf(
+				/* translators: 1: add-on name, 2: its paid-through date */
+				__( '%1$s not charged this time — already paid through %2$s.', 'wp-license-manager' ),
+				(string) ( $skipped['label'] ?? '' ),
+				(string) ( $skipped['through'] ?? '' )
+			);
+		}
+		return 'WPLM: ' . implode( ' ', $parts ) . ' ' . __( 'From the next renewal it is billed with the rest again.', 'wp-license-manager' );
 	}
 
 	/**
