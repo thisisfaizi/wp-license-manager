@@ -3013,6 +3013,13 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringContainsString( 'not completed yet', $this->first_error() );
 		$this->assertFalse( wc_get_order( $first['order']->get_id() )->has_cart_hash( WC()->cart->get_cart_hash() ) );
 		WC()->cart->empty_cart();
+		// Its line removed, the cart empty: nothing in the cart is that order's (an unpaid order WooCommerce
+		// would still offer to pay).
+		wc_get_order( $first['order']->get_id() )->update_status( 'pending' );
+		WC()->session->set( 'order_awaiting_payment', $first['order']->get_id() );
+		$this->assertFalse( $this->validate( $yearly, $product ) );
+		$this->assertStringContainsString( 'not completed yet', $this->first_error() );
+		WC()->session->set( 'order_awaiting_payment', null );
 
 		// The order being paid for now is the cart's own (WooCommerce pays that order for this cart).
 		WC()->cart->add_to_cart( $product->get_id(), 1, 0, array(), array( 'wplm_extras' => array( 'module:fbr' => 1 ), 'wplm_extras_cycle' => 'month', 'wplm_addon_license_id' => $base['license_id'] ) );

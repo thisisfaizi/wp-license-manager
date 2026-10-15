@@ -1363,9 +1363,10 @@ class PlanCheckout {
 
 	/**
 	 * The order the customer is paying for now: WooCommerce's `order_awaiting_payment` while it is still
-	 * the cart's own — unpaid (pending or failed) and placed for exactly this cart, the only case in
-	 * which WooCommerce pays that order rather than placing a new one — or the order-pay page's. An
-	 * order left in the session for another cart stays payable on its own, so it counts like any other.
+	 * the cart's own — unpaid (pending or failed) and placed for exactly this cart, never an empty one:
+	 * the only case in which WooCommerce pays that order rather than placing a new one — or the
+	 * order-pay page's. An order left in the session for another cart stays payable on its own, so it
+	 * counts like any other.
 	 *
 	 * @return int Order id, 0 for none.
 	 */
@@ -1374,7 +1375,7 @@ class PlanCheckout {
 		if ( $id > 0 ) {
 			$order = wc_get_order( $id );
 			if ( ! $order instanceof \WC_Order || ! $order->has_status( array( 'pending', 'failed' ) ) || null === WC()->cart
-				|| ! $order->has_cart_hash( WC()->cart->get_cart_hash() ) ) {
+				|| WC()->cart->is_empty() || '' === $order->get_cart_hash() || ! $order->has_cart_hash( WC()->cart->get_cart_hash() ) ) {
 				$id = 0;
 			}
 		}
