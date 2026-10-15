@@ -4026,4 +4026,141 @@ class PackageExtrasTest extends TestCase {
 		$this->assertSame( '1', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
 		$this->assertNotEmpty( json_decode( (string) array_values( $order->get_items() )[0]->get_meta( '_wplm_license_ids' ), true ) );
 	}
+	/** A licence bought with extras whose extras step was cut off: completed, the licence issued, the extras not added. */
+	private function new_purchase_awaiting_its_extras( string $package, array $extras, ?string $cycle = null ): array {
+		$this->break_next = true;
+		if ( null !== $cycle ) {
+			$bought = $this->lifetime_with_fbr( $cycle );
+		} else {
+			$bought = $this->buy_new( $package, $extras );
+		}
+		$order = wc_get_order( $bought['order']->get_id() );
+		$this->assertSame( 'completed', $order->get_status() );
+		$this->assertSame( '', (string) $order->get_meta( '_wplm_plan_fulfilled' ), 'Awaiting a retry.' );
+		$this->assertSame( array(), $this->lines( $bought['license_id'], 'addon' ) );
+		return $bought;
+	}
+
+	/** As if the order had been paid before its extras held their modules: hidden from the hold while `$paid` runs. */
+	private function paid_before_the_hold( \WC_Order $order, callable $paid ) {
+		$order = wc_get_order( $order->get_id() );
+		$order->update_meta_data( '_wplm_plan_fulfilled', '1' );
+		$order->save();
+		$result = $paid();
+		$this->unfulfil( $order );
+		return $result;
+	}
+
+	public function test_a_new_purchase_whose_extras_await_a_retry_holds_their_modules(): void {
+		$product = $this->addon_product();
+		foreach ( array( 'Lifetime', 'Monthly' ) as $package ) {
+			$first = $this->new_purchase_awaiting_its_extras( $package, array( 'module:factory' => '1' ) );
+			wp_set_current_user( $first['customer'] );
+			$factory = array(
+				'wplm_extras'            => array( 'module:factory' => '1' ),
+				'wplm_target_license_id' => (string) $first['license_id'],
+			);
+
+			$this->assertFalse( $this->validate( $factory, $product ), $package . ': Factory is not sold again while the first order still adds it.' );
+			$this->assertStringContainsString( 'order #' . $first['order']->get_order_number() . ' is still adding Factory', $this->first_error() );
+
+			$this->complete_again( $first['order'] );
+			$this->assertCount( 1, $this->addon_lines( $first['license_id'], 'factory' ), $package . ': added once.' );
+			$this->assertSame( '1', (string) wc_get_order( $first['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+		}
+	}
+
+	public function test_a_new_purchase_whose_recurring_extras_await_a_retry_holds_them(): void {
+		$product = $this->addon_product();
+		$first   = $this->new_purchase_awaiting_its_extras( 'Lifetime', array(), 'month' );
+		wp_set_current_user( $first['customer'] );
+		$fbr = array(
+			'wplm_extras'            => array( 'module:fbr' => '1' ),
+			'wplm_extras_cycle'      => 'month',
+			'wplm_target_license_id' => (string) $first['license_id'],
+		);
+
+		$this->assertFalse( $this->validate( $fbr, $product ), 'FBR is not sold again while the first order still adds it.' );
+		$this->assertStringContainsString( 'is still adding', $this->first_error() );
+
+		$this->complete_again( $first['order'] );
+		$this->assertCount( 1, $this->addon_lines( $first['license_id'], 'fbr' ) );
+		$this->assertCount( 1, $this->items( $first['addons'] ) );
+		$this->assertSame( 1000.0, $this->total( $first['addons'] ) );
+	}
+
+	public function test_a_retry_adds_no_module_the_licence_got_since(): void {
+		$product = $this->addon_product();
+		$first   = $this->new_purchase_awaiting_its_extras( 'Lifetime', array( 'module:factory' => '1' ) );
+		$base    = array(
+			'license_id' => $first['license_id'],
+			'customer'   => $first['customer'],
+		);
+		$this->paid_before_the_hold( $first['order'], fn() => $this->add_to_licence( $product, $base, array( 'module:factory' => '1' ) ) );
+		$this->assertCount( 1, $this->addon_lines( $first['license_id'], 'factory' ) );
+
+		$this->complete_again( $first['order'] );
+
+		$order = wc_get_order( $first['order']->get_id() );
+		$this->assertCount( 1, $this->addon_lines( $first['license_id'], 'factory' ), 'Never added twice.' );
+		$this->assertSame( '', (string) $order->get_meta( '_wplm_plan_fulfilled' ), 'Left for the shop.' );
+		$this->assertStringContainsString( 'already has Factory', $this->notes( $order ) );
+		$this->assertStringContainsString( 'refund the add-ons\' part of this line', $this->notes( $order ) );
+	}
+
+	public function test_a_retry_adds_no_recurring_module_the_licence_got_since(): void {
+		$product = $this->addon_product();
+		$first   = $this->new_purchase_awaiting_its_extras( 'Lifetime', array(), 'month' );
+		$base    = array(
+			'license_id' => $first['license_id'],
+			'customer'   => $first['customer'],
+		);
+		$fbr     = array(
+			'wplm_extras'            => array( 'module:fbr' => '1' ),
+			'wplm_extras_cycle'      => 'month',
+			'wplm_target_license_id' => (string) $first['license_id'],
+		);
+		$this->paid_before_the_hold( $first['order'], fn() => $this->buy_through_cart( $product, $fbr, $first['customer'] ) );
+		$this->assertCount( 1, $this->addon_lines( $first['license_id'], 'fbr' ) );
+
+		$this->complete_again( $first['order'] );
+
+		$this->assertCount( 1, $this->addon_lines( $first['license_id'], 'fbr' ), 'Never added twice.' );
+		$this->assertCount( 0, $this->addon_lines( $first['license_id'], 'factory' ), 'The line is refused whole.' );
+		$this->assertCount( 1, $this->items( $first['addons'] ), 'Never billed twice.' );
+		$this->assertSame( 1000.0, $this->total( $first['addons'] ) );
+		$this->assertStringContainsString( 'already has FBR', $this->notes( wc_get_order( $first['order']->get_id() ) ) );
+	}
+
+	public function test_a_retry_whose_addons_subscription_ended_joins_the_licences_open_one(): void {
+		$first = $this->new_purchase_awaiting_its_extras( 'Lifetime', array(), 'month' );
+		$subs  = $this->make( SubscriptionRepository::class );
+		$subs->update( $first['addons'], array( 'status' => 'cancelled' ) );
+		$license = $this->make( LicenseRepository::class )->find_by_id( $first['license_id'] );
+		$other   = $this->make( AddonService::class )->create_addons_subscription( $license, wc_get_order( $first['order']->get_id() ), 'month' );
+
+		$this->complete_again( $first['order'] );
+
+		$this->assertCount( 2, $subs->get_addons_for_license( $first['license_id'] ), 'No second open add-ons subscription.' );
+		$fbr = $this->addon_lines( $first['license_id'], 'fbr' );
+		$this->assertCount( 1, $fbr );
+		$this->assertSame( $other->id, (int) $fbr[0]->subscription_id );
+		$this->assertSame( 1000.0, $this->total( $other->id ) );
+		$this->assertSame( '1', (string) wc_get_order( $first['order']->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+	}
+
+	public function test_a_retry_never_opens_an_addons_subscription_on_another_cycle(): void {
+		$first = $this->new_purchase_awaiting_its_extras( 'Lifetime', array(), 'month' );
+		$subs  = $this->make( SubscriptionRepository::class );
+		$subs->update( $first['addons'], array( 'status' => 'cancelled' ) );
+		$license = $this->make( LicenseRepository::class )->find_by_id( $first['license_id'] );
+		$other   = $this->make( AddonService::class )->create_addons_subscription( $license, wc_get_order( $first['order']->get_id() ), 'year' );
+
+		$this->complete_again( $first['order'] );
+
+		$this->assertCount( 2, $subs->get_addons_for_license( $first['license_id'] ), 'No second open add-ons subscription.' );
+		$this->assertCount( 0, $this->addon_lines( $first['license_id'], 'fbr' ) );
+		$this->assertSame( array(), $this->items( $other->id ) );
+		$this->assertStringContainsString( 'billed on subscription #' . $other->id . ' every year', $this->notes( wc_get_order( $first['order']->get_id() ) ) );
+	}
 }

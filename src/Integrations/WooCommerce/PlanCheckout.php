@@ -13,6 +13,7 @@ use WPLM\Licensing\ProfileRegistry;
 use WPLM\Models\License;
 use WPLM\Models\Package;
 use WPLM\Models\Plan;
+use WPLM\Models\Subscription;
 use WPLM\Services\AddonService;
 use WPLM\Services\EntitlementService;
 use WPLM\Services\GeneratorService;
@@ -1936,46 +1937,8 @@ class PlanCheckout {
 				throw new \RuntimeException( 'the licence issued for this line no longer exists' );
 			}
 			$snapshot = $this->extras_snapshot_for( $pkg, $json );
-			// Written by an earlier attempt that was cut off before recording them: recorded, never redone.
-			if ( null !== $this->addons()->adopt_unstamped_extras( $order, $item, $license, $json ) ) {
-				return;
-			}
-
-			// Recurring add-ons on a lifetime licence (v2): one add-ons-only subscription, created once
-			// (a retry reuses it through `_wplm_addons_subscription_id` while it can still bill them), its
-			// first period paid now — counted from when the add-ons are written.
-			$addons         = null;
-			$addons_through = null;
-			if ( null !== ( $snapshot['cycle'] ?? null ) ) {
-				$addons = $this->addons()->reusable_addons_subscription( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
-				if ( null === $addons ) {
-					$addons = $this->addons()->create_addons_subscription( $license, $order, (string) $snapshot['cycle'] );
-					$item->update_meta_data( '_wplm_addons_subscription_id', $addons->id );
-					$item->save_meta_data();
-				}
-				$addons         = $this->addons()->open_addons_period( $addons );
-				$addons_through = $this->addons()->addons_paid_through( $addons );
-			}
-
-			$sub_id  = (int) $item->get_meta( '_wplm_subscription_id' );
-			$sub     = $sub_id > 0 ? $this->subscriptions->get( $sub_id ) : null;
-			$through = null;
-			if ( $sub_id > 0 ) {
-				if ( null === $sub ) {
-					throw new \RuntimeException( 'the subscription issued for this line no longer exists' );
-				}
-				// The extras are paid through the same day as the licence type's lines.
-				foreach ( $this->entitlements->lines( $license->id ) as $line ) {
-					if ( 'plan' === $line->source && $sub->id === $line->subscription_id && null !== $line->paid_through
-						&& ( null === $through || strcmp( $line->paid_through, $through ) > 0 ) ) {
-						$through = $line->paid_through;
-					}
-				}
-				if ( null === $through ) {
-					throw new \RuntimeException( 'the licence has no paid-through day to align the add-ons with' );
-				}
-			}
-			$this->addons()->apply_extras( $order, $item, $license, $snapshot['items'], $sub, $through, null, $addons, $addons_through );
+			// Checked and written while no other order adds to the licence (another order's add-ons).
+			$this->addons()->with_licence_lock( $license, fn() => $this->write_licence_extras( $order, $item, $license, $snapshot, $json ) );
 		} catch ( \Throwable $e ) {
 			++$failed;
 			\WPLM\Support\Logger::error( 'PlanCheckout: add-ons failed for package ' . $pkg->id . ' (order item ' . $item->get_id() . ') — ' . $e->getMessage() );
@@ -1988,6 +1951,101 @@ class PlanCheckout {
 				)
 			);
 		}
+	}
+
+	/**
+	 * Write the extras of a licence bought with them, under the licence's add-ons lock
+	 * ({@see fulfill_with_extras()}). What an earlier attempt wrote but never recorded is adopted, never
+	 * redone. On a retry, the licence may have got a module they add since (another order, paid before
+	 * this one held it): then nothing is written — never billed twice — and the shop is asked to refund.
+	 *
+	 * @param \WC_Order              $order    The order.
+	 * @param \WC_Order_Item_Product $item     Its line.
+	 * @param License                $license  The licence issued for it.
+	 * @param array                  $snapshot The checked extras snapshot.
+	 * @param string                 $json     The `_wplm_extras` snapshot as stored.
+	 * @return void
+	 * @throws \RuntimeException When they cannot be added.
+	 */
+	private function write_licence_extras( \WC_Order $order, $item, License $license, array $snapshot, string $json ): void {
+		// Written by an earlier attempt that was cut off before recording them: recorded, never redone.
+		if ( null !== $this->addons()->adopt_unstamped_extras( $order, $item, $license, $json ) ) {
+			return;
+		}
+		$held = $this->addons()->new_licence_extras_problem( $license, $snapshot['items'] );
+		if ( null !== $held ) {
+			throw new \RuntimeException( $held );
+		}
+
+		// Recurring add-ons on a lifetime licence (v2): one add-ons-only subscription, created once
+		// (a retry reuses it through `_wplm_addons_subscription_id` while it can still bill them, else
+		// joins the licence's open one), its first period paid now — counted from when the add-ons are
+		// written.
+		$addons         = null;
+		$addons_through = null;
+		if ( null !== ( $snapshot['cycle'] ?? null ) ) {
+			$addons         = $this->licence_addons_subscription( $order, $item, $license, (string) $snapshot['cycle'] );
+			$addons         = $this->addons()->open_addons_period( $addons );
+			$addons_through = $this->addons()->addons_paid_through( $addons );
+		}
+
+		$sub_id  = (int) $item->get_meta( '_wplm_subscription_id' );
+		$sub     = $sub_id > 0 ? $this->subscriptions->get( $sub_id ) : null;
+		$through = null;
+		if ( $sub_id > 0 ) {
+			if ( null === $sub ) {
+				throw new \RuntimeException( 'the subscription issued for this line no longer exists' );
+			}
+			// The extras are paid through the same day as the licence type's lines.
+			foreach ( $this->entitlements->lines( $license->id ) as $line ) {
+				if ( 'plan' === $line->source && $sub->id === $line->subscription_id && null !== $line->paid_through
+					&& ( null === $through || strcmp( $line->paid_through, $through ) > 0 ) ) {
+					$through = $line->paid_through;
+				}
+			}
+			if ( null === $through ) {
+				throw new \RuntimeException( 'the licence has no paid-through day to align the add-ons with' );
+			}
+		}
+		$this->addons()->apply_extras( $order, $item, $license, $snapshot['items'], $sub, $through, null, $addons, $addons_through );
+	}
+
+	/**
+	 * The add-ons-only subscription a lifetime licence's recurring extras join on fulfilment: the one
+	 * this line opened, while it can still bill them; else the licence's open one — billed on the same
+	 * cycle and able to take them ({@see AddonService::addons_join_problem()}) — so a licence never has
+	 * two; else a new one. Recorded on the line (`_wplm_addons_subscription_id`).
+	 *
+	 * @param \WC_Order              $order   The order.
+	 * @param \WC_Order_Item_Product $item    Its line.
+	 * @param License                $license The lifetime licence.
+	 * @param string                 $cycle   `month` or `year`.
+	 * @return Subscription
+	 * @throws \RuntimeException When its open one cannot take them.
+	 */
+	private function licence_addons_subscription( \WC_Order $order, $item, License $license, string $cycle ): Subscription {
+		$addons = $this->addons()->reusable_addons_subscription( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
+		if ( null !== $addons ) {
+			return $addons;
+		}
+		$addons = $this->addons()->addons_subscription( $license );
+		if ( null !== $addons ) {
+			if ( $cycle !== $addons->billing_period || 1 !== (int) $addons->billing_interval ) {
+				throw new \RuntimeException(
+					/* translators: 1: subscription id, 2: cycle */
+					sprintf( __( 'the licence\'s add-ons are billed on subscription #%1$d every %2$s; these were priced otherwise. Nothing was added', 'wp-license-manager' ), $addons->id, $addons->billing_period )
+				);
+			}
+			$problem = $this->addons()->addons_join_problem( $license );
+			if ( null !== $problem ) {
+				throw new \RuntimeException( $problem->get_error_message() );
+			}
+		} else {
+			$addons = $this->addons()->create_addons_subscription( $license, $order, $cycle );
+		}
+		$item->update_meta_data( '_wplm_addons_subscription_id', $addons->id );
+		$item->save_meta_data();
+		return $addons;
 	}
 
 	/**
