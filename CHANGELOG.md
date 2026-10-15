@@ -208,9 +208,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   recorded on it, any subscription item the attempt did not get to is attached, a pending add-ons
   subscription starts, and nothing is checked or written again — so a retry made while the add-ons
   renewal is overdue or paused can no longer remove add-ons the customer has and pays for. Leftovers
-  another line of the order (still to be recorded, same licence) wrote are left to that line, which
-  adopts them in its turn. Lines from an attempt cut off part-way through writing are left as they are
-  and the line is refused with a note naming them, for the owner. Every path: new licence with extras,
+  that are another line's of the order (still to be recorded, same licence) — exactly what it adds, or
+  the first of its lines and not the first of this line's — are left to that line, which deals with
+  them in its turn. Lines from an attempt cut off part-way through writing a line are left as they are
+  and that line is refused with a note naming them, for the owner (remove them, complete again: the
+  whole line is written); its sibling lines are written as usual, and none is written twice. Every path: new licence with extras,
   extras for an existing licence, stored add-ons (`AddonService::adopt_unstamped()`).
 - **An add-ons subscription's first period starts when its add-ons are written**, not when it was
   opened: a pending one that bills nothing yet gets next payment = now + 1 cycle before its lines are

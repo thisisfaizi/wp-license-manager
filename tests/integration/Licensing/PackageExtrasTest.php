@@ -2486,6 +2486,65 @@ class PackageExtrasTest extends TestCase {
 		$this->assertStringNotContainsString( 'cut off part-way', $this->notes( $order ), 'Nobody is told to remove lines that are paid for.' );
 	}
 
+	public function test_a_line_cut_off_part_way_beside_another_line_for_the_same_licence_is_refused_and_never_written_twice(): void {
+		$product = $this->addon_product();
+		$base    = $this->customer_with( 'Lifetime' );
+		wp_set_current_user( $base['customer'] );
+		// Line 1: a phone (+1 phones, +1 users). Line 2: a user (+1 users).
+		foreach ( array( array( 'phone' => '1' ), array( 'user' => '1' ) ) as $extras ) {
+			$_POST['wplm_extras']            = $extras;
+			$_POST['wplm_target_license_id'] = (string) $base['license_id'];
+			$this->assertTrue( apply_filters( 'woocommerce_add_to_cart_validation', true, $product->get_id(), 1 ) );
+			$this->assertNotFalse( WC()->cart->add_to_cart( $product->get_id(), 1 ) );
+			unset( $_POST['wplm_extras'], $_POST['wplm_target_license_id'] );
+		}
+		WC()->cart->calculate_totals();
+		$order = new \WC_Order();
+		$order->set_customer_id( $base['customer'] );
+		WC()->checkout()->create_order_line_items( $order, WC()->cart );
+		$order->set_payment_method( 'bacs' );
+		$order->calculate_totals();
+		$order->save();
+		WC()->cart->empty_cart();
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+		$items = array_values( wc_get_order( $order->get_id() )->get_items() );
+		// The first attempt died inside line 1, after its phones line: its users line and line 2 never written.
+		$repo   = $this->make( EntitlementRepository::class );
+		$orphan = null;
+		foreach ( $items as $n => $item ) {
+			foreach ( json_decode( (string) $item->get_meta( '_wplm_entitlement_ids' ), true ) as $id ) {
+				$line = $repo->find_by_id( (int) $id );
+				if ( 0 === $n && 'phones' === $line->code ) {
+					$orphan = $line->id;
+				} else {
+					$repo->delete( (int) $id );
+				}
+			}
+			$this->lose_the_stamp( $item );
+		}
+		$this->unfulfil( $order );
+
+		$this->complete_again( $order );
+
+		$fresh = wc_get_order( $order->get_id() );
+		$this->assertSame( array( $orphan ), array_map( static fn( $l ) => $l->id, $this->addon_lines( $base['license_id'], 'phones' ) ), 'Line 1 is not written again over its own leftover.' );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'users' ), 'Line 2 is written.' );
+		$this->assertSame( '', (string) \WC_Order_Factory::get_order_item( $items[0]->get_id() )->get_meta( '_wplm_entitlement_ids' ), 'Line 1 is refused.' );
+		$this->assertNotSame( '', (string) \WC_Order_Factory::get_order_item( $items[1]->get_id() )->get_meta( '_wplm_entitlement_ids' ) );
+		$this->assertSame( '', (string) $fresh->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertStringContainsString( 'cut off part-way', $this->notes( $fresh ) );
+		$this->assertStringContainsString( '#' . $orphan, $this->notes( $fresh ) );
+		$this->assertStringNotContainsString( 'the customer keeps those lines', $this->notes( $fresh ) );
+
+		// The owner does what the note says.
+		$repo->delete( $orphan );
+		$this->complete_again( $order );
+		$this->assertCount( 1, $this->addon_lines( $base['license_id'], 'phones' ) );
+		$this->assertCount( 2, $this->addon_lines( $base['license_id'], 'users' ), 'Exactly what was paid for.' );
+		$this->assertSame( '1', (string) wc_get_order( $order->get_id() )->get_meta( '_wplm_plan_fulfilled' ) );
+	}
+
 	public function test_refunding_the_order_that_opened_an_unbilled_addons_subscription_does_not_strand_another_order_sold_against_it(): void {
 		$this->add_seat_plan_offer();
 		$product          = $this->addon_product();

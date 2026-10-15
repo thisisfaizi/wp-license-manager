@@ -770,17 +770,55 @@ class AddonService {
 			$order,
 			$item,
 			$license,
-			function () use ( $license, $json ): array {
-				$profile = $this->profiles->get( $license->profile );
-				if ( null === $profile ) {
-					throw new \RuntimeException( 'the licence has no licence profile' );
-				}
-				// Read as it was sold: only its lines matter here, and they were checked when written.
-				$raw = json_decode( $json, true );
-				$raw = is_array( $raw ) && is_string( $raw['billing'] ?? null ) ? $raw['billing'] : null;
-				return $this->extras_units( $this->extras()->read_snapshot( $json, $raw, $profile )['items'] );
-			},
+			fn(): array => $this->snapshot_units( $license, $json ),
 			'_wplm_addon_subscription_item_ids'
+		);
+	}
+
+	/**
+	 * The units a line's package extras write ({@see write_units()}), read from its snapshot as it was
+	 * sold: only their lines matter here, and they were checked when written.
+	 *
+	 * @param License $license The licence.
+	 * @param string  $json    The line's `_wplm_extras` snapshot.
+	 * @return array[]
+	 * @throws \RuntimeException When the snapshot cannot be read.
+	 */
+	private function snapshot_units( License $license, string $json ): array {
+		$profile = $this->profiles->get( $license->profile );
+		if ( null === $profile ) {
+			throw new \RuntimeException( 'the licence has no licence profile' );
+		}
+		$raw = json_decode( $json, true );
+		$raw = is_array( $raw ) && is_string( $raw['billing'] ?? null ) ? $raw['billing'] : null;
+		return $this->extras_units( $this->extras()->read_snapshot( $json, $raw, $profile )['items'] );
+	}
+
+	/**
+	 * The one unit a stored add-on writes: its package's lines × the line's quantity.
+	 *
+	 * @param Package $package The add-on.
+	 * @param int     $qty     The order line's quantity.
+	 * @return array[]
+	 */
+	private static function package_units( Package $package, int $qty ): array {
+		$qty   = max( 1, $qty );
+		$lines = array();
+		foreach ( $package->entitlements as $template ) {
+			$kind    = (string) ( $template['kind'] ?? '' );
+			$lines[] = array(
+				'kind' => $kind,
+				'code' => (string) ( $template['code'] ?? '' ),
+				'qty'  => Entitlement::KIND_LIMIT === $kind ? (int) ( $template['qty'] ?? 0 ) * $qty : 0,
+			);
+		}
+		return array(
+			array(
+				'lines'      => $lines,
+				'qty'        => $qty,
+				'line_total' => round( $package->price * $qty, 4 ),
+				'meta'       => array( 'package_id' => $package->id ),
+			),
 		);
 	}
 
@@ -794,11 +832,14 @@ class AddonService {
 	 * written), they are **adopted** — recorded on the line, any subscription item the attempt did not get
 	 * to attached to the subscription the lines are on, a pending add-ons subscription started — and
 	 * nothing is checked or written again: they were checked before they were written, and checking them
-	 * now would only find them already there. When they are not, and another line of the order still to
-	 * be recorded adds to the same licence, they are that line's: nothing is adopted here, this line is
-	 * written as usual, and that line adopts them in its turn. Anything else (an attempt cut off
-	 * part-way through writing its lines) changes nothing and refuses the line, naming the lines, for the
-	 * owner to sort out by hand.
+	 * now would only find them already there. When they are not, they may be another line's of the order
+	 * (still to be recorded, same licence): exactly what that line adds, or the first of its lines (an
+	 * attempt cut off part-way through writing that line) and not the first of this line's. Then nothing
+	 * is adopted here, this line is written as usual, and that line deals with them in its turn. Anything
+	 * else — the first of this line's own lines (this line's attempt was cut off part-way), or lines no
+	 * line can be told apart for — changes nothing and refuses the line, naming the lines, for the owner
+	 * to sort out by hand. Lines are written in order, one at a time, so an attempt cut off part-way
+	 * always leaves the first of a line's lines.
 	 *
 	 * @param \WC_Order              $order     The order.
 	 * @param \WC_Order_Item_Product $item      Its line.
@@ -834,53 +875,11 @@ class AddonService {
 				$lines[] = $line;
 			}
 		}
-		// Another line of the order still to be recorded for this licence may have written them: it
-		// adopts them in its turn, and this line is written as usual beside them.
-		$theirs = false;
-		foreach ( $order->get_items() as $other ) {
-			if ( ! $other instanceof \WC_Order_Item_Product || $other->get_id() === $item->get_id()
-				|| '' !== (string) $other->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $other->get_meta( '_wplm_addon_reverted' ) ) {
-				continue;
-			}
-			$issued = json_decode( (string) $other->get_meta( '_wplm_license_ids' ), true );
-			if ( (int) $other->get_meta( '_wplm_addon_license_id' ) === (int) $license->id
-				|| ( is_array( $issued ) && in_array( (int) $license->id, array_map( 'intval', $issued ), true ) ) ) {
-				$theirs = true;
-			}
-		}
-		$refuse = function () use ( $order, $license, $left, $theirs ): ?\RuntimeException {
-			if ( $theirs ) {
-				return null;
-			}
-			\WPLM\Support\Logger::error( sprintf( 'AddonService: order %d left add-on lines %s on licence %d unrecorded, and they are not exactly what its line adds; nothing was changed.', $order->get_id(), implode( ', ', $left ), $license->id ) );
-			return new \RuntimeException(
-				sprintf(
-					/* translators: 1: line ids, 2: licence label */
-					__( 'an earlier attempt was cut off part-way: it left add-on lines #%1$s on %2$s without recording them, and they are not all this line adds. Nothing was changed and nothing was added; the customer keeps those lines. To finish, remove those lines on the licence screen and set the order to Completed again: the whole line is then added', 'wp-license-manager' ),
-					implode( ', #', $left ),
-					self::licence_label( $license )
-				)
-			);
-		};
-
-		// The units' lines, in the order the earlier attempt wrote them.
+		// Another line of the order still to be recorded for this licence may have written them.
 		$units  = $units();
-		$by_row = array();
-		$next   = 0;
-		foreach ( $units as $u => $unit ) {
-			foreach ( (array) $unit['lines'] as $expected ) {
-				$line = $lines[ $next ] ?? null;
-				$kind = (string) ( $expected['kind'] ?? '' );
-				$qty  = Entitlement::KIND_LIMIT === $kind ? (int) ( $expected['qty'] ?? 0 ) : 0;
-				if ( null === $line || $kind !== $line->kind || (string) ( $expected['code'] ?? '' ) !== $line->code
-					|| ( Entitlement::KIND_LIMIT === $kind && $qty !== (int) $line->qty ) ) {
-					return self::refused( $refuse() );
-				}
-				$by_row[ $u ][] = $line;
-				++$next;
-			}
-		}
-		if ( count( $lines ) !== $next || count( $left ) !== $next ) {
+		$refuse = fn(): ?\RuntimeException => $this->leftovers_refusal( $order, $item, $license, $left, $lines, $units );
+		$by_row = count( $lines ) === count( $left ) ? self::match_rows( $lines, $units, true ) : null;
+		if ( null === $by_row ) {
 			return self::refused( $refuse() );
 		}
 
@@ -976,6 +975,111 @@ class AddonService {
 	private static function refused( ?\RuntimeException $refusal ) {
 		if ( null !== $refusal ) {
 			throw $refusal;
+		}
+		return null;
+	}
+
+	/**
+	 * Whether lines are what units write, in the order they are written: all of it (`$whole`), or its
+	 * first lines (an attempt cut off part-way).
+	 *
+	 * @param Entitlement[] $lines The lines, oldest first.
+	 * @param array[]       $units Units, as {@see write_units()} takes them.
+	 * @param bool          $whole All of it, or its first lines.
+	 * @return array<int, Entitlement[]>|null The lines by unit; null when they are not.
+	 */
+	private static function match_rows( array $lines, array $units, bool $whole ): ?array {
+		$by_row = array();
+		$next   = 0;
+		foreach ( $units as $u => $unit ) {
+			foreach ( (array) ( $unit['lines'] ?? array() ) as $expected ) {
+				$line = $lines[ $next ] ?? null;
+				if ( null === $line ) {
+					return $whole ? null : $by_row;
+				}
+				$kind = (string) ( $expected['kind'] ?? '' );
+				$qty  = Entitlement::KIND_LIMIT === $kind ? (int) ( $expected['qty'] ?? 0 ) : 0;
+				if ( $kind !== $line->kind || (string) ( $expected['code'] ?? '' ) !== $line->code
+					|| ( Entitlement::KIND_LIMIT === $kind && $qty !== (int) $line->qty ) ) {
+					return null;
+				}
+				$by_row[ $u ][] = $line;
+				++$next;
+			}
+		}
+		return count( $lines ) === $next ? $by_row : null;
+	}
+
+	/**
+	 * Why leftovers ({@see adopt_unstamped()}) are not adopted by this line: null when they are another
+	 * line's of the order — exactly what it adds, or the first of its lines and not the first of this
+	 * line's — so this line is written as usual and that line deals with them; else the refusal.
+	 *
+	 * @param \WC_Order              $order   The order.
+	 * @param \WC_Order_Item_Product $item    This line.
+	 * @param License                $license The licence.
+	 * @param int[]                  $left    The leftover line ids.
+	 * @param Entitlement[]          $lines   Those lines, oldest first.
+	 * @param array[]                $units   The units this line writes.
+	 * @return \RuntimeException|null
+	 */
+	private function leftovers_refusal( \WC_Order $order, $item, License $license, array $left, array $lines, array $units ): ?\RuntimeException {
+		if ( count( $lines ) === count( $left ) ) {
+			$theirs = false;
+			foreach ( $order->get_items() as $other ) {
+				if ( ! $other instanceof \WC_Order_Item_Product || $other->get_id() === $item->get_id()
+					|| '' !== (string) $other->get_meta( '_wplm_entitlement_ids' ) || '1' === (string) $other->get_meta( '_wplm_addon_reverted' ) ) {
+					continue;
+				}
+				$other_units = $this->line_units( $other, $license );
+				if ( null === $other_units ) {
+					continue;
+				}
+				if ( null !== self::match_rows( $lines, $other_units, true ) ) {
+					return null; // Exactly that line's: whichever line records them, the licence gets what was paid for.
+				}
+				$theirs = $theirs || null !== self::match_rows( $lines, $other_units, false );
+			}
+			if ( $theirs && null === self::match_rows( $lines, $units, false ) ) {
+				return null; // The first of that line's lines, never of this one's: that line is refused for them.
+			}
+		}
+		\WPLM\Support\Logger::error( sprintf( 'AddonService: order %d left add-on lines %s on licence %d unrecorded, and they are not exactly what its line adds; nothing was changed.', $order->get_id(), implode( ', ', $left ), $license->id ) );
+		return new \RuntimeException(
+			sprintf(
+				/* translators: 1: line ids, 2: licence label */
+				__( 'an earlier attempt was cut off part-way: it left add-on lines #%1$s on %2$s without recording them, and they are not all this line adds. Nothing was changed and nothing was added; those lines stay on the licence until someone removes them. To finish, remove those lines on the licence screen and set the order to Completed again: the whole line is then added', 'wp-license-manager' ),
+				implode( ', #', $left ),
+				self::licence_label( $license )
+			)
+		);
+	}
+
+	/**
+	 * The units another line of the order writes on a licence, or null when it writes none there (or
+	 * they cannot be read): package extras for the licence it adds to or issued, or a stored add-on for
+	 * the licence it adds to.
+	 *
+	 * @param \WC_Order_Item_Product $other   The line.
+	 * @param License                $license The licence.
+	 * @return array[]|null
+	 */
+	private function line_units( \WC_Order_Item_Product $other, License $license ): ?array {
+		$adds   = (int) $other->get_meta( '_wplm_addon_license_id' ) === (int) $license->id;
+		$issued = json_decode( (string) $other->get_meta( '_wplm_license_ids' ), true );
+		$issued = is_array( $issued ) && in_array( (int) $license->id, array_map( 'intval', $issued ), true );
+		$json   = (string) $other->get_meta( '_wplm_extras' );
+		try {
+			if ( '' !== $json && ( $adds || $issued ) ) {
+				return $this->snapshot_units( $license, $json );
+			}
+			$package_id = (int) $other->get_meta( '_wplm_package_id' );
+			if ( '' === $json && $adds && $package_id > 0 ) {
+				$package = \WPLM\Plugin::get_instance()->container()->make( \WPLM\Repositories\PackageRepository::class )->find_by_id( $package_id );
+				return $package instanceof Package ? self::package_units( $package, (int) $other->get_quantity() ) : null;
+			}
+		} catch ( \Throwable $e ) {
+			unset( $e );
 		}
 		return null;
 	}
@@ -1408,29 +1512,14 @@ class AddonService {
 	 */
 	private function apply_locked( \WC_Order $order, $item, Package $package, License $license, ?int $now ): array {
 		$qty   = max( 1, (int) $item->get_quantity() );
-		$lines = array();
-		foreach ( $package->entitlements as $template ) {
-			$kind    = (string) ( $template['kind'] ?? '' );
-			$lines[] = array(
-				'kind' => $kind,
-				'code' => (string) ( $template['code'] ?? '' ),
-				'qty'  => Entitlement::KIND_LIMIT === $kind ? (int) ( $template['qty'] ?? 0 ) * $qty : 0,
-			);
-		}
+		$lines = self::package_units( $package, $qty )[0]['lines'];
 
 		// Written by an earlier attempt that was cut off before recording them: recorded, never redone.
 		$adopted = $this->adopt_unstamped(
 			$order,
 			$item,
 			$license,
-			static fn(): array => array(
-				array(
-					'lines'      => $lines,
-					'qty'        => $qty,
-					'line_total' => round( $package->price * $qty, 4 ),
-					'meta'       => array( 'package_id' => $package->id ),
-				),
-			),
+			static fn(): array => self::package_units( $package, $qty ),
 			'_wplm_addon_subscription_item_id'
 		);
 		if ( null !== $adopted ) {
