@@ -76,6 +76,26 @@ class RenewalRepository {
 		return $result !== false && $result > 0;
 	}
 
+	/**
+	 * Mark every renewal and invoice row of an order refunded (a refunded renewal order).
+	 *
+	 * @param int $order_id WooCommerce order id.
+	 * @return int Rows changed.
+	 */
+	public function mark_order_refunded( int $order_id ): int {
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'wplm_subscription_renewals';
+		$rows  = $wpdb->query(
+			$wpdb->prepare(
+				"UPDATE `{$table}` SET status = 'refunded' WHERE order_id = %d AND type IN ('renewal', 'invoice')", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+				$order_id
+			)
+		);
+
+		return is_int( $rows ) ? $rows : 0;
+	}
+
 	// -------------------------------------------------------------------------
 	// Finders
 	// -------------------------------------------------------------------------
@@ -103,5 +123,88 @@ class RenewalRepository {
 		}
 
 		return array_map( array( Renewal::class, 'from_row' ), $rows );
+	}
+
+	/**
+	 * Whether a subscription was paid for after a renewal row: a later successful `renewal` row (by id,
+	 * which never ties). A plan switch (`switch` row) is not a payment: it pays no period and moves no
+	 * date, so a renewal refunded after one is still the latest.
+	 *
+	 * @param int $subscription_id Subscription row id.
+	 * @param int $renewal_id      The renewal row.
+	 * @return bool
+	 */
+	public function has_later_payment( int $subscription_id, int $renewal_id ): bool {
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'wplm_subscription_renewals';
+		return (bool) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT id FROM `{$table}` WHERE subscription_id = %d AND id > %d AND type = 'renewal' AND status = 'success' LIMIT 1", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+				$subscription_id,
+				$renewal_id
+			)
+		);
+	}
+
+	/**
+	 * The newest row of a subscription's renewals table (any type or status), or 0.
+	 *
+	 * @param int $subscription_id Subscription row id.
+	 * @return int
+	 */
+	public function latest_id( int $subscription_id ): int {
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'wplm_subscription_renewals';
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT MAX(id) FROM `{$table}` WHERE subscription_id = %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+				$subscription_id
+			)
+		);
+	}
+
+	/**
+	 * The orders that paid a subscription's renewals after a renewal row (successful `renewal` rows with
+	 * a higher id), oldest first.
+	 *
+	 * @param int $subscription_id Subscription row id.
+	 * @param int $renewal_id      The renewal row.
+	 * @return int[] Order ids.
+	 */
+	public function later_renewal_orders( int $subscription_id, int $renewal_id ): array {
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'wplm_subscription_renewals';
+		$ids   = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT order_id FROM `{$table}` WHERE subscription_id = %d AND id > %d AND type = 'renewal' AND status = 'success' AND order_id > 0 ORDER BY id", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+				$subscription_id,
+				$renewal_id
+			)
+		);
+
+		return array_values( array_unique( array_map( 'intval', (array) $ids ) ) );
+	}
+
+	/**
+	 * The newest renewal row an order paid for a subscription (type `renewal`), or 0.
+	 *
+	 * @param int $subscription_id Subscription row id.
+	 * @param int $order_id        WooCommerce order id.
+	 * @return int
+	 */
+	public function renewal_id_for_order( int $subscription_id, int $order_id ): int {
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'wplm_subscription_renewals';
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT id FROM `{$table}` WHERE subscription_id = %d AND order_id = %d AND type = 'renewal' ORDER BY id DESC LIMIT 1", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+				$subscription_id,
+				$order_id
+			)
+		);
 	}
 }

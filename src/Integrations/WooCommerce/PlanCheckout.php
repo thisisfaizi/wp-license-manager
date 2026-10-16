@@ -12,10 +12,14 @@ defined( 'ABSPATH' ) || exit;
 use WPLM\Licensing\ProfileRegistry;
 use WPLM\Models\License;
 use WPLM\Models\Package;
+use WPLM\Models\Plan;
+use WPLM\Models\Subscription;
+use WPLM\Services\AddonRefusal;
 use WPLM\Services\AddonService;
 use WPLM\Services\EntitlementService;
 use WPLM\Services\GeneratorService;
 use WPLM\Services\LicenseService;
+use WPLM\Services\PackageExtrasService;
 use WPLM\Services\PlanService;
 use WPLM\Services\Subscriptions\SubscriptionService;
 
@@ -33,6 +37,21 @@ use WPLM\Services\Subscriptions\SubscriptionService;
  * A plan whose kind is `addon` sells add-ons for a licence the customer already has: the product
  * page asks which of their licences to add it to, nothing is sold to a logged-out visitor, and
  * fulfilment adds lines to that licence instead of issuing a key ({@see AddonService}).
+ *
+ * A plan whose kind is `dynamic` has no stored packages: the customer builds one on the product page
+ * (a form a product add-on prints on `wplm_dynamic_package_form`), and the package is made by the
+ * `wplm_dynamic_package` filter from what they chose. The server rebuilds it from the choice on add to
+ * cart, on every cart total, at checkout and when the order line is saved; a price the browser sends
+ * is never used. The order line keeps a snapshot of the package, and fulfilment issues from that
+ * snapshot, so a later price change never alters a sale ({@see self::dynamic_package()}).
+ *
+ * Package extras (1.3.0): beside a licence type the customer may tick extras — modules and extra
+ * quantities — priced by the `wplm_package_extras` filter ({@see PackageExtrasService}). The form is a
+ * product add-on's (`wplm_package_extras_form`), or WPLM's plain fallback. The cart keeps only the
+ * choice (`wplm_extras`); the price is rebuilt from the filter on every pass, the order line keeps a
+ * snapshot (`_wplm_extras`), and fulfilment issues one key with the extras on it — one subscription
+ * billing the base and every extra when recurring. On an add-on plan the same extras are added to a
+ * licence the customer already has.
  *
  * Products stay 100% native WooCommerce — no custom product types — so none of
  * the WC variable-product internals are involved.
@@ -60,11 +79,17 @@ class PlanCheckout {
 	/** @var AddonService|null */
 	private ?AddonService $addons;
 
+	/** @var PackageExtrasService|null */
+	private ?PackageExtrasService $extras;
+
 	/** @var array<int,\WPLM\Models\Plan|null> Per-request plan cache. */
 	private array $plan_cache = array();
 
 	/** @var array<string, array> Per-request eligible licences, by user and plan. */
 	private array $target_cache = array();
+
+	/** @var array<string, array> Per-request licences that cannot take the add-on, by user and plan. */
+	private array $blocked_cache = array();
 
 	/**
 	 * @param PlanService         $plans
@@ -74,6 +99,7 @@ class PlanCheckout {
 	 * @param EntitlementService  $entitlements
 	 * @param ProfileRegistry     $profiles
 	 * @param AddonService|null   $addons   Add-ons for existing licences (resolved from the container when null).
+	 * @param PackageExtrasService|null $extras Package extras (resolved from the container when null).
 	 */
 	public function __construct(
 		PlanService $plans,
@@ -82,9 +108,11 @@ class PlanCheckout {
 		SubscriptionService $subscriptions,
 		EntitlementService $entitlements,
 		ProfileRegistry $profiles,
-		?AddonService $addons = null
+		?AddonService $addons = null,
+		?PackageExtrasService $extras = null
 	) {
 		$this->addons        = $addons;
+		$this->extras        = $extras;
 		$this->plans         = $plans;
 		$this->generators    = $generators;
 		$this->licenses      = $licenses;
@@ -114,8 +142,22 @@ class PlanCheckout {
 		add_action( 'woocommerce_single_product_summary', array( $this, 'render_addon_notice' ), 31 );
 		add_action( 'woocommerce_check_cart_items', array( $this, 'check_cart_addons' ) );
 
+		// Packages built at purchase: one per cart line (one licence), re-checked before checkout.
+		add_filter( 'woocommerce_is_sold_individually', array( $this, 'dynamic_sold_individually' ), 20, 2 );
+		add_filter( 'woocommerce_add_to_cart_quantity', array( $this, 'dynamic_quantity' ), 20, 2 );
+		add_action( 'woocommerce_check_cart_items', array( $this, 'check_cart_dynamic' ) );
+
+		// Package extras: one licence per line, re-checked (and re-priced) before checkout.
+		add_filter( 'woocommerce_add_to_cart_quantity', array( $this, 'extras_quantity' ), 21, 2 );
+		add_action( 'woocommerce_check_cart_items', array( $this, 'check_cart_extras' ) );
+
 		// Persist the package on the order line item.
 		add_action( 'woocommerce_checkout_create_order_line_item', array( $this, 'save_order_line_item' ), 10, 4 );
+
+		// An order paid later (My account → Pay, the order-pay page, the block checkout's) is checked
+		// again before payment: its monthly / yearly add-ons may no longer be addable.
+		add_action( 'woocommerce_before_pay_action', array( $this, 'check_order_pay' ), 10, 1 );
+		add_action( 'woocommerce_checkout_validate_order_before_payment', array( $this, 'check_order_before_payment' ), 10, 2 );
 
 		// Fulfilment: Completed only. Payment alone (Processing) does not issue a
 		// licence — the shop confirms the order first. Priority 5, because WooCommerce
@@ -125,6 +167,13 @@ class PlanCheckout {
 
 		// A refunded add-on order takes back exactly what it added; the licence is never suspended.
 		add_action( 'woocommerce_order_status_refunded', array( $this, 'revert_addons' ), 10, 1 );
+
+		// A partial refund changes no licence line: say so on an order with extras.
+		add_action( 'woocommerce_order_partially_refunded', array( $this, 'note_partial_refund' ), 10, 2 );
+		// A cancelled or trashed order ends an add-ons subscription it opened and never billed.
+		add_action( 'woocommerce_order_status_cancelled', array( $this, 'end_abandoned_addons' ), 10, 1 );
+		add_action( 'woocommerce_trash_order', array( $this, 'end_abandoned_addons' ), 10, 1 );
+		add_action( 'wp_trash_post', array( $this, 'end_trashed_order_addons' ), 10, 1 ); // The orders list, posts storage.
 	}
 
 	// -------------------------------------------------------------------------
@@ -142,13 +191,25 @@ class PlanCheckout {
 		if ( null === $plan ) {
 			return;
 		}
-
-		$packages = array_filter( $plan->packages, static fn( Package $p ) => 1 === (int) $p->status );
-		if ( empty( $packages ) ) {
+		if ( $plan->is_dynamic() ) {
+			/**
+			 * Print the form a customer builds their package with. Its fields must post as
+			 * `wplm_dynamic[...]`; that array is passed to `wplm_dynamic_package` as the spec.
+			 *
+			 * @param Plan        $plan    The dynamic plan.
+			 * @param \WC_Product $product The product being viewed.
+			 */
+			do_action( 'wplm_dynamic_package_form', $plan, $product );
 			return;
 		}
+
+		$packages = array_filter( $plan->packages, static fn( Package $p ) => 1 === (int) $p->status );
 		if ( $plan->is_addon() ) {
+			// An add-on plan may sell only package extras, with no stored packages at all.
 			$this->render_addon_options( $plan, $packages );
+			return;
+		}
+		if ( empty( $packages ) ) {
 			return;
 		}
 
@@ -179,6 +240,219 @@ class PlanCheckout {
 			$first = false;
 		}
 		echo '</div>';
+
+		if ( null !== $plan->profile ) {
+			$offers = array();
+			$prices = array();
+			foreach ( $packages as $pkg ) {
+				$prices[ (int) $pkg->id ] = $this->first_payment_amount( $pkg );
+				$ctx                      = $this->extras()->context_for_package( $plan, $pkg );
+				$found                    = null !== $ctx ? $this->extras()->offers( $ctx ) : array();
+				if ( array() !== $found ) {
+					$offers[ (int) $pkg->id ] = $found;
+				}
+			}
+			$this->render_extras_form( $plan, PackageExtrasService::FLOW_NEW, $offers, array(), $prices, (int) reset( $packages )->id );
+		}
+	}
+
+	/**
+	 * The extras form, after the licence-type radios (new purchase) or the licence picker (add-ons):
+	 * a product add-on prints it on `wplm_package_extras_form`; with nothing hooked WPLM prints a plain
+	 * one ({@see render_extras_fallback()}).
+	 *
+	 * @param Plan                 $plan        The plan.
+	 * @param string               $flow        `new` or `existing`.
+	 * @param array<int, array[]>  $by_package  New purchase: offers per package id.
+	 * @param array<int, array[]>  $by_license  Existing licence: offers per licence id.
+	 * @param array<int, float>    $base_prices New purchase: what each package costs now (fee included).
+	 * @param int                  $selected    The package or licence selected when the page opens.
+	 * @param array<int, string|null> $cycles  Existing licence: licence id => the cycle its recurring
+	 *                                         extras are forced to (its add-ons subscription's), or null.
+	 * @return void
+	 */
+	private function render_extras_form( Plan $plan, string $flow, array $by_package, array $by_license, array $base_prices, int $selected, array $cycles = array() ): void {
+		$data = array(
+			'plan'              => $plan,
+			'flow'              => $flow,
+			'offers_by_package' => $by_package,
+			'offers_by_license' => $by_license,
+			'base_prices'       => $base_prices,
+			'currency'          => PackageExtrasService::currency(),
+			'cycle_by_license'  => $cycles,
+		);
+		if ( has_action( 'wplm_package_extras_form' ) ) {
+			/**
+			 * Print the extras form inside the add-to-cart form. Its fields must post as
+			 * `wplm_extras[<offer id>] = <quantity>`; prices are rebuilt on the server whatever it posts.
+			 *
+			 * @param array $data plan, flow (new|existing), offers_by_package, offers_by_license,
+			 *                    base_prices (package id => first payment), currency, cycle_by_license
+			 *                    (licence id => forced 'month'|'year', or null: the customer chooses).
+			 *                    On a lifetime licence or licence type an offer may carry `recurring`
+			 *                    (month/year prices, unit_price null): its cycle posts as
+			 *                    `wplm_extras_cycle` (month|year).
+			 */
+			do_action( 'wplm_package_extras_form', $data );
+			return;
+		}
+		$this->render_extras_fallback( $data, $selected );
+	}
+
+	/**
+	 * The fallback's Monthly / Yearly choice for a group with recurring offers (a lifetime licence or
+	 * licence type). A forced cycle (the licence's add-ons subscription) is shown as the only option.
+	 *
+	 * Every group's radios share one name in the form (a disabled fieldset does not split a radio
+	 * group), so only the selected group's default is checked; the script checks a group's default
+	 * when it is shown ({@see render_extras_fallback()}).
+	 *
+	 * @param array[]     $offers   The group's offers.
+	 * @param int         $key      Package or licence id.
+	 * @param string|null $forced   The forced cycle.
+	 * @param bool        $selected Whether the group is the one shown when the page opens.
+	 * @return void
+	 */
+	private function render_cycle_choice( array $offers, int $key, ?string $forced, bool $selected = true ): void {
+		$recurring = array_values( array_filter( $offers, static fn( $o ) => null !== ( $o['recurring'] ?? null ) ) );
+		if ( array() === $recurring ) {
+			return;
+		}
+		$labels  = array(
+			'month' => __( 'Monthly', 'wp-license-manager' ),
+			'year'  => __( 'Yearly', 'wp-license-manager' ),
+		);
+		$cycles  = null !== $forced ? array( $forced ) : PackageExtrasService::CYCLES;
+		$default = $forced ?? PackageExtrasService::default_cycle( $recurring, null );
+		echo '<p style="margin:0 0 8px;">' . esc_html__( 'Pay the monthly / yearly add-ons:', 'wp-license-manager' ) . ' ';
+		foreach ( $cycles as $cycle ) {
+			$input = 'wplm-extras-cycle-' . $key . '-' . $cycle;
+			printf(
+				'<label for="%1$s" style="margin-right:12px;"><input type="radio" id="%1$s" name="wplm_extras_cycle" value="%2$s"%3$s %4$s> %5$s</label>',
+				esc_attr( $input ),
+				esc_attr( $cycle ),
+				$default === $cycle ? ' data-wplm-default="1"' : '',
+				checked( $selected && $default === $cycle, true, false ),
+				esc_html( $labels[ $cycle ] )
+			);
+		}
+		if ( null !== $forced ) {
+			echo '<br><small>' . esc_html__( 'Billed the way this licence\'s other monthly / yearly add-ons are, or will be once an order not completed yet is.', 'wp-license-manager' ) . '</small>';
+		}
+		echo '</p>';
+	}
+
+	/**
+	 * "1,000 / month · 10,000 / year" for a recurring offer.
+	 *
+	 * @param array $recurring month / year prices.
+	 * @return string HTML.
+	 */
+	private static function cycle_price_label( array $recurring ): string {
+		$parts = array();
+		foreach ( array(
+			'month' => __( '/ month', 'wp-license-manager' ),
+			'year'  => __( '/ year', 'wp-license-manager' ),
+		) as $cycle => $per ) {
+			if ( null !== ( $recurring[ $cycle ] ?? null ) ) {
+				$parts[] = ( function_exists( 'wc_price' ) ? wc_price( $recurring[ $cycle ] ) : number_format_i18n( $recurring[ $cycle ], 2 ) ) . ' ' . esc_html( $per );
+			}
+		}
+		return implode( ' · ', $parts );
+	}
+
+	/**
+	 * WPLM's own extras form: a fieldset of checkboxes (bought once) and number inputs (quantities) per
+	 * package or licence. Only the selected one is shown and enabled — the others are disabled, so
+	 * their same-named fields never post.
+	 *
+	 * @param array $data     The form data ({@see render_extras_form()}).
+	 * @param int   $selected The package or licence selected when the page opens.
+	 * @return void
+	 */
+	private function render_extras_fallback( array $data, int $selected ): void {
+		$existing = PackageExtrasService::FLOW_EXISTING === $data['flow'];
+		$groups   = $existing ? $data['offers_by_license'] : $data['offers_by_package'];
+		if ( array() === $groups ) {
+			return;
+		}
+		// Each product's form is its own: a page may show several (a shortcode, a page builder).
+		$uid = wp_unique_id( 'wplm-extras-' );
+		echo '<div id="' . esc_attr( $uid ) . '" class="wplm-extras-fallback" data-wplm-flow="' . esc_attr( $data['flow'] ) . '">';
+		foreach ( $groups as $key => $offers ) {
+			$on = (int) $key === $selected;
+			printf(
+				'<fieldset class="wplm-extras" data-wplm-for="%1$d"%2$s%3$s style="margin:0 0 16px;">',
+				(int) $key,
+				$on ? '' : ' hidden',
+				$on ? '' : ' disabled'
+			);
+			echo '<legend style="font-weight:600;">' . esc_html__( 'Add-ons', 'wp-license-manager' ) . '</legend>';
+			$this->render_cycle_choice( $offers, (int) $key, $existing ? ( $data['cycle_by_license'][ (int) $key ] ?? null ) : null, $on );
+			foreach ( $offers as $offer ) {
+				$input = 'wplm-extra-' . (int) $key . '-' . sanitize_html_class( str_replace( ':', '-', $offer['id'] ) );
+				$name  = 'wplm_extras[' . $offer['id'] . ']';
+				$price = null !== ( $offer['recurring'] ?? null )
+					? self::cycle_price_label( $offer['recurring'] )
+					: ( function_exists( 'wc_price' ) ? wc_price( $offer['unit_price'] ) : number_format_i18n( $offer['unit_price'], 2 ) );
+				echo '<p style="margin:0 0 8px;">';
+				if ( 1 === (int) $offer['max_qty'] ) {
+					printf(
+						'<label for="%1$s"><input type="checkbox" id="%1$s" name="%2$s" value="1"> %3$s — %4$s</label>',
+						esc_attr( $input ),
+						esc_attr( $name ),
+						esc_html( $offer['label'] ),
+						wp_kses_post( $price )
+					);
+				} else {
+					printf(
+						'<label for="%1$s">%3$s — %4$s %5$s</label> <input type="number" id="%1$s" name="%2$s" value="0" min="0" max="%6$d" step="1" inputmode="numeric" style="width:5em;">',
+						esc_attr( $input ),
+						esc_attr( $name ),
+						esc_html( $offer['label'] ),
+						wp_kses_post( $price ),
+						esc_html__( 'each', 'wp-license-manager' ),
+						(int) $offer['max_qty']
+					);
+				}
+				if ( '' !== $offer['description'] ) {
+					echo '<br><small>' . esc_html( $offer['description'] ) . '</small>';
+				}
+				echo '</p>';
+			}
+			echo '</fieldset>';
+		}
+		echo '</div>';
+		?>
+		<script>
+		(function(){
+			var root = document.getElementById('<?php echo esc_js( $uid ); ?>');
+			if ( ! root ) { return; }
+			var form = root.closest('form') || root.parentNode;
+			var existing = <?php echo $existing ? 'true' : 'false'; ?>;
+			function show(key){
+				root.querySelectorAll('.wplm-extras').forEach(function(set){
+					var on = set.getAttribute('data-wplm-for') === String(key);
+					set.hidden = !on;
+					set.disabled = !on;
+					if ( on ) {
+						var cycles = set.querySelectorAll('input[name="wplm_extras_cycle"]');
+						var picked = Array.prototype.some.call(cycles, function(r){ return r.checked; });
+						cycles.forEach(function(r){ if ( !picked && r.hasAttribute('data-wplm-default') ) { r.checked = true; } });
+					}
+				});
+			}
+			if ( existing ) {
+				var sel = form.querySelector('select[name="wplm_target_license_id"]');
+				if ( sel ) { sel.addEventListener('change', function(){ show(sel.value); }); }
+			} else {
+				form.querySelectorAll('input[name="wplm_package_id"]').forEach(function(radio){
+					radio.addEventListener('change', function(){ if ( radio.checked ) { show(radio.value); } });
+				});
+			}
+		})();
+		</script>
+		<?php
 	}
 
 	/**
@@ -199,7 +473,8 @@ class PlanCheckout {
 		$wanted   = isset( $_GET['wplm_license'] ) ? absint( wp_unslash( $_GET['wplm_license'] ) ) : 0;
 		$selected = isset( $targets[ $wanted ] ) ? $wanted : (int) array_key_first( $targets );
 
-		echo '<div class="wplm-packages wplm-addon" style="margin:16px 0;">';
+		$uid = wp_unique_id( 'wplm-addon-' );
+		echo '<div id="' . esc_attr( $uid ) . '" class="wplm-packages wplm-addon" style="margin:16px 0;">';
 		echo '<p style="margin-bottom:8px;"><label for="wplm-target-license" style="font-weight:600;">' . esc_html__( 'Add to licence', 'wp-license-manager' ) . '</label><br>';
 		echo '<select id="wplm-target-license" name="wplm_target_license_id">';
 		foreach ( $targets as $id => $target ) {
@@ -211,7 +486,7 @@ class PlanCheckout {
 			);
 		}
 		// Licences that cannot take an add-on now are listed, disabled, with the reason.
-		foreach ( $this->addons()->blocked_targets( get_current_user_id(), $plan ) as $id => $blocked ) {
+		foreach ( $this->blocked( get_current_user_id(), $plan ) as $id => $blocked ) {
 			printf(
 				'<option value="%1$d" disabled>%2$s</option>',
 				(int) $id,
@@ -219,9 +494,38 @@ class PlanCheckout {
 			);
 		}
 		echo '</select></p>';
-		echo '<p style="font-weight:600;margin-bottom:8px;">' . esc_html__( 'Choose an add-on', 'wp-license-manager' ) . '</p>';
+		$fitting = array_filter( $targets, static fn( $t ) => array() !== $t['packages'] );
+		if ( array() !== $fitting ) {
+			echo '<p style="font-weight:600;margin-bottom:8px;">' . esc_html__( 'Choose an add-on', 'wp-license-manager' ) . '</p>';
+		}
 
+		// A plan with stored add-ons AND extras: "none" is a choice of its own, checked by default for a
+		// licence that is offered extras, so ticking extras never sits beside a pre-checked add-on. Both
+		// together are refused at add to cart (one line is one or the other).
+		$with_extras = array();
+		foreach ( $targets as $id => $target ) {
+			if ( ! empty( $target['extras'] ) ) {
+				$with_extras[] = (int) $id;
+			}
+		}
 		$first = true;
+		if ( array() !== $fitting && array() !== $with_extras ) {
+			$shown = in_array( $selected, $with_extras, true );
+			$first = ! $shown;
+			printf(
+				'<label for="wplm-pkg-none" class="wplm-addon-package" data-wplm-licences="%1$s" style="display:block;border:1px solid #dcdcde;border-radius:6px;padding:12px;margin-bottom:8px;cursor:pointer;"%2$s>',
+				esc_attr( implode( ' ', $with_extras ) ),
+				$shown ? '' : ' hidden'
+			);
+			printf(
+				'<input type="radio" id="wplm-pkg-none" name="wplm_package_id" value="0" %1$s%2$s style="margin-right:8px;"> <strong>%3$s</strong>',
+				checked( $shown, true, false ),
+				$shown ? '' : ' disabled',
+				esc_html__( 'None — only the add-ons ticked below', 'wp-license-manager' )
+			);
+			echo '</label>';
+		}
+
 		foreach ( $packages as $pkg ) {
 			$fits = array();
 			foreach ( $targets as $id => $target ) {
@@ -263,21 +567,33 @@ class PlanCheckout {
 			echo '</label>';
 		}
 		echo '</div>';
+
+		$by_license = array();
+		$cycles     = array();
+		foreach ( $targets as $id => $target ) {
+			if ( ! empty( $target['extras'] ) ) {
+				$by_license[ (int) $id ] = $target['extras'];
+				$cycles[ (int) $id ]     = $this->addons()->offered_cycle( $target['license'], self::awaiting_payment() );
+			}
+		}
+		$this->render_extras_form( $plan, PackageExtrasService::FLOW_EXISTING, array(), $by_license, array(), $selected, $cycles );
 		?>
 		<script>
 		(function(){
-			var sel = document.getElementById('wplm-target-license');
+			var root = document.getElementById('<?php echo esc_js( $uid ); ?>');
+			var form = root ? ( root.closest('form') || root.parentNode ) : null;
+			var sel  = form ? form.querySelector('select[name="wplm_target_license_id"]') : null;
 			if ( ! sel ) { return; }
 			sel.addEventListener('change', function(){
 				var first = null;
-				document.querySelectorAll('.wplm-addon-package').forEach(function(label){
+				form.querySelectorAll('.wplm-addon-package').forEach(function(label){
 					var on = (' ' + label.getAttribute('data-wplm-licences') + ' ').indexOf(' ' + sel.value + ' ') !== -1;
 					var input = label.querySelector('input');
 					label.hidden = !on;
 					input.disabled = !on;
 					if ( !on ) { input.checked = false; } else if ( !first ) { first = input; }
 				});
-				if ( first && !document.querySelector('.wplm-addon-package input:checked') ) { first.checked = true; }
+				if ( first && !form.querySelector('.wplm-addon-package input:checked') ) { first.checked = true; }
 			});
 		})();
 		</script>
@@ -306,7 +622,7 @@ class PlanCheckout {
 			return;
 		}
 		if ( array() === $this->targets( $user_id, $plan ) ) {
-			$blocked = $this->addons()->blocked_targets( $user_id, $plan );
+			$blocked = $this->blocked( $user_id, $plan );
 			if ( array() === $blocked ) {
 				echo '<p class="wplm-addon-none woocommerce-info">' . esc_html__( 'None of your licences can take this add-on. Add-ons are added to an active licence billed the same way (monthly, yearly or lifetime).', 'wp-license-manager' ) . '</p>';
 				return;
@@ -384,6 +700,17 @@ class PlanCheckout {
 		if ( ! $product instanceof \WC_Product ) {
 			return $html;
 		}
+		$plan = $this->plan_for_product( $product );
+		if ( null !== $plan && $plan->is_dynamic() ) {
+			/**
+			 * The price shown for a product whose package is built at purchase (e.g. "From …").
+			 *
+			 * @param string      $html    WooCommerce's price HTML (the product's own price).
+			 * @param Plan        $plan    The dynamic plan.
+			 * @param \WC_Product $product The product.
+			 */
+			return (string) apply_filters( 'wplm_dynamic_price_html', $html, $plan, $product );
+		}
 		$packages = $this->active_packages( $product );
 		if ( empty( $packages ) ) {
 			return $html;
@@ -404,15 +731,42 @@ class PlanCheckout {
 	 * @return bool
 	 */
 	public function plan_is_purchasable( $purchasable, $product ) {
+		$plan    = $product instanceof \WC_Product ? $this->plan_for_product( $product ) : null;
+		$dynamic = $product instanceof \WC_Product && $this->is_dynamic_product( $product );
+		if ( ( null !== $plan || $dynamic ) && ! self::viewable( $product ) ) {
+			// A draft, pending or private product is not for sale until the owner publishes it (a shop
+			// manager may still test it): only the missing price is lifted here, never WooCommerce's
+			// own status rule.
+			return false;
+		}
+		if ( $dynamic ) {
+			return true; // The package (and its price) is built when it is added to the cart.
+		}
+		if ( null !== $plan && $plan->is_addon() ) {
+			// An add-on is added to one of the buyer's licences: nobody else can buy it. It may sell
+			// stored packages, package extras, or both.
+			return array() !== $this->targets( get_current_user_id(), $plan );
+		}
 		if ( $product instanceof \WC_Product && ! empty( $this->active_packages( $product ) ) ) {
-			$plan = $this->plan_for_product( $product );
-			if ( null !== $plan && $plan->is_addon() ) {
-				// An add-on is added to one of the buyer's licences: nobody else can buy it.
-				return array() !== $this->targets( get_current_user_id(), $plan );
-			}
 			return true;
 		}
 		return $purchasable;
+	}
+
+	/**
+	 * Whether the visitor may see (and so buy) a product: published, or one they can edit — and the
+	 * same for its parent — as WooCommerce's own `is_purchasable()` reads it.
+	 *
+	 * @param \WC_Product $product Product.
+	 * @return bool
+	 */
+	private static function viewable( \WC_Product $product ): bool {
+		if ( method_exists( $product, 'is_viewable' ) ) {
+			return (bool) $product->is_viewable();
+		}
+		$parent = $product->get_parent_id();
+		return ( 'publish' === $product->get_status() || current_user_can( 'edit_post', $product->get_id() ) )
+			&& ( ! $parent || 'publish' === get_post_status( $parent ) || current_user_can( 'edit_post', $parent ) );
 	}
 
 	/**
@@ -433,12 +787,39 @@ class PlanCheckout {
 		return $this->target_cache[ $key ];
 	}
 
+	/**
+	 * The current request's licences that cannot take an add-on plan now, with why — computed once per
+	 * request from the eligible targets already in hand.
+	 *
+	 * @param int               $user_id The customer.
+	 * @param \WPLM\Models\Plan $plan    The add-on plan.
+	 * @return array<int, array{license: License, reason: string}>
+	 */
+	private function blocked( int $user_id, $plan ): array {
+		if ( $user_id <= 0 ) {
+			return array();
+		}
+		$key = $user_id . ':' . $plan->id;
+		if ( ! isset( $this->blocked_cache[ $key ] ) ) {
+			$this->blocked_cache[ $key ] = $this->addons()->blocked_targets( $user_id, $plan, null, $this->targets( $user_id, $plan ) );
+		}
+		return $this->blocked_cache[ $key ];
+	}
+
 	/** The add-on service (lazily, so the older six-argument constructor keeps working). */
 	private function addons(): AddonService {
 		if ( null === $this->addons ) {
 			$this->addons = \WPLM\Plugin::get_instance()->container()->make( AddonService::class );
 		}
 		return $this->addons;
+	}
+
+	/** The package extras service (lazily, so older constructors keep working). */
+	private function extras(): PackageExtrasService {
+		if ( null === $this->extras ) {
+			$this->extras = \WPLM\Plugin::get_instance()->container()->make( PackageExtrasService::class );
+		}
+		return $this->extras;
 	}
 
 	/**
@@ -476,12 +857,72 @@ class PlanCheckout {
 		if ( null === $plan ) {
 			return $passed;
 		}
+		if ( $plan->is_dynamic() ) {
+			$built = $this->dynamic_package( self::posted_dynamic_spec(), $plan, $product );
+			if ( is_wp_error( $built ) ) {
+				wc_add_notice( $built->get_error_message(), 'error' );
+				return false;
+			}
+			return $passed;
+		}
+
+		$choice = self::posted_extras();
+		if ( $plan->is_addon() && array() !== $choice ) {
+			// Package extras for an existing licence. One cart line is a stored add-on or extras, never both.
+			// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
+			if ( isset( $_POST['wplm_package_id'] ) && absint( wp_unslash( $_POST['wplm_package_id'] ) ) > 0 ) {
+				wc_add_notice( __( 'Choose either an add-on above or the add-ons ticked below, not both. Add them to the cart one at a time.', 'wp-license-manager' ), 'error' );
+				return false;
+			}
+			$line  = array(
+				'data'                  => $product,
+				'wplm_extras'           => $choice,
+				'wplm_extras_cycle'     => self::posted_cycle(),
+				// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
+				'wplm_addon_license_id' => isset( $_POST['wplm_target_license_id'] ) ? absint( wp_unslash( $_POST['wplm_target_license_id'] ) ) : 0,
+			);
+			$built = $this->extras_for_cart_item( $line );
+			if ( is_wp_error( $built ) ) {
+				wc_add_notice( $built->get_error_message(), 'error' );
+				return false;
+			}
+			$twice = $this->cart_duplicates( $built['license'], $this->line_modules( $line ) );
+			if ( null !== $twice ) {
+				wc_add_notice( $twice, 'error' );
+				return false;
+			}
+			$clash = $this->cart_cycle_clash( $built['license'], $built['cycle'] );
+			if ( null !== $clash ) {
+				wc_add_notice( $clash, 'error' );
+				return false;
+			}
+			return $passed;
+		}
 
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
 		$package_id = isset( $_POST['wplm_package_id'] ) ? absint( wp_unslash( $_POST['wplm_package_id'] ) ) : 0;
+		if ( ! $package_id && $plan->is_addon() ) {
+			// The add-ons page with nothing chosen: it has no licence types to ask for.
+			wc_add_notice( __( 'Choose an add-on, or tick at least one add-on, before adding to cart.', 'wp-license-manager' ), 'error' );
+			return false;
+		}
 		if ( ! $package_id || null === $this->find_package( $plan, $package_id ) ) {
 			wc_add_notice( __( 'Please choose a license type before adding to cart.', 'wp-license-manager' ), 'error' );
 			return false;
+		}
+		if ( array() !== $choice ) {
+			$built = $this->extras_for_cart_item(
+				array(
+					'data'              => $product,
+					'wplm_package_id'   => $package_id,
+					'wplm_extras'       => $choice,
+					'wplm_extras_cycle' => self::posted_cycle(),
+				)
+			);
+			if ( is_wp_error( $built ) ) {
+				wc_add_notice( $built->get_error_message(), 'error' );
+				return false;
+			}
 		}
 		if ( $plan->is_addon() ) {
 			// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
@@ -512,7 +953,12 @@ class PlanCheckout {
 		if ( null === $license || null === $pkg ) {
 			return new \WP_Error( 'wplm_addon_no_licence', __( 'Choose which of your licences to add this to.', 'wp-license-manager' ) );
 		}
-		return $this->addons()->check_for_user( $user_id, $license, $pkg, $qty );
+		$ok = $this->addons()->check_for_user( $user_id, $license, $pkg, $qty );
+		if ( is_wp_error( $ok ) ) {
+			return $ok;
+		}
+		// A paid order not completed yet already adds its modules: both would be charged.
+		return $this->addons()->package_unfulfilled_problem( $license, $pkg ) ?? true;
 	}
 
 	/**
@@ -551,16 +997,55 @@ class PlanCheckout {
 	 * @return array
 	 */
 	public function add_cart_item_data( $data, $product_id ) {
+		$product = wc_get_product( $product_id );
+		if ( $product instanceof \WC_Product && $this->is_dynamic_product( $product ) ) {
+			// The customer's choice only: the package and its price are rebuilt from it on every pass.
+			// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
+			$posted                    = isset( $_POST['wplm_dynamic'] );
+			$data['wplm_dynamic_spec'] = $posted || ! is_array( $data['wplm_dynamic_spec'] ?? null )
+				? self::posted_dynamic_spec()
+				: map_deep( $data['wplm_dynamic_spec'], 'sanitize_text_field' );
+			$data['wplm_unique']       = 'dynamic-' . microtime();
+			return $data;
+		}
+		// The extras choice only (id => quantity): the price is rebuilt from it on every pass.
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
+		$extras = isset( $_POST['wplm_extras'] ) ? self::posted_extras() : PackageExtrasService::parse_choice( $data['wplm_extras'] ?? array() );
+		unset( $data['wplm_extras'] );
+		$plan = $product instanceof \WC_Product ? $this->plan_for_product( $product ) : null;
+		if ( null === $plan ) {
+			$extras = array(); // Only a plan's licence takes extras.
+		}
+
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
 		$package_id = isset( $_POST['wplm_package_id'] ) ? absint( wp_unslash( $_POST['wplm_package_id'] ) ) : 0;
+		if ( array() !== $extras && null !== $plan && $plan->is_addon() ) {
+			$package_id = 0; // Extras for an existing licence take the line.
+			unset( $data['wplm_package_id'] );
+		}
 		if ( $package_id ) {
 			$data['wplm_package_id'] = $package_id;
 			// Ensure each package selection is a distinct cart line.
 			$data['wplm_unique'] = $package_id . '-' . microtime();
 		}
+		if ( array() !== $extras ) {
+			$data['wplm_extras'] = $extras;
+			// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
+			$cycle = isset( $_POST['wplm_extras_cycle'] ) ? self::posted_cycle() : ( $data['wplm_extras_cycle'] ?? null );
+			if ( in_array( $cycle, PackageExtrasService::CYCLES, true ) ) {
+				$data['wplm_extras_cycle'] = $cycle;
+			} else {
+				unset( $data['wplm_extras_cycle'] );
+			}
+			$data['wplm_unique'] = 'extras-' . microtime();
+		}
+		// The licence an add-on is added to: only an add-on plan's line names one (and validation has
+		// checked it is the customer's). Any other line ignores a posted licence id.
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
 		$license_id = isset( $_POST['wplm_target_license_id'] ) ? absint( wp_unslash( $_POST['wplm_target_license_id'] ) ) : 0;
-		if ( $package_id && $license_id ) {
+		if ( null === $plan || ! $plan->is_addon() ) {
+			unset( $data['wplm_addon_license_id'] );
+		} elseif ( ( $package_id || array() !== $extras ) && $license_id ) {
 			$data['wplm_addon_license_id'] = $license_id;
 		}
 		return $data;
@@ -580,6 +1065,15 @@ class PlanCheckout {
 		if ( isset( $session['wplm_addon_license_id'] ) ) {
 			$item['wplm_addon_license_id'] = $session['wplm_addon_license_id'];
 		}
+		if ( isset( $session['wplm_dynamic_spec'] ) && is_array( $session['wplm_dynamic_spec'] ) ) {
+			$item['wplm_dynamic_spec'] = $session['wplm_dynamic_spec'];
+		}
+		if ( isset( $session['wplm_extras'] ) && is_array( $session['wplm_extras'] ) ) {
+			$item['wplm_extras'] = PackageExtrasService::parse_choice( $session['wplm_extras'] );
+		}
+		if ( isset( $session['wplm_extras_cycle'] ) && in_array( $session['wplm_extras_cycle'], PackageExtrasService::CYCLES, true ) ) {
+			$item['wplm_extras_cycle'] = $session['wplm_extras_cycle'];
+		}
 		return $item;
 	}
 
@@ -597,7 +1091,29 @@ class PlanCheckout {
 			return;
 		}
 
-		foreach ( $cart->get_cart() as $cart_item ) {
+		foreach ( $cart->get_cart() as $cart_key => $cart_item ) {
+			if ( isset( $cart_item['wplm_dynamic_spec'] ) && ! empty( $cart_item['data'] ) ) {
+				// One configuration is one licence: never more than one of it on a line.
+				if ( 1 !== (int) ( $cart_item['quantity'] ?? 1 ) ) {
+					$cart->set_quantity( $cart_key, 1, false );
+				}
+				$built = $this->dynamic_package_for_cart_item( $cart_item );
+				if ( $built instanceof Package ) {
+					$cart_item['data']->set_price( $built->price );
+				}
+				continue; // An invalid one is refused by check_cart_dynamic() before checkout.
+			}
+			if ( ! empty( $cart_item['wplm_extras'] ) && ! empty( $cart_item['data'] ) ) {
+				// A licence with extras is one licence: never more than one of it on a line.
+				if ( 1 !== (int) ( $cart_item['quantity'] ?? 1 ) ) {
+					$cart->set_quantity( $cart_key, 1, false );
+				}
+				$built = $this->extras_for_cart_item( $cart_item );
+				if ( ! is_wp_error( $built ) ) {
+					$cart_item['data']->set_price( $built['price'] );
+				}
+				continue; // An invalid one is refused by check_cart_extras() before checkout.
+			}
 			if ( empty( $cart_item['wplm_package_id'] ) || empty( $cart_item['data'] ) ) {
 				continue;
 			}
@@ -617,15 +1133,48 @@ class PlanCheckout {
 	 * @return array
 	 */
 	public function display_cart_item_data( $items, $cart_item ) {
+		if ( isset( $cart_item['wplm_dynamic_spec'] ) ) {
+			$built = $this->dynamic_package_for_cart_item( $cart_item );
+			if ( $built instanceof Package ) {
+				$items[] = array(
+					'key'   => __( 'License Type', 'wp-license-manager' ),
+					'value' => wp_strip_all_tags( $built->name . ' — ' . $this->price_label( $built ) ),
+				);
+			}
+			return $items;
+		}
+		if ( ! empty( $cart_item['wplm_extras'] ) ) {
+			$built = $this->extras_for_cart_item( $cart_item );
+			if ( is_wp_error( $built ) ) {
+				return $items;
+			}
+			if ( null !== $built['package'] ) {
+				$items[] = array(
+					'key'   => __( 'License Type', 'wp-license-manager' ),
+					'value' => wp_strip_all_tags( $built['package']->name . ' — ' . $this->price_label( $built['package'] ) ),
+				);
+			}
+			$items[] = array(
+				'key'   => __( 'Add-ons', 'wp-license-manager' ),
+				'value' => PackageExtrasService::describe( $built['items'] ),
+			);
+			if ( null !== $built['license'] ) {
+				$items[] = array(
+					'key'   => __( 'Added to', 'wp-license-manager' ),
+					'value' => ucfirst( AddonService::licence_label( $built['license'] ) ),
+				);
+			}
+			return $items;
+		}
 		if ( ! empty( $cart_item['wplm_package_id'] ) ) {
 			$pkg = $this->lookup_package( (int) $cart_item['wplm_package_id'] );
 			if ( $pkg ) {
-				$addon   = ! empty( $cart_item['wplm_addon_license_id'] );
+				$license = $this->addon_target( $pkg, (int) ( $cart_item['wplm_addon_license_id'] ?? 0 ), get_current_user_id() );
+				$addon   = null !== $license;
 				$items[] = array(
 					'key'   => $addon ? __( 'Add-on', 'wp-license-manager' ) : __( 'License Type', 'wp-license-manager' ),
 					'value' => wp_strip_all_tags( $pkg->name . ' — ' . $this->price_label( $pkg, $addon ) ),
 				);
-				$license = $addon ? $this->licenses->get_by_id( (int) $cart_item['wplm_addon_license_id'] ) : null;
 				if ( null !== $license ) {
 					$items[] = array(
 						'key'   => __( 'Added to', 'wp-license-manager' ),
@@ -647,6 +1196,15 @@ class PlanCheckout {
 	 * @return void
 	 */
 	public function save_order_line_item( $item, $cart_item_key, $values, $order ): void {
+		if ( isset( $values['wplm_dynamic_spec'] ) ) {
+			$this->save_dynamic_line_item( $item, $values );
+			return;
+		}
+		if ( ! empty( $values['wplm_extras'] ) ) {
+			$this->save_extras_line_item( $item, $values );
+			return;
+		}
+		$pkg = null;
 		if ( ! empty( $values['wplm_package_id'] ) ) {
 			$item->add_meta_data( '_wplm_package_id', (int) $values['wplm_package_id'], true );
 			$pkg = $this->lookup_package( (int) $values['wplm_package_id'] );
@@ -655,13 +1213,456 @@ class PlanCheckout {
 				$item->add_meta_data( __( 'License Type', 'wp-license-manager' ), $pkg->name, true );
 			}
 		}
-		if ( ! empty( $values['wplm_addon_license_id'] ) ) {
-			$item->add_meta_data( '_wplm_addon_license_id', (int) $values['wplm_addon_license_id'], true );
-			$license = $this->licenses->get_by_id( (int) $values['wplm_addon_license_id'] );
-			if ( null !== $license ) {
-				$item->add_meta_data( __( 'Added to', 'wp-license-manager' ), ucfirst( AddonService::licence_label( $license ) ), true );
+		// Only an add-on line names the licence it adds to, and only one of the buyer's own: the id
+		// (and the "licence ending ABCD" shown with it) is never written for anyone else's licence.
+		$buyer   = $order instanceof \WC_Order && $order->get_customer_id() > 0 ? (int) $order->get_customer_id() : get_current_user_id();
+		$license = null !== $pkg ? $this->addon_target( $pkg, (int) ( $values['wplm_addon_license_id'] ?? 0 ), $buyer ) : null;
+		if ( null !== $license ) {
+			$item->add_meta_data( '_wplm_addon_license_id', $license->id, true );
+			$item->add_meta_data( __( 'Added to', 'wp-license-manager' ), ucfirst( AddonService::licence_label( $license ) ), true );
+		}
+	}
+
+	/**
+	 * The licence a stored add-on line adds to: named on an add-on plan's line and the buyer's own;
+	 * null otherwise (a licence type, someone else's licence, none).
+	 *
+	 * @param Package $pkg        The line's package.
+	 * @param int     $license_id The licence id on the line.
+	 * @param int     $user_id    The buyer.
+	 * @return License|null
+	 */
+	private function addon_target( Package $pkg, int $license_id, int $user_id ): ?License {
+		if ( $license_id <= 0 || $user_id <= 0 ) {
+			return null;
+		}
+		$plan = $this->plans->get( $pkg->plan_id );
+		if ( null === $plan || ! $plan->is_addon() ) {
+			return null;
+		}
+		$license = $this->licenses->get_by_id( $license_id );
+		return null !== $license && (int) $license->user_id === $user_id ? $license : null;
+	}
+
+	/**
+	 * Persist a line with package extras: the package (new purchase) or the licence (existing), and a
+	 * snapshot of the extras sold — rebuilt now, never taken from the cart — which fulfilment writes from.
+	 *
+	 * @param \WC_Order_Item_Product $item   Order line item.
+	 * @param array                  $values Cart item values.
+	 * @return void
+	 * @throws \Exception When the extras can no longer be sold as chosen, which stops the checkout.
+	 */
+	private function save_extras_line_item( $item, array $values ): void {
+		$built = $this->extras_for_cart_item( $values );
+		if ( is_wp_error( $built ) ) {
+			throw new \Exception( esc_html( $built->get_error_message() ) );
+		}
+		// What the sale was made against: the licence type's price (new), or the plan's subscription
+		// and paid-through day (existing licence). Fulfilment holds the sale to these.
+		$sale     = null !== $built['package']
+			? array(
+				'base_price'      => (float) $built['package']->price,
+				'base_signup_fee' => (float) $built['package']->signup_fee,
+			)
+			: $this->addons()->extras_target( $built['license'] );
+		$snapshot = $this->extras()->snapshot( $built['ctx'], $built['items'], $sale );
+
+		$item->set_quantity( 1 );
+		$item->add_meta_data( '_wplm_plan_id', (int) $built['ctx']['plan']->id, true );
+		if ( null !== $built['package'] ) {
+			$item->add_meta_data( '_wplm_package_id', (int) $built['package']->id, true );
+			$item->add_meta_data( __( 'License Type', 'wp-license-manager' ), $built['package']->name, true );
+		}
+		if ( null !== $built['license'] ) {
+			$item->add_meta_data( '_wplm_addon_license_id', (int) $built['license']->id, true );
+			$item->add_meta_data( __( 'Added to', 'wp-license-manager' ), ucfirst( AddonService::licence_label( $built['license'] ) ), true );
+		}
+		$item->add_meta_data( '_wplm_extras', wp_json_encode( $snapshot ), true );
+		$item->add_meta_data( '_wplm_extras_total', (float) $built['total'], true );
+		$item->add_meta_data( __( 'Add-ons', 'wp-license-manager' ), PackageExtrasService::describe( $built['items'] ), true );
+	}
+
+	/**
+	 * A cart line's extras, priced and checked now from the filter (never from what the browser sent):
+	 * with a package id, extras beside a new licence; with a licence id on an add-on plan, extras for
+	 * that licence (the add-on checks included, for the current customer).
+	 *
+	 * @param array $cart_item Cart item (data, wplm_extras, and wplm_package_id or wplm_addon_license_id).
+	 * @return array{ctx: array, items: array[], total: float, price: float, package: Package|null, license: License|null}|\WP_Error
+	 */
+	private function extras_for_cart_item( array $cart_item ) {
+		$unavailable = new \WP_Error( 'wplm_extras_unavailable', __( 'These add-ons cannot be bought right now. Please contact us.', 'wp-license-manager' ) );
+		$product     = $cart_item['data'] ?? null;
+		if ( ! $product instanceof \WC_Product ) {
+			$product = wc_get_product( (int) ( $cart_item['variation_id'] ?? 0 ) ?: (int) ( $cart_item['product_id'] ?? 0 ) );
+		}
+		$plan   = $product instanceof \WC_Product ? $this->plan_for_product( $product ) : null;
+		$choice = PackageExtrasService::parse_choice( $cart_item['wplm_extras'] ?? array() );
+		if ( null === $plan || array() === $choice ) {
+			return $unavailable;
+		}
+
+		$package = null;
+		$license = null;
+		if ( $plan->is_addon() ) {
+			$user_id    = get_current_user_id();
+			$license_id = (int) ( $cart_item['wplm_addon_license_id'] ?? 0 );
+			if ( $user_id <= 0 ) {
+				return new \WP_Error( 'wplm_addon_logged_out', __( 'Log in to add this to your licence.', 'wp-license-manager' ) );
+			}
+			$license = $license_id > 0 ? $this->licenses->get_by_id( $license_id ) : null;
+			if ( null === $license ) {
+				return new \WP_Error( 'wplm_addon_no_licence', __( 'Choose which of your licences to add this to.', 'wp-license-manager' ) );
+			}
+			$ctx = $this->addons()->extras_context( $plan, $license );
+		} else {
+			$package = $this->find_package( $plan, (int) ( $cart_item['wplm_package_id'] ?? 0 ) );
+			if ( null === $package || 1 !== (int) $package->status ) {
+				return new \WP_Error( 'wplm_extras_no_package', __( 'Please choose a license type before adding to cart.', 'wp-license-manager' ) );
+			}
+			$ctx = $this->extras()->context_for_package( $plan, $package );
+		}
+		if ( null === $ctx ) {
+			return new \WP_Error( 'wplm_extras_none', __( 'Add-ons cannot be added to this licence type.', 'wp-license-manager' ) );
+		}
+
+		// Recurring extras on a lifetime licence: one cycle per line, forced to the cycle of the add-ons
+		// subscription the licence already has.
+		$cycle  = in_array( $cart_item['wplm_extras_cycle'] ?? null, PackageExtrasService::CYCLES, true ) ? $cart_item['wplm_extras_cycle'] : null;
+		$forced = null !== $license ? $this->addons()->addons_cycle( $license ) : null;
+		$chosen = $this->extras()->choose( $ctx, $choice, $forced ?? $cycle );
+		if ( is_wp_error( $chosen ) ) {
+			return $chosen;
+		}
+		if ( null !== $license ) {
+			$ok = $this->addons()->check_for_user( get_current_user_id(), $license, $this->addons()->extras_package( $plan, $ctx['billing'], $chosen['items'] ) );
+			if ( is_wp_error( $ok ) ) {
+				return $ok;
+			}
+			// Monthly / yearly add-ons join the licence's add-ons subscription: refused now, before
+			// payment, when they could not be added (or would never renew).
+			$problem = null !== $chosen['cycle'] ? $this->addons()->addons_join_problem( $license ) : null;
+			if ( null !== $problem ) {
+				return $problem;
+			}
+			// A paid order not completed yet already adds one of its modules: both would be charged.
+			$problem = $this->addons()->extras_unfulfilled_problem( $license, $chosen['items'] );
+			if ( null !== $problem ) {
+				return $problem;
+			}
+			// With none yet, an order not completed may be about to open it on the other cycle.
+			$pending = null !== $chosen['cycle'] && null === $forced ? $this->addons()->unfulfilled_addons_cycle( $license, self::awaiting_payment() ) : null;
+			if ( null !== $pending && $pending['cycle'] !== $chosen['cycle'] ) {
+				$message = 'completed' === $pending['order']->get_status()
+					/* translators: 1: order number, 2: licence label (licence ending ABCD), 3: billing schedule (every month) */
+					? __( 'The monthly / yearly add-ons of your order #%1$s are still being added to your %2$s, billed %3$s. One licence\'s monthly / yearly add-ons are billed one way: choose the same, or contact us.', 'wp-license-manager' )
+					/* translators: 1: order number, 2: licence label (licence ending ABCD), 3: billing schedule (every month) */
+					: __( 'Your order #%1$s, not completed yet, adds monthly / yearly add-ons to your %2$s billed %3$s. One licence\'s monthly / yearly add-ons are billed one way: choose the same, or cancel that order first.', 'wp-license-manager' );
+				return new \WP_Error(
+					'wplm_extras_cycle_pending',
+					sprintf( $message, $pending['order']->get_order_number(), AddonService::licence_label( $license ), AddonService::schedule( 1, $pending['cycle'] ) )
+				);
 			}
 		}
+		$base = null !== $package ? $this->first_payment_amount( $package ) : 0.0;
+		return array(
+			'ctx'     => $ctx,
+			'items'   => $chosen['items'],
+			'total'   => $chosen['total'],
+			'price'   => round( $base + $chosen['total'], PackageExtrasService::decimals() ),
+			'cycle'   => $chosen['cycle'],
+			'package' => $package,
+			'license' => $license,
+		);
+	}
+
+	/**
+	 * The order the customer is paying for now: WooCommerce's `order_awaiting_payment` while it is still
+	 * the cart's own — unpaid (pending or failed) and placed for exactly this cart, never an empty one:
+	 * the only case in which WooCommerce pays that order rather than placing a new one — or the
+	 * order-pay page's. An order left in the session for another cart stays payable on its own, so it
+	 * counts like any other.
+	 *
+	 * @return int Order id, 0 for none.
+	 */
+	private static function awaiting_payment(): int {
+		$id = function_exists( 'WC' ) && null !== WC()->session ? absint( WC()->session->get( 'order_awaiting_payment' ) ) : 0;
+		if ( $id > 0 ) {
+			$order = wc_get_order( $id );
+			if ( ! $order instanceof \WC_Order || ! $order->has_status( array( 'pending', 'failed' ) ) || null === WC()->cart
+				|| WC()->cart->is_empty() || '' === $order->get_cart_hash() || ! $order->has_cart_hash( WC()->cart->get_cart_hash() ) ) {
+				$id = 0;
+			}
+		}
+		if ( 0 === $id && function_exists( 'is_wc_endpoint_url' ) && is_wc_endpoint_url( 'order-pay' ) ) {
+			global $wp;
+			$id = absint( $wp->query_vars['order-pay'] ?? 0 );
+		}
+		return $id;
+	}
+
+	/**
+	 * `woocommerce_before_pay_action` (the classic order-pay form): an error notice stops the payment —
+	 * WooCommerce takes it only while no error notice is queued.
+	 *
+	 * @param mixed $order The order being paid for.
+	 * @return void
+	 */
+	public function check_order_pay( $order ): void {
+		if ( ! $order instanceof \WC_Order ) {
+			return;
+		}
+		$problem = $this->addons()->payment_problem( $order );
+		if ( null !== $problem ) {
+			wc_add_notice( $problem->get_error_message(), 'error' );
+		}
+	}
+
+	/**
+	 * `woocommerce_checkout_validate_order_before_payment` (Store API: the block checkout, and its
+	 * order-pay): an error stops the payment.
+	 *
+	 * @param mixed $order  The order.
+	 * @param mixed $errors Errors to add to.
+	 * @return void
+	 */
+	public function check_order_before_payment( $order, $errors ): void {
+		if ( ! $order instanceof \WC_Order || ! $errors instanceof \WP_Error ) {
+			return;
+		}
+		$problem = $this->addons()->payment_problem( $order );
+		if ( null !== $problem ) {
+			$errors->add( $problem->get_error_code(), $problem->get_error_message() );
+		}
+	}
+
+	/**
+	 * `woocommerce_check_cart_items`: price and check every line with extras again. One that can no
+	 * longer be sold as chosen (a price list change, the licence changed) stops the checkout.
+	 *
+	 * @return void
+	 */
+	public function check_cart_extras(): void {
+		if ( ! function_exists( 'WC' ) || null === WC()->cart ) {
+			return;
+		}
+		foreach ( WC()->cart->get_cart() as $cart_item ) {
+			if ( empty( $cart_item['wplm_extras'] ) ) {
+				continue;
+			}
+			$built = $this->extras_for_cart_item( $cart_item );
+			if ( is_wp_error( $built ) ) {
+				$name = isset( $cart_item['data'] ) && $cart_item['data'] instanceof \WC_Product ? $cart_item['data']->get_name() : __( 'Add-ons', 'wp-license-manager' );
+				/* translators: 1: product name, 2: reason */
+				wc_add_notice( sprintf( __( '%1$s: %2$s', 'wp-license-manager' ), $name, $built->get_error_message() ), 'error' );
+			}
+		}
+
+		// The same module twice for one licence (two lines, placed together) would be billed twice.
+		$by_licence = array();
+		foreach ( WC()->cart->get_cart() as $cart_item ) {
+			$license_id = (int) ( $cart_item['wplm_addon_license_id'] ?? 0 );
+			if ( $license_id > 0 ) {
+				foreach ( array_unique( $this->line_modules( $cart_item ) ) as $code ) {
+					$by_licence[ $license_id ][ $code ] = ( $by_licence[ $license_id ][ $code ] ?? 0 ) + 1;
+				}
+			}
+		}
+		foreach ( $by_licence as $license_id => $codes ) {
+			$twice = array_keys( array_filter( $codes, static fn( $n ) => $n > 1 ) );
+			if ( array() !== $twice ) {
+				$license = $this->licenses->get_by_id( (int) $license_id );
+				wc_add_notice( $this->twice_message( $license, $twice ), 'error' );
+			}
+		}
+
+		// Monthly / yearly add-ons for one licence join one add-ons subscription, billed one way: a
+		// second cycle in the same cart could be charged but never added.
+		$cycles = array();
+		foreach ( WC()->cart->get_cart() as $cart_item ) {
+			$cycle = $this->line_cycle( $cart_item );
+			if ( null !== $cycle ) {
+				$cycles[ (int) $cart_item['wplm_addon_license_id'] ][ $cycle ] = true;
+			}
+		}
+		foreach ( $cycles as $license_id => $seen ) {
+			if ( count( $seen ) > 1 ) {
+				$license = $this->licenses->get_by_id( (int) $license_id );
+				wc_add_notice( $this->cycle_clash_message( $license, (string) array_key_first( $seen ) ), 'error' );
+			}
+		}
+	}
+
+	/**
+	 * The cycle an add-on cart line bills its monthly / yearly extras on, for a licence the customer
+	 * already has; null when it has none (or is not such a line).
+	 *
+	 * @param array $cart_item Cart item.
+	 * @return string|null `month` or `year`.
+	 */
+	private function line_cycle( array $cart_item ): ?string {
+		if ( empty( $cart_item['wplm_extras'] ) || empty( $cart_item['wplm_addon_license_id'] ) ) {
+			return null;
+		}
+		$built = $this->extras_for_cart_item( $cart_item );
+		return is_wp_error( $built ) || null === $built['license'] ? null : $built['cycle'];
+	}
+
+	/**
+	 * Why a new add-on line for a licence cannot join the cart: the cart already bills that licence's
+	 * monthly / yearly add-ons on the other cycle. Null when it does not.
+	 *
+	 * @param License|null $license The licence.
+	 * @param string|null  $cycle   The new line's cycle.
+	 * @return string|null
+	 */
+	private function cart_cycle_clash( ?License $license, ?string $cycle ): ?string {
+		if ( null === $license || null === $cycle || ! function_exists( 'WC' ) || null === WC()->cart ) {
+			return null;
+		}
+		foreach ( WC()->cart->get_cart() as $cart_item ) {
+			if ( (int) ( $cart_item['wplm_addon_license_id'] ?? 0 ) !== $license->id ) {
+				continue;
+			}
+			$other = $this->line_cycle( $cart_item );
+			if ( null !== $other && $other !== $cycle ) {
+				return $this->cycle_clash_message( $license, $other );
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * "Your cart already has add-ons for your licence ending ABCD billed every month. …"
+	 *
+	 * @param License|null $license The licence.
+	 * @param string       $cycle   The cycle already in the cart.
+	 * @return string
+	 */
+	private function cycle_clash_message( ?License $license, string $cycle ): string {
+		return sprintf(
+			/* translators: 1: licence label (licence ending ABCD), 2: billing schedule (every month) */
+			__( 'Your cart already has add-ons for your %1$s billed %2$s. One licence\'s monthly / yearly add-ons are billed one way: choose the same, or remove the other line first.', 'wp-license-manager' ),
+			null !== $license ? AddonService::licence_label( $license ) : __( 'licence', 'wp-license-manager' ),
+			AddonService::schedule( 1, $cycle )
+		);
+	}
+
+	/**
+	 * The module codes an add-on cart line adds to its licence for the plan's term: extras (terms
+	 * excluded — packs stack) or a stored add-on (a dated one-time pack excluded).
+	 *
+	 * @param array $cart_item Cart item.
+	 * @return string[]
+	 */
+	private function line_modules( array $cart_item ): array {
+		$codes = array();
+		if ( ! empty( $cart_item['wplm_extras'] ) ) {
+			$built = $this->extras_for_cart_item( $cart_item );
+			if ( is_wp_error( $built ) ) {
+				return array();
+			}
+			foreach ( $built['items'] as $extra ) {
+				if ( null !== $extra['term_days'] ) {
+					continue;
+				}
+				foreach ( $extra['lines'] as $line ) {
+					if ( 'module' === $line['kind'] ) {
+						$codes[] = (string) $line['code'];
+					}
+				}
+			}
+			return $codes;
+		}
+		$pkg = ! empty( $cart_item['wplm_package_id'] ) ? $this->lookup_package( (int) $cart_item['wplm_package_id'] ) : null;
+		if ( null === $pkg || ( Package::TYPE_ONETIME === $pkg->billing_type && (int) $pkg->valid_for_days > 0 ) ) {
+			return array();
+		}
+		foreach ( $pkg->entitlements as $line ) {
+			if ( 'module' === ( $line['kind'] ?? '' ) ) {
+				$codes[] = (string) $line['code'];
+			}
+		}
+		return $codes;
+	}
+
+	/**
+	 * Why a new add-on line for a licence cannot join the cart: a module it adds is already in the cart
+	 * for the same licence. Null when nothing repeats.
+	 *
+	 * @param License|null $license The licence.
+	 * @param string[]     $codes   Modules the new line adds.
+	 * @return string|null
+	 */
+	private function cart_duplicates( ?License $license, array $codes ): ?string {
+		if ( null === $license || array() === $codes || ! function_exists( 'WC' ) || null === WC()->cart ) {
+			return null;
+		}
+		$in_cart = array();
+		foreach ( WC()->cart->get_cart() as $cart_item ) {
+			if ( (int) ( $cart_item['wplm_addon_license_id'] ?? 0 ) === $license->id ) {
+				$in_cart = array_merge( $in_cart, $this->line_modules( $cart_item ) );
+			}
+		}
+		$twice = array_values( array_unique( array_intersect( $codes, $in_cart ) ) );
+		return array() === $twice ? null : $this->twice_message( $license, $twice );
+	}
+
+	/**
+	 * "Factory is already in your cart for your licence ending ABCD. …"
+	 *
+	 * @param License|null $license The licence.
+	 * @param string[]     $codes   Module codes.
+	 * @return string
+	 */
+	private function twice_message( ?License $license, array $codes ): string {
+		$profile = null !== $license ? $this->profiles->get( $license->profile ) : null;
+		$names   = null !== $profile ? array_map( array( $profile, 'code_label' ), $codes ) : $codes;
+		return sprintf(
+			/* translators: 1: module names, 2: "licence ending ABCD" */
+			__( '%1$s is already in your cart for your %2$s. Remove one: it would be billed twice.', 'wp-license-manager' ),
+			implode( ', ', $names ),
+			null !== $license ? AddonService::licence_label( $license ) : __( 'licence', 'wp-license-manager' )
+		);
+	}
+
+	/**
+	 * `woocommerce_add_to_cart_quantity`: a licence with extras is added one per line.
+	 *
+	 * @param int $quantity   Requested quantity.
+	 * @param int $product_id Product id.
+	 * @return int
+	 */
+	public function extras_quantity( $quantity, $product_id = 0 ) {
+		if ( array() === self::posted_extras() ) {
+			return $quantity;
+		}
+		$product = $product_id ? wc_get_product( $product_id ) : null;
+		return $product instanceof \WC_Product && null !== $this->plan_for_product( $product ) ? 1 : $quantity;
+	}
+
+	/**
+	 * The posted `wplm_extras_cycle` (`month` or `year`), or null.
+	 *
+	 * @return string|null
+	 */
+	private static function posted_cycle(): ?string {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- WC add-to-cart form, validated by WC.
+		$raw = isset( $_POST['wplm_extras_cycle'] ) ? sanitize_key( wp_unslash( $_POST['wplm_extras_cycle'] ) ) : '';
+		return in_array( $raw, PackageExtrasService::CYCLES, true ) ? $raw : null;
+	}
+
+	/**
+	 * The posted `wplm_extras[<offer id>] = <quantity>` choice ({@see PackageExtrasService::parse_choice()}).
+	 *
+	 * @return array<string, int>
+	 */
+	private static function posted_extras(): array {
+		// phpcs:disable WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- WC add-to-cart form, validated by WC; sanitised by parse_choice().
+		$raw = isset( $_POST['wplm_extras'] ) ? wp_unslash( $_POST['wplm_extras'] ) : array();
+		// phpcs:enable WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+		return PackageExtrasService::parse_choice( $raw );
 	}
 
 	// -------------------------------------------------------------------------
@@ -683,19 +1684,117 @@ class PlanCheckout {
 			return;
 		}
 
-		$issued  = array();
-		$applied = array();
-		$failed  = 0;
+		// Two completions at once (a gateway callback and the return page) must not both see an
+		// unfulfilled line: claim the order first, then read it again.
+		if ( ! $this->claim_order( $order_id ) ) {
+			\WPLM\Support\Logger::error( 'PlanCheckout: order ' . $order_id . ' is already being fulfilled by another request; skipped.' );
+			$order->add_order_note( __( 'WPLM: another fulfilment of this order is in progress, so this one did nothing. If no licence or add-on appears, set the order to Completed again after 5 minutes.', 'wp-license-manager' ) );
+			return;
+		}
+		try {
+			$order = wc_get_order( $order_id );
+			if ( ! $order instanceof \WC_Order || '1' === $order->get_meta( '_wplm_plan_fulfilled' ) ) {
+				return;
+			}
+			$this->fulfill_claimed( $order );
+		} finally {
+			$this->release_order( $order_id );
+		}
+	}
+
+	/** Seconds after which a fulfilment claim is taken to be from a request that died. */
+	public const FULFIL_LOCK_TTL = 300;
+
+	/**
+	 * Claim an order for fulfilment: the option `wplm_fulfil_lock_{id}` ({@see \WPLM\Support\Lock}),
+	 * which another request cannot claim while this one holds it. A claim older than
+	 * {@see FULFIL_LOCK_TTL} is taken over.
+	 *
+	 * @param int $order_id Order id.
+	 * @return bool Whether this request holds the claim.
+	 */
+	private function claim_order( int $order_id ): bool {
+		return \WPLM\Support\Lock::claim( 'wplm_fulfil_lock_' . $order_id, self::FULFIL_LOCK_TTL );
+	}
+
+	/**
+	 * Release an order's fulfilment claim.
+	 *
+	 * @param int $order_id Order id.
+	 * @return void
+	 */
+	private function release_order( int $order_id ): void {
+		\WPLM\Support\Lock::release( 'wplm_fulfil_lock_' . $order_id );
+	}
+
+	/**
+	 * Fulfil an order this request has claimed ({@see fulfill_order()}).
+	 *
+	 * @param \WC_Order $order The order, read after the claim.
+	 * @return void
+	 */
+	private function fulfill_claimed( \WC_Order $order ): void {
+		$order_id = $order->get_id();
+		$issued   = array();
+		$applied  = array();
+		$failed   = 0;
 
 		/** @var \WC_Order_Item_Product $item */
 		foreach ( $order->get_items() as $item ) {
-			$package_id = (int) $item->get_meta( '_wplm_package_id' );
-			if ( ! $package_id ) {
+			$snapshot = (string) $item->get_meta( '_wplm_dynamic_package' );
+			if ( '' !== $snapshot ) {
+				// Already issued on an earlier attempt: never issue a second licence.
+				if ( '' !== (string) $item->get_meta( '_wplm_license_ids' ) ) {
+					continue;
+				}
+				try {
+					$pkg     = $this->package_from_snapshot( $snapshot, (int) $item->get_meta( '_wplm_plan_id' ) );
+					$license = $this->fulfill_item( $order, $item, $pkg, $this->stored_dynamic_spec( $item ) );
+					if ( $license ) {
+						$issued[] = $license;
+						$item->update_meta_data( '_wplm_license_ids', wp_json_encode( array( $license->id ) ) );
+						$item->save_meta_data();
+					}
+				} catch ( \Throwable $e ) {
+					++$failed;
+					\WPLM\Support\Logger::error( 'PlanCheckout: fulfilment failed for a package built at purchase (order item ' . $item->get_id() . ') — ' . $e->getMessage() );
+					$order->add_order_note(
+						sprintf(
+							/* translators: 1: product name, 2: error message */
+							__( 'WPLM: a licence could not be issued for "%1$s" — %2$s. Fix the cause, then set the order to Completed again to retry.', 'wp-license-manager' ),
+							$item->get_name(),
+							$e->getMessage()
+						)
+					);
+				}
 				continue;
 			}
-			// Already issued (or added) on an earlier attempt: never issue a second licence.
-			if ( '' !== (string) $item->get_meta( '_wplm_license_ids' ) || '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) ) {
+
+			$extras     = (string) $item->get_meta( '_wplm_extras' );
+			$package_id = (int) $item->get_meta( '_wplm_package_id' );
+			if ( ! $package_id ) {
+				// Package extras added to a licence the customer already has.
+				if ( '' !== $extras ) {
+					$entry = $this->fulfill_existing_extras( $order, $item, $failed );
+					if ( null !== $entry ) {
+						$applied[] = $entry;
+					}
+				}
 				continue;
+			}
+			$licence_done = '' !== (string) $item->get_meta( '_wplm_license_ids' );
+			$extras_done  = '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || AddonService::released( $item )
+				|| ( '' !== $extras && AddonService::refunded_in_full( $order, $item ) );
+			if ( '' === $extras ) {
+				// Already issued (or added) on an earlier attempt: never issue a second licence.
+				if ( $licence_done || '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) ) {
+					continue;
+				}
+			} elseif ( $licence_done && $extras_done ) {
+				continue; // The licence and its extras: both done on an earlier attempt.
+			}
+			if ( ! $licence_done && AddonService::released( $item ) ) {
+				continue; // An add-on line taken back (refunded, or settled by the shop): never added, even if its add-on is gone.
 			}
 			$pkg = $this->lookup_package( $package_id );
 			if ( null === $pkg ) {
@@ -710,6 +1809,9 @@ class PlanCheckout {
 			// An add-on for an existing licence: lines on that licence, never a new key.
 			$plan = $this->plans->get( $pkg->plan_id );
 			if ( null !== $plan && $plan->is_addon() ) {
+				if ( $this->taken_back( $order, $item, $pkg->name ) ) {
+					continue;
+				}
 				try {
 					$target = $this->licenses->get_by_id( (int) $item->get_meta( '_wplm_addon_license_id' ) );
 					if ( null === $target ) {
@@ -725,13 +1827,21 @@ class PlanCheckout {
 					\WPLM\Support\Logger::error( 'PlanCheckout: add-on failed for package ' . $package_id . ' — ' . $e->getMessage() );
 					$order->add_order_note(
 						sprintf(
-							/* translators: 1: add-on name, 2: error message */
-							__( 'WPLM: the add-on "%1$s" could not be added — %2$s. Fix the cause, then set the order to Completed again to retry.', 'wp-license-manager' ),
+							$e instanceof AddonRefusal
+								/* translators: 1: add-on name, 2: error message */
+								? __( 'WPLM: the add-on "%1$s" could not be added — %2$s. A retry cannot add it: refund this line, or use Mark add-ons settled.', 'wp-license-manager' )
+								/* translators: 1: add-on name, 2: error message */
+								: __( 'WPLM: the add-on "%1$s" could not be added — %2$s. Fix the cause, then set the order to Completed again to retry.', 'wp-license-manager' ),
 							$pkg->name,
 							$e->getMessage()
 						)
 					);
 				}
+				continue;
+			}
+
+			if ( '' !== $extras ) {
+				$this->fulfill_with_extras( $order, $item, $pkg, $extras, $issued, $failed );
 				continue;
 			}
 
@@ -779,6 +1889,339 @@ class PlanCheckout {
 	}
 
 	/**
+	 * Fulfil a licence bought with package extras: the licence first (as any package line), then the
+	 * extras on it. The extras snapshot is checked before a key is generated. Each step is stamped as
+	 * it completes (`_wplm_license_ids`, then `_wplm_entitlement_ids`), so a retry does only what is
+	 * missing and never issues a second key.
+	 *
+	 * @param \WC_Order              $order  The order.
+	 * @param \WC_Order_Item_Product $item   Its line.
+	 * @param Package                $pkg    The licence type.
+	 * @param string                 $json   The `_wplm_extras` snapshot.
+	 * @param License[]              $issued Licences issued by this order (appended to).
+	 * @param int                    $failed Failures (incremented).
+	 * @return void
+	 */
+	private function fulfill_with_extras( \WC_Order $order, $item, Package $pkg, string $json, array &$issued, int &$failed ): void {
+		$ids     = json_decode( (string) $item->get_meta( '_wplm_license_ids' ), true );
+		$license = is_array( $ids ) && ! empty( $ids ) ? $this->licenses->get_by_id( (int) $ids[0] ) : null;
+
+		if ( ! is_array( $ids ) || empty( $ids ) ) {
+			try {
+				$snapshot = $this->extras_snapshot_for( $pkg, $json ); // Checked before a key is generated.
+				// The licence type at the price it was sold for: renewals bill exactly what the cart showed.
+				$sold = clone $pkg;
+				if ( isset( $snapshot['base_price'] ) && is_numeric( $snapshot['base_price'] ) && (float) $snapshot['base_price'] >= 0 ) {
+					$sold->price = (float) $snapshot['base_price'];
+				}
+				if ( isset( $snapshot['base_signup_fee'] ) && is_numeric( $snapshot['base_signup_fee'] ) && (float) $snapshot['base_signup_fee'] >= 0 ) {
+					$sold->signup_fee = (float) $snapshot['base_signup_fee'];
+				}
+				$license  = $this->fulfill_item( $order, $item, $sold );
+				$issued[] = $license;
+				$item->update_meta_data( '_wplm_license_ids', wp_json_encode( array( $license->id ) ) );
+				$item->save_meta_data();
+			} catch ( \Throwable $e ) {
+				++$failed;
+				\WPLM\Support\Logger::error( 'PlanCheckout: fulfilment failed for package ' . $pkg->id . ' with add-ons — ' . $e->getMessage() );
+				$order->add_order_note(
+					sprintf(
+						/* translators: 1: package name, 2: error message */
+						__( 'WPLM: a licence could not be issued for "%1$s" — %2$s. Fix the cause, then set the order to Completed again to retry.', 'wp-license-manager' ),
+						$pkg->name,
+						$e->getMessage()
+					)
+				);
+				return;
+			}
+		}
+		if ( '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) || $this->taken_back( $order, $item, (string) $item->get_meta( __( 'Add-ons', 'wp-license-manager' ) ) ) ) {
+			return;
+		}
+
+		try {
+			if ( null === $license ) {
+				throw new \RuntimeException( 'the licence issued for this line no longer exists' );
+			}
+			$snapshot = $this->extras_snapshot_for( $pkg, $json );
+			// Checked and written while no other order adds to the licence (another order's add-ons).
+			$this->addons()->with_licence_lock( $license, fn() => $this->write_licence_extras( $order, $item, $license, $snapshot, $json ) );
+		} catch ( \Throwable $e ) {
+			++$failed;
+			\WPLM\Support\Logger::error( 'PlanCheckout: add-ons failed for package ' . $pkg->id . ' (order item ' . $item->get_id() . ') — ' . $e->getMessage() );
+			$order->add_order_note(
+				sprintf(
+					$e instanceof AddonRefusal
+						/* translators: 1: package name, 2: error message */
+						? __( 'WPLM: the licence for "%1$s" was issued, but its add-ons could not be added — %2$s. A retry cannot add them: use Mark add-ons settled, and refund the add-ons\' part of this line if it is owed (that refund alone does not close the line).', 'wp-license-manager' )
+						/* translators: 1: package name, 2: error message */
+						: __( 'WPLM: the licence for "%1$s" was issued, but its add-ons could not be added — %2$s. Fix the cause, then set the order to Completed again: only the add-ons are added, no second key is issued.', 'wp-license-manager' ),
+					$pkg->name,
+					$e->getMessage()
+				)
+			);
+		}
+	}
+
+	/**
+	 * Write the extras of a licence bought with them, under the licence's add-ons lock
+	 * ({@see fulfill_with_extras()}). What an earlier attempt wrote but never recorded is adopted, never
+	 * redone. On a retry, the licence may have got a module they add since (another order, paid before
+	 * this one held it): then nothing is written — never billed twice — and the shop is asked to refund.
+	 *
+	 * @param \WC_Order              $order    The order.
+	 * @param \WC_Order_Item_Product $item     Its line.
+	 * @param License                $license  The licence issued for it.
+	 * @param array                  $snapshot The checked extras snapshot.
+	 * @param string                 $json     The `_wplm_extras` snapshot as stored.
+	 * @return void
+	 * @throws \RuntimeException When they cannot be added.
+	 */
+	private function write_licence_extras( \WC_Order $order, $item, License $license, array $snapshot, string $json ): void {
+		// Written by an earlier attempt that was cut off before recording them: recorded, never redone.
+		if ( null !== $this->addons()->adopt_unstamped_extras( $order, $item, $license, $json ) ) {
+			return;
+		}
+		$held = $this->addons()->new_licence_extras_problem( $license, $snapshot['items'] );
+		if ( null !== $held ) {
+			throw new AddonRefusal( $held );
+		}
+
+		// Recurring add-ons on a lifetime licence (v2): one add-ons-only subscription, created once
+		// (a retry reuses it through `_wplm_addons_subscription_id` while it can still bill them, else
+		// joins the licence's open one), its first period paid now — counted from when the add-ons are
+		// written.
+		$addons         = null;
+		$addons_through = null;
+		$joined         = false;
+		if ( null !== ( $snapshot['cycle'] ?? null ) ) {
+			$addons         = $this->licence_addons_subscription( $order, $item, $license, (string) $snapshot['cycle'] );
+			$joined         = 'pending' !== $addons->status; // Already billing: its period did not start now.
+			$addons         = $this->addons()->open_addons_period( $addons );
+			$addons_through = $this->addons()->addons_paid_through( $addons );
+		}
+
+		$sub_id  = (int) $item->get_meta( '_wplm_subscription_id' );
+		$sub     = $sub_id > 0 ? $this->subscriptions->get( $sub_id ) : null;
+		$through = null;
+		if ( $sub_id > 0 ) {
+			if ( null === $sub ) {
+				throw new \RuntimeException( 'the subscription issued for this line no longer exists' );
+			}
+			// The extras are paid through the same day as the licence type's lines.
+			foreach ( $this->entitlements->lines( $license->id ) as $line ) {
+				if ( 'plan' === $line->source && $sub->id === $line->subscription_id && null !== $line->paid_through
+					&& ( null === $through || strcmp( $line->paid_through, $through ) > 0 ) ) {
+					$through = $line->paid_through;
+				}
+			}
+			if ( null === $through ) {
+				throw new \RuntimeException( 'the licence has no paid-through day to align the add-ons with' );
+			}
+		}
+		$this->addons()->apply_extras( $order, $item, $license, $snapshot['items'], $sub, $through, null, $addons, $addons_through );
+		if ( $joined ) {
+			$order->add_order_note(
+				sprintf(
+					/* translators: 1: subscription id, 2: paid-through day */
+					__( 'WPLM: these add-ons joined the licence\'s add-ons subscription #%1$d, which was already billing: they are paid through %2$s and renew with it. They were paid for a full period: refund the difference by hand if that was not intended.', 'wp-license-manager' ),
+					$addons->id,
+					(string) $addons_through
+				)
+			);
+		}
+	}
+
+	/**
+	 * The add-ons-only subscription a lifetime licence's recurring extras join on fulfilment: the one
+	 * this line opened, while it can still bill them; else the licence's open one — billed on the same
+	 * cycle and able to take them ({@see AddonService::addons_join_problem()}) — so a licence never has
+	 * two; else a new one. Recorded on the line (`_wplm_addons_subscription_id`).
+	 *
+	 * @param \WC_Order              $order   The order.
+	 * @param \WC_Order_Item_Product $item    Its line.
+	 * @param License                $license The lifetime licence.
+	 * @param string                 $cycle   `month` or `year`.
+	 * @return Subscription
+	 * @throws \RuntimeException When its open one cannot take them.
+	 */
+	private function licence_addons_subscription( \WC_Order $order, $item, License $license, string $cycle ): Subscription {
+		$addons = $this->addons()->reusable_addons_subscription( (int) $item->get_meta( '_wplm_addons_subscription_id' ) );
+		if ( null !== $addons ) {
+			return $addons;
+		}
+		$addons = $this->addons()->addons_subscription( $license );
+		if ( null !== $addons ) {
+			if ( $cycle !== $addons->billing_period || 1 !== (int) $addons->billing_interval ) {
+				throw new AddonRefusal(
+					/* translators: 1: subscription id, 2: cycle */
+					sprintf( __( 'the licence\'s add-ons are billed on subscription #%1$d every %2$s; these were priced otherwise. Nothing was added', 'wp-license-manager' ), $addons->id, $addons->billing_period )
+				);
+			}
+			$problem = $this->addons()->addons_join_problem( $license );
+			if ( null !== $problem ) {
+				throw new \RuntimeException( $problem->get_error_message() );
+			}
+		} else {
+			$addons = $this->addons()->create_addons_subscription( $license, $order, $cycle );
+		}
+		$item->update_meta_data( '_wplm_addons_subscription_id', $addons->id );
+		$item->save_meta_data();
+		return $addons;
+	}
+
+	/**
+	 * Add the package extras of an add-on line to the licence it was bought for.
+	 *
+	 * @param \WC_Order              $order  The order.
+	 * @param \WC_Order_Item_Product $item   Its line.
+	 * @param int                    $failed Failures (incremented).
+	 * @return array{license: License, lines: \WPLM\Models\Entitlement[], item_id: int}|null Null when done earlier or failed.
+	 */
+	private function fulfill_existing_extras( \WC_Order $order, $item, int &$failed ): ?array {
+		if ( '' !== (string) $item->get_meta( '_wplm_entitlement_ids' ) ) {
+			return null; // Added on an earlier attempt.
+		}
+		if ( $this->taken_back( $order, $item, (string) $item->get_meta( __( 'Add-ons', 'wp-license-manager' ) ) ) ) {
+			return null; // Refunded since.
+		}
+		try {
+			$plan = $this->plans->get( (int) $item->get_meta( '_wplm_plan_id' ) );
+			if ( null === $plan || ! $plan->is_addon() ) {
+				throw new \RuntimeException( 'the add-on plan it was bought from no longer exists' );
+			}
+			$target = $this->licenses->get_by_id( (int) $item->get_meta( '_wplm_addon_license_id' ) );
+			if ( null === $target ) {
+				throw new \RuntimeException( 'the licence it was bought for no longer exists' );
+			}
+			return array(
+				'license' => $target,
+				'lines'   => $this->addons()->apply_extras_to_licence( $order, $item, $target, $plan, (string) $item->get_meta( '_wplm_extras' ) ),
+				'item_id' => $item->get_id(),
+			);
+		} catch ( \Throwable $e ) {
+			++$failed;
+			\WPLM\Support\Logger::error( 'PlanCheckout: add-ons failed for order item ' . $item->get_id() . ' — ' . $e->getMessage() );
+			$order->add_order_note(
+				sprintf(
+					$e instanceof AddonRefusal
+						/* translators: 1: what was bought, 2: error message */
+						? __( 'WPLM: the add-ons "%1$s" could not be added — %2$s. A retry cannot add them: refund this line, or use Mark add-ons settled.', 'wp-license-manager' )
+						/* translators: 1: what was bought, 2: error message */
+						: __( 'WPLM: the add-ons "%1$s" could not be added — %2$s. Fix the cause, then set the order to Completed again to retry.', 'wp-license-manager' ),
+					(string) $item->get_meta( __( 'Add-ons', 'wp-license-manager' ) ),
+					$e->getMessage()
+				)
+			);
+			return null;
+		}
+	}
+
+	/**
+	 * Whether an add-on line was taken back, so fulfilment adds nothing for it and counts it done: WPLM
+	 * reverted it (the order was refunded), the shop marked its add-ons settled
+	 * ({@see AddonSettlement}), or the shop refunded the line in full
+	 * ({@see AddonService::refunded_in_full()}) — the add-ons were never paid for. Never opens an add-ons
+	 * subscription for it. A refunded line passed over is noted on the order.
+	 *
+	 * @param \WC_Order              $order The order.
+	 * @param \WC_Order_Item_Product $item  Its line.
+	 * @param string                 $what  What the line adds, for the note.
+	 * @return bool
+	 */
+	private function taken_back( \WC_Order $order, $item, string $what ): bool {
+		if ( $item instanceof \WC_Order_Item && AddonService::released( $item ) ) {
+			return true;
+		}
+		if ( ! $item instanceof \WC_Order_Item_Product || ! AddonService::refunded_in_full( $order, $item ) ) {
+			return false;
+		}
+		$order->add_order_note(
+			sprintf(
+				/* translators: %s: what the line adds */
+				__( 'WPLM: "%s" was refunded in full, so it was not added. Nothing is billed for it.', 'wp-license-manager' ),
+				'' !== $what ? $what : $item->get_name()
+			)
+		);
+		return true;
+	}
+
+	/**
+	 * A new-purchase line's extras snapshot, checked against its licence type: the plan's profile, the
+	 * package billed the way the extras were priced (and with no trial), every line valid.
+	 *
+	 * @param Package $pkg  The licence type.
+	 * @param string  $json The `_wplm_extras` snapshot.
+	 * @return array The snapshot.
+	 * @throws \RuntimeException When it cannot be fulfilled as it is.
+	 */
+	private function extras_snapshot_for( Package $pkg, string $json ): array {
+		$plan    = $this->plans->get( $pkg->plan_id );
+		$profile = null !== $plan && null !== $plan->profile ? $this->profiles->get( $plan->profile ) : null;
+		if ( null === $profile ) {
+			throw new \RuntimeException( 'the plan sells no licence profile, so it takes no add-ons' );
+		}
+		$snapshot = $this->extras()->read_snapshot( $json, $pkg->trial_days > 0 ? null : $pkg->billing_key(), $profile );
+		if ( PackageExtrasService::FLOW_NEW !== ( $snapshot['flow'] ?? '' ) ) {
+			throw new \RuntimeException( 'the add-ons on this line were not sold with a new licence' );
+		}
+		return $snapshot;
+	}
+
+	/**
+	 * `woocommerce_order_partially_refunded`: a partial refund of an order with package extras changes
+	 * no licence line (WPLM cannot tell which extra a part refund was for). The note tells the shop.
+	 * A line refunded in full and not added yet is never added; an add-ons subscription it opened and
+	 * never billed ends with it ({@see AddonService::end_refunded_lines_addons_subscriptions()}).
+	 *
+	 * @param int $order_id  Order id.
+	 * @param int $refund_id Refund id.
+	 * @return void
+	 */
+	public function note_partial_refund( $order_id, $refund_id = 0 ): void {
+		unset( $refund_id );
+		$order = wc_get_order( (int) $order_id );
+		if ( ! $order instanceof \WC_Order ) {
+			return;
+		}
+		$this->addons()->end_refunded_lines_addons_subscriptions( $order );
+		foreach ( $order->get_items() as $item ) {
+			if ( '' !== (string) $item->get_meta( '_wplm_extras' ) ) {
+				$order->add_order_note( __( 'WPLM: partial refund — the licence and its add-on lines are unchanged. If an add-on should go, remove its line on the licence screen (its billing goes with it).', 'wp-license-manager' ) );
+				return;
+			}
+		}
+	}
+
+	/**
+	 * `woocommerce_order_status_cancelled` and `woocommerce_trash_order`: an add-ons subscription the
+	 * order opened and never billed ends ({@see AddonService::end_abandoned_addons_subscriptions()}).
+	 * Nothing the order added is taken back.
+	 *
+	 * @param int $order_id Order id.
+	 * @return void
+	 */
+	public function end_abandoned_addons( $order_id ): void {
+		$order = wc_get_order( (int) $order_id );
+		if ( $order instanceof \WC_Order ) {
+			$this->addons()->end_abandoned_addons_subscriptions( $order );
+		}
+	}
+
+	/**
+	 * `wp_trash_post`: an order trashed from the orders list on posts storage, which never fires
+	 * `woocommerce_trash_order` ({@see end_abandoned_addons()}).
+	 *
+	 * @param int $post_id Post id.
+	 * @return void
+	 */
+	public function end_trashed_order_addons( $post_id ): void {
+		if ( 'shop_order' === get_post_type( (int) $post_id ) ) {
+			$this->end_abandoned_addons( (int) $post_id );
+		}
+	}
+
+	/**
 	 * `woocommerce_order_status_refunded`: take back what the order's add-ons added.
 	 *
 	 * @param int $order_id Order id.
@@ -798,9 +2241,10 @@ class PlanCheckout {
 	 * @param \WC_Order              $order Order.
 	 * @param \WC_Order_Item_Product $item  Line item.
 	 * @param Package                $pkg   Chosen package.
+	 * @param array|null             $dynamic_spec What the customer chose, for a package built at purchase.
 	 * @return \WPLM\Models\License|null
 	 */
-	private function fulfill_item( \WC_Order $order, $item, Package $pkg ) {
+	private function fulfill_item( \WC_Order $order, $item, Package $pkg, ?array $dynamic_spec = null ) {
 		$generator_id = $pkg->generator_id ?: (int) get_option( 'wplm_default_generator_id', 0 );
 		if ( $generator_id <= 0 ) {
 			throw new \RuntimeException( 'no key generator is configured (WPLM → Generators)' );
@@ -870,11 +2314,14 @@ class PlanCheckout {
 						array(
 							'product_id'   => $item->get_product_id(),
 							'variation_id' => $item->get_variation_id() ?: null,
-							'quantity'     => (int) $item->get_quantity(),
+							'quantity'     => null !== $dynamic_spec ? 1 : (int) $item->get_quantity(),
 							'line_total'   => $pkg->price,
-							'meta'         => array(
-								'package_id'    => $pkg->id,
-								'order_item_id' => $item->get_id(),
+							'meta'         => array_merge(
+								array(
+									'package_id'    => $pkg->id,
+									'order_item_id' => $item->get_id(),
+								),
+								null !== $dynamic_spec ? array( 'dynamic_spec' => $dynamic_spec ) : array()
 							),
 						),
 					),
@@ -926,6 +2373,260 @@ class PlanCheckout {
 		}
 
 		return $license;
+	}
+
+	// -------------------------------------------------------------------------
+	// Packages built at purchase (dynamic plans)
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Build and check the package for a customer's choice on a dynamic plan.
+	 *
+	 * The package comes from the filter `wplm_dynamic_package( null|Package|\WP_Error $package,
+	 * array $spec, Plan $plan, \WC_Product $product )`: return a Package (its `plan_id` the plan's),
+	 * or a WP_Error whose message the customer sees. WPLM then holds it to what a dynamic package may
+	 * be, whatever the filter returned:
+	 *
+	 * - billed `recurring` (every 1 month or every 1 year) or `lifetime`;
+	 * - a finite price of 0 or more, rounded to the shop's decimals;
+	 * - an entitlement template valid for the plan's licence profile, with at least one line;
+	 * - no sign-up fee, trial, length or "valid for" days; id 0; status active;
+	 * - computers per licence key: the filter's if it is 1 or more, else 1.
+	 *
+	 * @param array       $spec    What the customer chose (sanitised `wplm_dynamic[...]`).
+	 * @param Plan        $plan    The dynamic plan.
+	 * @param \WC_Product $product The product it is bought through.
+	 * @return Package|\WP_Error
+	 */
+	public function dynamic_package( array $spec, Plan $plan, \WC_Product $product ) {
+		$unavailable = new \WP_Error( 'wplm_dynamic_unavailable', __( 'This plan cannot be bought right now. Please contact us.', 'wp-license-manager' ) );
+		if ( ! $plan->is_dynamic() || null === $plan->profile ) {
+			return $unavailable;
+		}
+		$profile = $this->profiles->get( $plan->profile );
+		if ( null === $profile ) {
+			return $unavailable;
+		}
+
+		/**
+		 * Build the package a customer chose on a dynamic plan (see PlanCheckout::dynamic_package()).
+		 *
+		 * @param null|Package|\WP_Error $package Null until a plugin builds it.
+		 * @param array                  $spec    What the customer chose.
+		 * @param Plan                   $plan    The dynamic plan.
+		 * @param \WC_Product            $product The product.
+		 */
+		$built = apply_filters( 'wplm_dynamic_package', null, $spec, $plan, $product );
+		if ( is_wp_error( $built ) ) {
+			return $built;
+		}
+		if ( ! $built instanceof Package || (int) $built->plan_id !== (int) $plan->id ) {
+			\WPLM\Support\Logger::error( 'PlanCheckout: wplm_dynamic_package returned no package for plan ' . $plan->id . '.' );
+			return $unavailable;
+		}
+
+		$pkg = clone $built;
+		if ( Package::TYPE_RECURRING === $pkg->billing_type ) {
+			if ( ! in_array( $pkg->billing_period, array( 'month', 'year' ), true ) || 1 !== (int) $pkg->billing_interval ) {
+				\WPLM\Support\Logger::error( 'PlanCheckout: a dynamic package must bill every 1 month or every 1 year (plan ' . $plan->id . ').' );
+				return $unavailable;
+			}
+		} elseif ( Package::TYPE_LIFETIME !== $pkg->billing_type ) {
+			\WPLM\Support\Logger::error( 'PlanCheckout: a dynamic package must be recurring or lifetime (plan ' . $plan->id . ').' );
+			return $unavailable;
+		}
+		if ( ! is_finite( $pkg->price ) || $pkg->price < 0 ) {
+			\WPLM\Support\Logger::error( 'PlanCheckout: a dynamic package needs a price of 0 or more (plan ' . $plan->id . ').' );
+			return $unavailable;
+		}
+		$decimals   = function_exists( 'wc_get_price_decimals' ) ? (int) wc_get_price_decimals() : 2;
+		$pkg->price = round( $pkg->price, max( 0, $decimals ) );
+
+		try {
+			$pkg->entitlements = $this->entitlements->normalize_template( $profile, (array) $pkg->entitlements );
+		} catch ( \InvalidArgumentException $e ) {
+			\WPLM\Support\Logger::error( 'PlanCheckout: a dynamic package has an invalid template (plan ' . $plan->id . ') — ' . $e->getMessage() );
+			return $unavailable;
+		}
+		if ( array() === $pkg->entitlements ) {
+			return $unavailable;
+		}
+
+		$pkg->id               = 0;
+		$pkg->plan_id          = (int) $plan->id;
+		$pkg->name             = '' !== trim( $pkg->name ) ? sanitize_text_field( $pkg->name ) : $plan->name;
+		$pkg->billing_interval = 1;
+		if ( ! $pkg->is_recurring() ) {
+			$pkg->billing_period = 'month';
+		}
+		$pkg->signup_fee      = 0.0;
+		$pkg->trial_days      = 0;
+		$pkg->length_cycles   = 0;
+		$pkg->valid_for_days  = null;
+		$pkg->max_activations = null !== $pkg->max_activations && $pkg->max_activations >= 1 ? (int) $pkg->max_activations : 1;
+		$pkg->generator_id    = null !== $pkg->generator_id && $pkg->generator_id > 0 ? (int) $pkg->generator_id : null;
+		$pkg->benefits        = array_values( array_filter( array_map( 'strval', (array) $pkg->benefits ) ) );
+		$pkg->status          = 1;
+		return $pkg;
+	}
+
+	/**
+	 * `woocommerce_is_sold_individually`: a product whose package is built at purchase is bought one
+	 * per line (each line is one licence), so WooCommerce shows no quantity box for it.
+	 *
+	 * @param bool        $individually Current value.
+	 * @param \WC_Product $product      Product.
+	 * @return bool
+	 */
+	public function dynamic_sold_individually( $individually, $product = null ) {
+		return $product instanceof \WC_Product && $this->is_dynamic_product( $product ) ? true : $individually;
+	}
+
+	/**
+	 * `woocommerce_add_to_cart_quantity`: one of a built package per cart line.
+	 *
+	 * @param int $quantity   Requested quantity.
+	 * @param int $product_id Product id.
+	 * @return int
+	 */
+	public function dynamic_quantity( $quantity, $product_id = 0 ) {
+		$product = $product_id ? wc_get_product( $product_id ) : null;
+		return $product instanceof \WC_Product && $this->is_dynamic_product( $product ) ? 1 : $quantity;
+	}
+
+	/**
+	 * `woocommerce_check_cart_items`: rebuild every built package in the cart. One that can no longer
+	 * be built (the price list changed, a rule now refuses it) stops the checkout with the reason.
+	 *
+	 * @return void
+	 */
+	public function check_cart_dynamic(): void {
+		if ( ! function_exists( 'WC' ) || null === WC()->cart ) {
+			return;
+		}
+		foreach ( WC()->cart->get_cart() as $cart_item ) {
+			if ( ! isset( $cart_item['wplm_dynamic_spec'] ) ) {
+				continue;
+			}
+			$built = $this->dynamic_package_for_cart_item( $cart_item );
+			if ( is_wp_error( $built ) ) {
+				$name = isset( $cart_item['data'] ) && $cart_item['data'] instanceof \WC_Product ? $cart_item['data']->get_name() : __( 'Your plan', 'wp-license-manager' );
+				/* translators: 1: product name, 2: reason */
+				wc_add_notice( sprintf( __( '%1$s: %2$s', 'wp-license-manager' ), $name, $built->get_error_message() ), 'error' );
+			}
+		}
+	}
+
+	/**
+	 * The package for a cart line holding a customer's choice, rebuilt now.
+	 *
+	 * @param array $cart_item Cart item.
+	 * @return Package|\WP_Error
+	 */
+	private function dynamic_package_for_cart_item( array $cart_item ) {
+		$product = $cart_item['data'] ?? null;
+		if ( ! $product instanceof \WC_Product ) {
+			$product = wc_get_product( (int) ( $cart_item['variation_id'] ?? 0 ) ?: (int) ( $cart_item['product_id'] ?? 0 ) );
+		}
+		$plan = $product instanceof \WC_Product ? $this->plan_for_product( $product ) : null;
+		if ( null === $plan || ! $plan->is_dynamic() ) {
+			return new \WP_Error( 'wplm_dynamic_unavailable', __( 'This plan cannot be bought right now. Please contact us.', 'wp-license-manager' ) );
+		}
+		$spec = is_array( $cart_item['wplm_dynamic_spec'] ?? null ) ? $cart_item['wplm_dynamic_spec'] : array();
+		return $this->dynamic_package( $spec, $plan, $product );
+	}
+
+	/**
+	 * Persist a built package on its order line: the plan, the customer's choice, and a snapshot of
+	 * the package (which fulfilment issues from). Never a package id: there is no stored package.
+	 *
+	 * @param \WC_Order_Item_Product $item   Order line item.
+	 * @param array                  $values Cart item values.
+	 * @return void
+	 * @throws \Exception When the package can no longer be built, which stops the checkout.
+	 */
+	private function save_dynamic_line_item( $item, array $values ): void {
+		$built = $this->dynamic_package_for_cart_item( $values );
+		if ( is_wp_error( $built ) ) {
+			throw new \Exception( esc_html( $built->get_error_message() ) );
+		}
+		$spec = is_array( $values['wplm_dynamic_spec'] ?? null ) ? $values['wplm_dynamic_spec'] : array();
+
+		$snapshot = $built->to_array();
+		/**
+		 * Extra keys for the snapshot of a built package kept on the order line (e.g. which version
+		 * of a price list priced it). The package's own fields always win over a returned key.
+		 *
+		 * @param array   $snapshot The package as an array.
+		 * @param Package $package  The package.
+		 * @param array   $spec     What the customer chose.
+		 */
+		$extra    = apply_filters( 'wplm_dynamic_package_snapshot', $snapshot, $built, $spec );
+		$snapshot = array_merge( is_array( $extra ) ? $extra : array(), $snapshot );
+
+		$item->set_quantity( 1 );
+		$item->add_meta_data( '_wplm_plan_id', (int) $built->plan_id, true );
+		$item->add_meta_data( '_wplm_dynamic_spec', wp_json_encode( $spec ), true );
+		$item->add_meta_data( '_wplm_dynamic_package', wp_json_encode( $snapshot ), true );
+		$item->add_meta_data( __( 'License Type', 'wp-license-manager' ), $built->name, true );
+	}
+
+	/**
+	 * The package an order line was sold, from its snapshot.
+	 *
+	 * @param string $json    The `_wplm_dynamic_package` meta.
+	 * @param int    $plan_id The line's `_wplm_plan_id`.
+	 * @return Package
+	 * @throws \RuntimeException When the snapshot is unreadable or belongs to another plan.
+	 */
+	private function package_from_snapshot( string $json, int $plan_id ): Package {
+		$row = json_decode( $json, true );
+		if ( ! is_array( $row ) ) {
+			throw new \RuntimeException( 'the package bought on this line is unreadable' );
+		}
+		$pkg = Package::from_row( $row );
+		if ( $plan_id <= 0 || $pkg->plan_id !== $plan_id ) {
+			throw new \RuntimeException( 'the package bought on this line does not belong to its plan' );
+		}
+		if ( ! in_array( $pkg->billing_type, array( Package::TYPE_RECURRING, Package::TYPE_LIFETIME ), true ) ) {
+			throw new \RuntimeException( 'the package bought on this line has an unknown billing type' );
+		}
+		$pkg->id = 0;
+		return $pkg;
+	}
+
+	/**
+	 * What the customer chose on an order line (empty when it was not stored).
+	 *
+	 * @param \WC_Order_Item_Product $item Order line item.
+	 * @return array
+	 */
+	private function stored_dynamic_spec( $item ): array {
+		$spec = json_decode( (string) $item->get_meta( '_wplm_dynamic_spec' ), true );
+		return is_array( $spec ) ? $spec : array();
+	}
+
+	/**
+	 * The posted `wplm_dynamic[...]` choice, sanitised (text fields only).
+	 *
+	 * @return array
+	 */
+	private static function posted_dynamic_spec(): array {
+		// phpcs:disable WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- WC add-to-cart form, validated by WC; sanitised below.
+		$raw = isset( $_POST['wplm_dynamic'] ) ? wp_unslash( $_POST['wplm_dynamic'] ) : array();
+		// phpcs:enable WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+		return is_array( $raw ) ? map_deep( $raw, 'sanitize_text_field' ) : array();
+	}
+
+	/**
+	 * Whether a product sells a plan whose package is built at purchase.
+	 *
+	 * @param \WC_Product $product Product.
+	 * @return bool
+	 */
+	private function is_dynamic_product( \WC_Product $product ): bool {
+		$plan = $this->plan_for_product( $product );
+		return null !== $plan && $plan->is_dynamic();
 	}
 
 	// -------------------------------------------------------------------------

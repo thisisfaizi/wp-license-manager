@@ -6,6 +6,556 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.3.0] — 2026-10-15
+
+### Added
+- **Package extras at purchase.** Beside a licence type the customer can tick **extras**: modules and
+  extra quantities (users, seats, phones…). The result is one key and one bill. A recurring licence gets
+  one subscription that bills the base and every extra, and each renewal bills base + extras and extends
+  every line. A lifetime licence is one payment. WP License Manager stays product-agnostic: a plugin for
+  the licence profile prices the extras through the hooks below.
+- **`Package::billing_key()`** returns how a package is priced for extras:
+  - `month`: recurring, every 1 month.
+  - `year`: recurring, every 1 year.
+  - `lifetime`.
+  - `null` for anything else (one-time, other intervals).
+
+  A package with a **trial is offered no extras** at purchase: the filter is not even called.
+- **Hooks:**
+  - `apply_filters( 'wplm_package_extras', array(), array $ctx )` returns the offers for a context.
+    - `$ctx` always has `profile`, `plan`, `billing`, `flow` (`new` | `existing`), `package`, `license`
+      and `held_modules`.
+    - Each offer has `id`, `label`, `group`, `unit_price`, `max_qty`, `lines` (per unit), and optionally
+      `requires` (any-of groups of module codes, every group to be met), `term_days` and `description`.
+  - `apply_filters( 'wplm_package_extras_snapshot', array $snapshot, array $ctx )` adds keys to the
+    order-line snapshot (for example a price-list version). Unknown keys are kept; WPLM's own
+    (`billing`, `flow`, `items`) always win.
+  - `do_action( 'wplm_package_extras_form', array $data )` prints the form after the licence-type radios.
+    - `$data` holds `plan`, `flow`, `offers_by_package`, `offers_by_license`, `base_prices` (each
+      package's first payment, sign-up fee included) and `currency`.
+    - With nothing hooked, WPLM prints a plain, accessible fallback: a checkbox or number input per
+      offer, shown for the selected licence type or licence. The other groups are `disabled`, so their
+      same-named fields never post.
+- **What WPLM holds an offer to, whatever the filter returns** (`PackageExtrasService::offers()`):
+  - **Dropped:**
+    - a bad or repeated id (`[a-z0-9:_-]`);
+    - a price that is not a finite number of 0 or more;
+    - `max_qty` below 1;
+    - lines the profile does not allow;
+    - a `term` offer without `term_days`;
+    - a module offer for a module already held. A term offer is never "held", so packs stack.
+  - **Rounded:** prices to the shop's decimals.
+  - **Bought once:** a module-only or term offer (`max_qty` forced to 1).
+  - **Refused choices** (`PackageExtrasService::choose()`), with a message the customer sees:
+    - an id that is not offered (a held module says so);
+    - a quantity below 0 or above `max_qty`;
+    - a requirement that is not met. Requirements are the profile's `requires` plus the offer's own,
+      checked against the held modules and the modules ticked now. On an existing licence, any module
+    still live there (not read-only) also meets a requirement, as the add-on checks read it.
+- **The browser's price is never used.**
+  - The posted field is `wplm_extras[<offer id>] = <qty>`, and the cart keeps only that choice
+    (`wplm_extras`).
+  - The price is rebuilt from the filter on add to cart, on every cart total (`first payment of the
+    base + extras`), in the cart display, in `woocommerce_check_cart_items` (stops the checkout with
+    the reason) and when the order line is saved.
+  - A line with extras is forced to quantity 1.
+- **The order line keeps the sale:**
+  - `_wplm_extras` (JSON: `billing`, `flow`, `items` with id, label, qty, unit_price, amount, lines
+    already × qty, term_days). It also records what the sale was made against:
+    - a new licence: `base_price` and `base_signup_fee`. The subscription is created at that price,
+      so the renewal is exactly what the cart showed, even if the licence type's price changes before
+      the order is completed;
+    - an existing licence: `target_subscription_id` and `target_paid_through` (null for lifetime);
+  - `_wplm_extras_total`;
+  - a visible **"Add-ons"** entry ("Factory; 2 × Extra phone").
+- **Fulfilment writes from the snapshot only:**
+  - The snapshot is checked **before a key is generated**: its billing must still be the package's,
+    and every line valid for the profile.
+  - The licence is issued as before (`source = plan`). The extras are written with `source = addon`
+    and the order id.
+    - **Recurring:** extras are paid through the same day as the base and join the new subscription,
+      one item per extra (`addon`, `extra_id`, `entitlement_ids`). The recurring total is the sum of
+      the items.
+    - **Lifetime:** extras are undated.
+    - **Term** (`term_days`): a dated line that never joins a subscription.
+  - **Idempotent:** `_wplm_license_ids` marks the licence done and `_wplm_entitlement_ids` the extras;
+    `_wplm_plan_fulfilled` is set only when both are. A retry does only what is missing and never issues
+    a second key. An extras step that fails part-way removes every line it wrote.
+  - **One fulfilment at a time per order.** Two completions at once (a gateway callback and the return
+    page) could both see an unfulfilled line. Fulfilment now first claims the order with an atomic
+    insert of the option `wplm_fulfil_lock_{order id}`, reads the order again, and releases the claim
+    when done. A claim older than 5 minutes (a request that died) is taken over. A completion that finds
+    the order claimed does nothing, logs it, and leaves an order note saying to complete the order again
+    after 5 minutes if nothing appears. This covers every plan line, not only extras.
+- **Extras for an existing licence.** The add-ons product (plan kind `addon`) prices extras with the same
+  filter (`flow = existing`, the licence's billing). It needs **no stored packages**:
+  - The product is purchasable, and the licence picker and form render, when the filter offers something
+    for one of the customer's licences.
+  - The cart keeps `wplm_addon_license_id` + `wplm_extras`.
+  - Fulfilment checks the extras as one in-memory add-on (id 0, the add-on plan, the licence's billing),
+    so every add-on rule still applies (status, trial, overdue, base module, "already has",
+    requirements, `wplm_addon_eligibility`).
+  - **Checked again at completion, item by item.** An extra whose module the licence now holds for the
+    same term is refused, for example when two orders for the same module were both paid before either
+    was completed (placed before this check, or a gateway that reports a payment on its own). The line
+    fails with an order note and nothing is added, so the module is never added twice. Term items
+    (packs) are exempt: they stack.
+  - **A module a paid order not completed yet adds is held before payment.** Add to cart, checkout
+    and an order paid later refuse extras or a stored add-on whose module a paid order of the customer's
+    (on hold, processing, or completed with its add-ons still to be added) already adds to the licence:
+    "Your order #12, not completed yet, already adds Factory to your licence ending ABCD. Wait for it to
+    be completed, or ask us to cancel it" (an order on hold may be a bank transfer never paid, which the
+    customer cannot cancel; for a completed one: "… is still adding …, please contact us"). Both were
+    charged before, and the second was refused at completion for a refund by hand. An order not paid
+    yet holds nothing (the first one paid wins); a line already added, taken back or refunded in full
+    holds nothing. Not counted at completion: there the first order completed adds the module
+    (`AddonService::unfulfilled_addon_modules()`).
+  - **The same module twice in one cart** for one licence is refused when added, and again at checkout.
+  - **Aligned to the plan as it is at completion.** If the plan renewed between the sale and completion,
+    the extras cover through the new day, and an order note tells the shop (no proration is invented).
+    If the licence is billed on another subscription now, or is overdue, the line fails with an order
+    note.
+  - **Stored add-ons and extras on one plan:** the form adds a "None — only the add-ons ticked below"
+    choice, checked by default for a licence that is offered extras. Posting a stored add-on together
+    with extras is refused with a notice: one cart line is one or the other.
+  - Stored add-on packages (1.2.6) work exactly as before.
+  - **Plan editor:** an add-on plan may be saved with no add-on types. It then warns when no plugin
+    prices add-ons (`wplm_package_extras`). The plans list shows "Add-ons priced by a plugin", and the
+    product **Licensing** tab lists it as "Name (add-ons priced by a plugin)".
+
+- **Recurring add-ons on a lifetime licence.** An add-on with no lifetime price can still be sold to a
+  lifetime licence or licence type. The customer pays it monthly or yearly on a subscription that bills
+  **only add-ons**, while the licence itself stays lifetime.
+  - **Offer:** in a lifetime context only, the filter may return
+    `'recurring' => array( 'month' => ?float, 'year' => ?float )` (at least one set) with
+    `'unit_price' => null`. WPLM refuses such an offer in any other context, with a unit price as well,
+    with a negative price, with no price for either cycle, or as a term. Every sanitised offer carries
+    `recurring` (null for an ordinary one).
+  - **Cycle:** `wplm_extras_cycle` (`month` | `year`) is posted and kept in the cart. There is one cycle
+    per cart line. The default is monthly, unless a ticked recurring add-on has no monthly price; then
+    it is yearly. A ticked add-on with no price for the chosen cycle is refused.
+  - **Forced cycle:** a licence that already has an add-ons subscription is forced to that
+    subscription's cycle, whatever is posted. New recurring add-ons join it, aligned with its
+    paid-through day, and are paid in full now.
+  - **Today's price** = lifetime base (new purchase only) + lifetime add-ons + one cycle of each
+    recurring add-on.
+  - **Form data** gains `cycle_by_license` (licence id → the forced `month`/`year`, or null when the
+    customer chooses). The fallback form shows a Monthly / Yearly choice when a recurring offer is
+    listed.
+  - **Snapshot** gains `cycle` on the line and on each item. An item's cycle is null for lifetime and
+    term items. Its `unit_price` is the price charged for that cycle. An existing-licence sale also
+    records `addons_subscription_id` and `addons_paid_through`.
+  - **Fulfilment** creates one add-ons-only subscription, or reuses the licence's open one:
+    - billed every 1 cycle, one item per recurring add-on (`addon`, `addons_only`, `entitlement_ids`);
+    - `recurring_total` is the sum of its items;
+    - the first period is paid now, so its lines are paid through today + 1 cycle;
+    - the lines have `source = addon` and the subscription's id.
+    - It stays pending until its first line is written, and a retry reuses it
+      (`_wplm_addons_subscription_id` on the order line). A changed, on-hold or overdue add-ons
+      subscription fails the line with a note; a renewal since the sale is noted.
+  - **Renewals** of the add-ons subscription charge only its items and extend only its lines.
+  - **Safety:** an add-ons-only subscription is marked by the new column
+    `wplm_subscriptions.addons_license_id` and is **never bound through `license_id`**. Every path that
+    moves a licence because of a subscription checks for it explicitly and leaves the licence alone:
+    - status sync (`SubscriptionService::update_status`, which also covers pause, resume, cancel, REST,
+      My Account and the admin screen);
+    - renewal extension (`RenewalProcessor::apply_payment`);
+    - the seat change on a plan switch;
+    - `bind_license()`, which refuses to bind it.
+    On hold, cancelled, expired, failed or refunded: only its own lines lapse, after their paid-through
+    day plus grace.
+  - **Refunds:** a full refund of the order that bought the licence still suspends or revokes the
+    licence, and now also cancels its add-ons subscription. A refund of an order that added to an
+    existing licence removes only its own add-ons, even when that order opened the add-ons subscription
+    and later orders joined it; the subscription is cancelled only when nothing is left on it. The
+    licence is untouched either way.
+  - **Emails:** the cancelled, expired and payment-failed emails for an add-ons subscription say the
+    lifetime licence keeps working and only those add-ons stop. Webhooks for it are `subscription.*`
+    only: no `license.*` event is ever derived from it.
+  - **Labels:** "Add-ons for licence ending ABCD" appears in the admin subscription list and screen and
+    in My Account. The licence's admin panel lists its add-ons subscriptions under its own lifetime
+    status.
+- **Tax.** Extras are part of the same order line as the licence type, so they follow the product's tax
+  class and the shop's "prices entered with tax" setting exactly like the base, at checkout and on
+  renewal invoices (which bill the subscription's recurring total on the same product).
+- **Partial refunds** change no licence line: WPLM cannot tell which extra a part refund was for. An
+  order with extras gets a note saying so. To take an extra back, remove its line on the licence screen;
+  its billing goes with it. A full refund works as described under "Changed".
+
+- **Mark add-ons settled** (the WooCommerce order screen, posts storage and HPOS alike). An add-on line
+  refused at fulfilment for good used to stay open forever: the order was never marked fulfilled, the
+  line kept holding its modules and its monthly / yearly cycle against the customer's next purchase
+  ("Your order #N is still adding …, please contact us"), and a partial refund did not release it. Now:
+  - a line whose add-ons are still to be added on a **completed** order (package extras or a stored
+    add-on for a licence the customer already had, or the extras of a licence bought with them once
+    that licence is issued) gets a **Mark add-ons settled** tick in the order's items, and the order a
+    **Mark add-ons settled** order action with an optional note. Needs `manage_woocommerce` and the
+    form's nonce.
+  - Settling stamps the line `_wplm_addon_settled` (JSON: `by` user id, `at` UTC, `note`) and adds an
+    order note ("add-ons on line "X" marked settled by Y: note"). It writes and removes no line and
+    moves no money.
+  - A settled line no longer holds its modules or its add-ons cycle anywhere (product page, add to cart,
+    checkout, order-pay, the Store API) and is never added later, however often the order is completed
+    again (`AddonService::released()`). Once every line of the order is done, the order is marked
+    fulfilled (`_wplm_plan_fulfilled`).
+  - What settling leaves as it is, the order note names: add-on lines an earlier attempt of the order
+    left on the licence without recording them (not another line's, which a retry records) stay there ("remove
+    them on the licence screen if they should go"), and still count as the settled line's, so a sibling
+    line of the order is written as usual on the next completion.
+  - **Settling cancels the add-ons subscription the line opened (or joined) when it never billed** —
+    add-ons-only, still pending, no items and no lines (`AddonService::end_unbilled_addons_subscription()`,
+    as a full refund does). It is cancelled, never deleted, and the note says "Its add-ons subscription
+    #N never billed and was cancelled". Left pending it kept the licence's monthly / yearly add-ons on its
+    cycle for good, so the customer could never buy yearly. One that has billed, or that holds another
+    order's lines, is left as it is (and the note keeps its usual wording). Another order sold against
+    the cancelled one is billed on a new add-ons subscription when it is completed, as after a refund.
+  - A line whose add-ons are on the licence already — an attempt wrote exactly what it adds and was cut
+    off before recording them — is never settled (no tick, no action): completing the order again
+    records them (`AddonService::retry_records()`), and they are billed.
+  - Settling twice changes nothing and adds no second note. It claims the order's fulfilment lock, so
+    it never races a completion.
+- **Undo settled add-ons** (the same order screen, posts storage and HPOS). A settled line gets an
+  **Undo settled add-ons** tick, and the order an **Undo settled add-ons** order action with an optional
+  note — the same rules as settling: `manage_woocommerce`, its own nonce (`wplm_unsettle_addons_<id>`)
+  and the order's fulfilment lock.
+  - Undo moves the stamp into `_wplm_addon_settled_history` (a JSON list of `settled` — the stamp —,
+    `undone_by`, `undone_at` UTC and `note`) and deletes `_wplm_addon_settled`, so the line holds its
+    modules and add-ons cycle again. The order's fulfilled mark (`_wplm_plan_fulfilled`) goes when a
+    line of the order is left to do, and the order note says "settled add-ons on line "X" reopened by Y
+    — set the order to Completed again to add them".
+  - It writes no line and brings back no add-ons subscription settling cancelled. Completing the order
+    again runs the usual checks: the line may join or open an add-ons subscription, or be refused again
+    with the usual note (and then be settled again).
+  - Undoing a line that is not settled does nothing (no note, no history entry).
+- **A refunded renewal takes its period back.** Until now a full refund of a monthly / yearly renewal
+  order changed nothing: the customer kept the month they got their money back for.
+  - **At payment** (`RenewalProcessor::apply_payment()`, shared by paid renewal invoices and the cron's
+    card charge), an order carrying the payment gets `_wplm_renewal_snapshot` (JSON), written before
+    anything moves and completed after: `subscription_id`, the billing `interval` and `period`,
+    `before` / `after` (`next_payment`, `last_payment`, `status`, `failed_attempts`), `lines` (line id
+    => `from` / `to` paid-through dates, from `EntitlementService::extend_subscription_lines()`'s new
+    optional `&$moved` collector), a classic licence's `license` (`id`, `from` / `to` expiry) and the
+    `renewal_id` row. The order is stamped `_wplm_renewal_applied` (the card path too).
+  - **Card renewal orders are renewal orders.** The order a gateway module builds for a cron card charge
+    (`wplm_create_renewal_order`) is now stamped like a renewal invoice (`_wplm_is_renewal`,
+    `_wplm_subscription_id`, `_wplm_renewal_term_days`, `_wplm_renewal_cycle`;
+    `RenewalProcessor::stamp_renewal_order()`, shared with `SelfServiceRenewal`), with
+    `_wplm_renewal_applied` in the same save. Completing it again after a refund applies it again,
+    exactly once; completing it twice without a refund extends once. Card orders made before this
+    change carry no flag and still roll back from their snapshot.
+  - **On a full refund** (`woocommerce_order_status_refunded`, priority 10 — before the add-ons'
+    listeners at 20), `RenewalProcessor::roll_back()` takes back what that renewal moved: each line's
+    paid-through date (`EntitlementService::roll_back_line()` / `taken_back()`), the subscription's next
+    payment and a classic licence's expiry (`LicenseService::roll_back_term()` / `expiry_taken_back()`,
+    through `update()`, so the offline token is re-signed). Only for orders with `_wplm_is_renewal` or
+    a snapshot, `_wplm_renewal_applied`, and no `_wplm_renewal_rolled_back`.
+    - Still where the renewal left it → back to where it was, exactly.
+    - Moved further by later renewals that each continued from the old end → back by exactly one
+      billing period, counted in calendar periods (a month as a month). Never by the days a renewal paid
+      after grace skipped: refunding a renewal that started afresh after a lapse, under a later one,
+      takes back one month, not the lapse with it.
+    - Moved by a later renewal that started afresh after this period had ended → left as it is: the
+      refunded period is over, and the later payment owes nothing to it. The note says so.
+    - A line removed since, or already earlier (moved by hand), is left as it is.
+    - **Refunds in any order.** Rolling back a renewal that is not the latest also moves back the
+      snapshots of the renewals paid after it (each keeps a `rebased` record: `order`, `at`), so
+      refunding one of them later still takes back exactly its own period. Refunding two renewals
+      oldest first takes both periods back.
+  - **One at a time.** A rollback holds the claim `wplm_renewal_lock_{subscription id}`, reads the order
+    again inside it, and stamps it `_wplm_renewal_rolled_back` (`at`, `by`, dropping
+    `_wplm_renewal_applied`) before anything moves, so an overlapping refund (an admin and a gateway
+    webhook) or a listener re-entering finds it done and moves nothing more. A refund that finds the
+    claim held moves nothing and says how to retry (Completed, then Refunded again: completing a renewal
+    still marked applied extends nothing).
+  - **A dated add-on that joined after the renewal is kept.** Only the lines in the renewal's snapshot
+    move back, and the subscription's next payment follows them alone. An add-on bought after the
+    renewal (co-termed with the renewed period) keeps the period it was bought for; the note says
+    "Kept: Factory, added by order #N (paid through D)". `wplm_entitlement_saved( $line, 'rolled_back' )`
+    fires only for the lines that moved. Every line in the snapshot moves back, whatever order added it:
+    an add-on bought while the renewal's invoice was still unpaid (Renew now, early) has a later order
+    id, yet paying the invoice extended it, so the refund takes it back with the rest and the next
+    renewal charges for it. A renewal paid before snapshots keeps a line only when a later order added
+    it at or after the moment the renewal was paid (the order's paid date, else its completed date).
+  - **Completed again after a refund, a renewal extends only what it extended the first time** (its
+    earlier snapshot): an add-on that joined meanwhile keeps the period its own order paid for, and the
+    next renewal charges for it with the rest.
+  - **Known limitation:** an add-on bought while a renewal invoice is unpaid is not on that
+    invoice, yet paying the invoice extends it with the rest (one period not charged). A refund of the
+    invoice takes it back.
+  - **Skipped once at the next renewal** (`RenewalProcessor::items_paid_ahead()`). An add-on item whose
+    lines already reach the date the next renewal gives the subscription's lines
+    (`EntitlementService::renewal_target()`) is not charged that time and its lines are not extended:
+    the card is charged the rest (the renewal row records it), the invoice leaves the item out, and the
+    order (or, for a card charge without an order, the subscription) says "Factory not charged this
+    time — already paid through D". The lines are in step again, and the renewal after that bills
+    everything together. An invoice records what it left out (`_wplm_renewal_skipped`), and paying it
+    extends exactly that, however late. The plan's own item, adjustments and lines no item names are
+    always charged; nothing is skipped when it would leave nothing to charge; the subscription's items
+    and recurring total never change. `EntitlementService::extend_subscription_lines()` takes the lines
+    to leave as a new optional `$skip` argument. The `wplm_create_renewal_order` filter now gets the
+    amount to bill as a third argument (`apply_filters( 'wplm_create_renewal_order', 0, $sub, $amount )`):
+    a gateway module that builds the order a card charge is recorded on should bill it at that amount
+    (WPLM notes the order when its total differs from what was charged); an invoice a module builds
+    leaves the paid-ahead add-ons out only when it is billed at that amount.
+  - When the renewal that skipped an add-on is itself refunded, the add-on is left as it is (that
+    renewal did not pay for it); the note says "Kept: Factory (paid through D) — not charged by this
+    renewal, so not taken back".
+  - **Nothing moved, not stamped** — the order note asks for a check by hand — when applying the
+    renewal was cut off part-way.
+  - The subscription is read again before it is written, and its last payment and failed attempts come
+    back only when no later renewal was paid, counting one paid while the rollback ran. A plan switch
+    since is not a payment (it pays no period and moves no date), so it does not stop them.
+    Then its next payment comes back exactly; otherwise it follows the dates as a payment sets it (the
+    start of the day after the latest of the renewal's own lines, or a classic licence's expiry). When it
+    was the latest renewal and a classic licence now ends before
+    its grace is over, the licence is marked expired at once, as validation would. An add-ons-only
+    subscription moves only its own lines; the licence's status is never changed for it.
+  - The renewal and invoice rows become `refunded`, and the order note says "renewal refunded:
+    subscription #N now paid through X (was Y); next payment Z". Setting the order to Completed again
+    applies the payment again (a fresh snapshot), and a later full refund takes it back again.
+  - **Hooks:** `wplm_entitlement_saved( $line, 'rolled_back' )` per line, `wplm_license_term_extended(
+    $id, $earlier, $later )` with the earlier expiry, and the new `do_action(
+    'wplm_renewal_rolled_back', int $order_id, int $subscription_id, array $snapshot )`.
+  - A **partial refund** of a renewal changes nothing; the order note says "the renewal period is
+    unchanged; refund in full to take it back".
+  - A renewal **paid before 1.3.0** has no snapshot: it is shifted back one billing period from the
+    cycle it renewed (`_wplm_renewal_cycle`), only while the subscription's next payment is still what
+    that renewal produced. Otherwise the order is noted and nothing changes.
+  - **On hold after a refund.** Refunding the latest renewal puts an `active` or `trial` subscription
+    on hold (`SubscriptionService::update_status()`: the `subscription.paused` webhook; an add-ons-only
+    subscription never touches its licence). The cron neither charges a saved card nor invoices an
+    on-hold subscription, so nothing is billed again until the owner clicks Resume; otherwise the lines
+    lapse after grace as usual. Pending, pending-cancel, on-hold, cancelled and expired subscriptions are
+    left as they are, and refunding a renewal that is not the latest changes no status. The order and
+    subscription notes say "Renewal refunded — subscription put on hold; resume it to keep billing."
+    Completing the refunded order again makes the subscription active again.
+
+### Changed
+- **Subscription admin buttons go through `SubscriptionService`.** Pause, Resume and Cancel on the
+  subscription screen, the row Cancel and bulk Cancel used to write the status straight to the table,
+  skipping the webhooks, the cancellation email, the status hooks and the licence sync. They now call
+  `SubscriptionService::pause()` / `resume()` / `cancel()`, like the REST API and My Account. A button
+  the status no longer allows changes nothing and says so; a subscription already cancelled or expired
+  is not cancelled again (no second email or webhook). Bulk Cancel now checks the list's nonce
+  (`bulk-subscriptions`), so a crafted link cannot cancel subscriptions, and its notice counts only
+  the subscriptions it cancelled and names how many it could not.
+- `AddonService::apply()` now writes through one private line writer, shared with the new
+  `AddonService::apply_extras()` and `AddonService::apply_extras_to_licence()`. If it fails part-way,
+  it removes what it wrote through the service, which also detaches any subscription items.
+- **Plan switch with add-ons** (`SwitchManager::switch_plan()`). Add-on items (stored add-ons and
+  extras) are carried forward:
+  - **`$new_plan['recurring_total']` now means the new plan's OWN price, without the add-ons, on a
+    subscription that has add-on items.** On a subscription without them it is still the whole
+    recurring charge. The price is set on the plan's item, and adjustments are dropped.
+  - An add-on the new plan already grants is not billed twice. Pass `package_id` (the licence type
+    switched to) or `modules` in `$new_plan` (the REST switch endpoint accepts both in its body). An add-on item whose lines are all modules the new plan
+    grants leaves the subscription. Its lines stay on the licence as plan lines (`source` plan, no
+    order) and renew with the plan, so a later refund of the original order no longer removes them.
+  - The recurring total is re-derived from the items.
+  - The proration charge is the new plan plus the add-ons.
+  - Switching to another period or interval while add-on items exist is refused
+    (`wplm_switch_addons_billing`), because the add-ons are priced per period.
+  - Without add-on items, a switch is unchanged.
+- **Refund note.** For a licence issued with extras, a full refund still suspends (or revokes) the
+  licence and removes its extras lines. The note now says so, instead of "the licence itself is
+  unchanged". An order that did both (a new licence with extras, and extras for a licence the customer
+  already had) gets one note for each. `revert()` removes only add-on lines.
+- The completed-order email no longer says a brand-new licence's extras were "added to your licence".
+- The classic checkout handler also skips lines with `_wplm_extras`.
+- `AddonService::eligible_targets()` entries carry `extras` (the offers for that licence).
+  `AddonService::blocked_targets()` accepts the eligible targets the caller already has, and the
+  product page computes both once per request.
+
+### Fixed (pre-release review)
+- **A retried fulfilment never writes or bills add-ons twice.** An order line is stamped
+  (`_wplm_entitlement_ids`) right after its add-ons are written, before the add-ons subscription is
+  started or any hook runs; a listener that fails on that status change is logged and no longer fails
+  the line. Add-on lines an interrupted attempt wrote but never stamped (a fatal or a timeout) are
+  **adopted** by the retry, never taken back: when they are exactly what the line adds they are
+  recorded on it, any subscription item the attempt did not get to is attached, a pending add-ons
+  subscription starts, and nothing is checked or written again — so a retry made while the add-ons
+  renewal is overdue or paused can no longer remove add-ons the customer has and pays for. Leftovers
+  that are another line's of the order (still to be recorded, same licence) — exactly what it adds, or
+  the first of its lines and not the first of this line's — are left to that line, which deals with
+  them in its turn. Lines from an attempt cut off part-way through writing a line are left as they are
+  and that line is refused with a note naming them, for the owner (refund the line or mark its add-ons
+  settled; nothing is removed); its sibling lines are written as usual, and none is written twice. Every path: new licence with extras,
+  extras for an existing licence, stored add-ons (`AddonService::adopt_unstamped()`).
+- **An add-ons subscription's first period starts when its add-ons are written**, not when it was
+  opened: a pending one that bills nothing yet gets next payment = now + 1 cycle before its lines are
+  dated (`AddonService::open_addons_period()`), so a late retry, or another order joining it, is never
+  granted a period already over and billed again at once.
+- **A cancelled, expired or ending add-ons subscription is never reused** on a retry: a new one is
+  opened (`AddonService::reusable_addons_subscription()`). A write rolled back part-way no longer
+  cancels the add-ons subscription it was about to bill.
+- **A refund cancels an add-ons subscription the order opened but never billed** (pending, no items,
+  no lines), whatever kind of line opened it. One holding another order's lines (written on it, that
+  order's request cut off before their item was attached) stays open, and that order's retry starts
+  it; refunding that order too then cancels it once nothing is on it (it is cancelled whichever order
+  is refunded last), so a never-billed add-ons subscription no longer fixes the licence's cycle for
+  good. The same holds when the shop refunds in full only the line that opened it, not yet added (a
+  partial refund: the order stays completed), and when the shop sets the order to Cancelled or trashes
+  it (`woocommerce_order_status_cancelled`, `woocommerce_trash_order`, and `wp_trash_post` for the
+  orders list on posts storage): a cancelled order takes nothing
+  back from the licence, it only ends that never-billed subscription
+  (`AddonService::end_abandoned_addons_subscriptions()`). Cancelled, never deleted. A retry never records add-on lines on an add-ons subscription that has ended (cancelled or
+  expired): they would never renew, so the line is refused with a note for the owner and nothing is
+  changed. Another order sold against it while it was pending is no longer
+  stranded: its add-ons join the licence's current add-ons subscription, or open a new one, with an
+  order note — it had no dates to align with, so it was priced a full cycle either way. Add-ons sold
+  against an add-ons subscription that billed and then ended are still refused.
+- **Monthly / yearly add-ons for a lifetime licence are refused before payment** when its add-ons
+  subscription could not take them: on hold (paused: "resume it"; unpaid: "pay the renewal first"), its
+  paid period over, or set to cancel at period end (it would never renew them). The product page no
+  longer offers them, add to cart and checkout refuse them, and fulfilment applies the same check
+  (`AddonService::addons_join_problem()`). Lifetime-priced add-ons are still sold.
+- An add-ons subscription set to cancel whose last period is over is no longer the licence's open
+  add-ons subscription: its modules can be bought again and a new purchase chooses its own cycle.
+- **One cycle per licence in a cart.** Two cart lines adding monthly and yearly add-ons to the same
+  licence are refused at add to cart and at checkout: the second could be charged but never added.
+- **One cycle per licence across orders, too.** A lifetime licence with no add-ons subscription yet
+  takes the cycle of an order of its owner whose monthly / yearly add-ons are still to be written
+  (pending payment, failed — still payable from My account — on hold — a bank transfer awaiting the
+  shop — processing, or completed and awaiting a retry; a paid one before one not paid yet;
+  `AddonService::unfulfilled_addons_cycle()`). A line the shop refunded in full (its whole quantity or
+  its whole total, as WPLM's note for a refused line asks) no longer holds it, though its order stays
+  completed — and it is never added: completing the order again adds its other lines only, opens no
+  add-ons subscription for it, and notes that it was refunded in full. The same goes for a stored
+  add-on and for the add-ons of a new licence's line, and such a line never claims add-on lines an
+  interrupted attempt left on the licence. The product page offers that cycle
+  (`cycle_by_license`, `AddonService::offered_cycle()`), and add to cart and checkout refuse the other
+  one, naming the order: "choose the same, or cancel that order first" (for a completed order still
+  awaiting its add-ons: "choose the same, or contact us"). The fallback form's note under a fixed cycle
+  now says so too. The order being paid for now does not count: `order_awaiting_payment` while it is
+  still the cart's own (unpaid and placed for this very cart, so WooCommerce pays it rather than placing
+  a new order), or the order-pay page's. One left in the session for another cart counts. Before, both orders were accepted and
+  the second was paid for and could never be added.
+- **An order paid later is checked again before payment.** My account → Pay, the order-pay page
+  (`woocommerce_before_pay_action`) and the block checkout's order-pay
+  (`woocommerce_checkout_validate_order_before_payment`) refuse payment of an order whose add-ons for
+  an existing licence could no longer be added. Every such line, whatever its billing, is checked as
+  fulfilment checks it: the licence still takes add-ons priced like these, it has not since got a
+  module they add (another order of the customer's, completed first — before, the stale order was
+  charged in full and then refused at fulfilment), no paid order of the customer's not completed yet
+  adds one, and the add-on checks pass (the licence's status, its plan not overdue). A licence type's
+  line is issued as a new licence whatever licence id an older order left on it, so it is never
+  checked as an add-on. A stored add-on is checked at its quantity. Monthly / yearly add-ons for a
+  lifetime licence are also refused when they could no longer be added: the licence's add-ons subscription
+  now bills the other cycle, a paid order of the customer's will open it on the other cycle, the
+  add-ons subscription it was sold against billed and has ended, or the add-ons subscription cannot
+  take them (`AddonService::payment_problem()`). A gateway that reports a payment on its own (a late
+  notification) cannot be stopped: such an order is still refused at fulfilment, with a note, for a
+  refund by hand.
+- **One request at a time adds to a licence.** Adding add-ons or extras to an existing licence now
+  checks and writes under a per-licence lock (option `wplm_addons_lock_{licence id}`, taken over after
+  5 minutes), so two orders completed at once cannot both pass the "already has" check or both open
+  an add-ons subscription. The one that waits fails with a note and is retried by completing it again.
+  The per-order fulfilment claim (`wplm_fulfil_lock_{order id}`) uses the same `WPLM\Support\Lock`.
+- **Security: a licence id is only recorded on an add-on line, for its owner.** A licence id posted
+  with any other product (`wplm_target_license_id`) was stored on the order line as
+  `_wplm_addon_license_id` with an "Added to: licence ending ABCD" label, for anyone's licence. It is
+  now ignored unless the line is an add-on plan's, and the order line records it only when the licence
+  belongs to the buyer. Orders placed before this release may still carry such ids: readers of
+  `_wplm_addon_license_id` must check the line was applied (`_wplm_entitlement_ids`) and the licence is
+  the order customer's.
+- **The add-ons renewal invoice lists the add-ons** ("FBR — Add-ons for licence ending ABCD", one fee
+  line per add-on at what it bills, taxed as the product it was bought on), not the lifetime product
+  the licence was bought as.
+- **A draft (or pending, or private) plan product is not for sale.** WPLM made every product with a
+  plan purchasable, whatever its status, so a product created as a draft for review could be bought
+  through `?add-to-cart=`. WooCommerce's own rule now holds: published, or a user who can edit it.
+- **The database upgrade runs on the first request of any kind** (`init`), not only admin, REST and
+  cron; opening an add-ons subscription runs it first if it has still not run. A storefront order
+  completed right after the update no longer fails to open its add-ons subscription.
+- **An add-ons-only subscription cannot be switched** (`wplm_switch_addons_only`, from PHP, REST or
+  `wplm_switch_subscription()`): a switch added a plan charge to it, or turned its add-ons into plan
+  lines it no longer billed but still renewed.
+- **WPLM's own extras form** (shown when no plugin hooks `wplm_package_extras_form`): its scripts work
+  on their own form only, so with two products on one page, picking a licence type on one no longer
+  hides and disables the other's ticked add-ons. Only the shown licence's Monthly / Yearly choice is
+  checked when the page opens (they share one radio group), and a licence's default is checked when it
+  is shown. The add-ons product with nothing chosen says "Choose an add-on…", not "choose a license
+  type".
+
+- **Refusal notes no longer tell the shop to retry what a retry cannot cure.** When the licence already
+  has a module the line adds, the subscription the add-ons were sold against no longer bills them, they
+  were priced on another cycle than the licence's add-ons are now billed, or an earlier attempt left
+  lines on the licence for the owner, fulfilment throws `WPLM\Services\AddonRefusal` and the order note
+  ends "A retry cannot add them: refund this line, or use Mark add-ons settled." (for a new licence's
+  extras, where refunding only the add-ons' part never closes the line: "use Mark add-ons settled, and
+  refund the add-ons' part of this line if it is owed"), never "set the order to Completed again". Refusals a
+  retry can cure (another order adding to the licence right now, a failed write, a paused or overdue
+  add-ons subscription) still say to complete the order again.
+
+### Deploy
+- **Database 1.3.0:** `wplm_subscriptions` gains `addons_license_id` (indexed). It is added
+  automatically on the first request after the update, and existing rows are unchanged. Until then,
+  subscriptions are still created and the add-ons lookups return nothing instead of querying the
+  missing column.
+- Deploy this before Super Ledger Licensing 1.4.0, which requires WPLM 1.3.0. Plans built at purchase
+  (1.2.7) and their orders keep working.
+
+## [1.2.7] — 2026-10-14
+
+### Added
+- **Plans built at purchase (`dynamic`).** A plan can now let the customer build their package on the
+  product page instead of choosing one of the plan's licence types. WP License Manager stays
+  product-agnostic: a plugin for the licence profile supplies the form, the prices and the package
+  through the hooks below. Without such a plugin the product cannot be bought (the cart refuses it).
+  - **Plan editor:** "What the plan sells" is now a choice of three: a licence, add-ons to an existing
+    licence, or **"The customer builds the package at purchase"**. A built-at-purchase plan needs a
+    licence profile and has no licence types: the rows are hidden, and the save ignores them and leaves
+    any stored ones untouched. The editor warns when nothing is hooked into `wplm_dynamic_package`.
+    The old `plan_addon` checkbox value is still accepted.
+  - **Plans list:** such a plan shows "(built at purchase)" and "Built at purchase" in place of its
+    licence types. The product **Licensing** tab lists it as "Name (built at purchase)".
+  - No database change: `wplm_plans.kind` stores `dynamic`.
+- **Hooks for a plugin that builds packages:**
+  - `do_action( 'wplm_dynamic_package_form', Plan $plan, WC_Product $product )` prints the form on the
+    product page. Its fields post as `wplm_dynamic[...]`.
+  - `apply_filters( 'wplm_dynamic_package', null, array $spec, Plan $plan, WC_Product $product )` returns
+    the `Package` for that choice, or a `WP_Error` whose message the customer sees.
+  - `apply_filters( 'wplm_dynamic_price_html', $html, Plan $plan, WC_Product $product )` is the price shown
+    for the product (for example "From …").
+  - `apply_filters( 'wplm_dynamic_package_snapshot', array $snapshot, Package $package, array $spec )`
+    adds keys to the order-line snapshot (for example a price-list version). It cannot change the
+    package's own fields.
+- **What WPLM holds a built package to, whatever the filter returns** (`PlanCheckout::dynamic_package()`):
+  - It must be a `Package` of the plan.
+  - **Billing:** recurring every 1 month or every 1 year, or lifetime. One-time packages are refused.
+  - **Price:** a finite price of 0 or more, rounded to the shop's decimals.
+  - **Entitlements:** a template valid for the plan's profile, with at least one line.
+  - **Forced:** id 0, no sign-up fee, trial, length or "valid for" days, status active.
+  - **Computers per key:** the filter's value if it is 1 or more, otherwise 1.
+
+  Anything else is refused with "This plan cannot be bought right now. Please contact us." The reason
+  is logged.
+- **The browser's price is never used.** The cart line stores only the customer's choice
+  (`wplm_dynamic_spec`, sanitised). The package is rebuilt from it on add to cart, on every cart total
+  (the line price), in the cart display, in `woocommerce_check_cart_items` (a choice that can no longer
+  be built stops the checkout, with the reason) and when the order line is saved. Such a product is
+  sold one per line (quantity 1, no quantity box).
+- **The order line keeps the sale:** `_wplm_plan_id`, `_wplm_dynamic_spec` (the choice, JSON) and
+  `_wplm_dynamic_package` (a JSON snapshot of the package), plus the visible "License Type" (the
+  package name). It never stores `_wplm_package_id`.
+- **Fulfilment issues from the snapshot** on Completed, so a price change after the order never alters
+  the sale:
+  - **Monthly or yearly:** one licence and a subscription that renews at the snapshot price. Its item
+    meta carries `dynamic_spec`.
+  - **Lifetime:** undated lines and no subscription.
+  - Completing again issues nothing more (`_wplm_license_ids`).
+  - Renewals, refunds, add-ons and My Account treat it like any other licence.
+  - A snapshot that is unreadable or belongs to another plan issues nothing. It leaves an order note
+    and stays retryable.
+- The classic checkout handler skips built-at-purchase lines, as it skips package lines.
+
+### Changed
+- `Package::from_row()` also accepts entitlements as an array (a snapshot made with `to_array()`).
+
+### Deploy
+- Deploy this before any plugin that builds packages (Super Ledger Licensing 1.3.0). Nothing changes
+  for existing plans.
+
 ## [1.2.6] — 2026-10-13
 
 ### Added

@@ -80,11 +80,13 @@ class Package {
 		$pkg->valid_for_days   = isset( $row['valid_for_days'] ) && '' !== $row['valid_for_days'] ? (int) $row['valid_for_days'] : null;
 		$pkg->grace_days       = isset( $row['grace_days'] ) && '' !== $row['grace_days'] ? (int) $row['grace_days'] : null;
 		$pkg->benefits         = self::decode_benefits( $row['benefits'] ?? null );
-		$template              = isset( $row['entitlements'] ) ? json_decode( (string) $row['entitlements'], true ) : null;
-		$pkg->entitlements     = is_array( $template ) ? array_values( $template ) : array();
-		$pkg->sort_order       = (int) ( $row['sort_order'] ?? 0 );
-		$pkg->status           = (int) ( $row['status'] ?? 1 );
-		$pkg->created_at       = (string) ( $row['created_at'] ?? '' );
+		// A stored row holds JSON; a snapshot made with to_array() (a package built at purchase) an array.
+		$template          = $row['entitlements'] ?? null;
+		$template          = is_array( $template ) ? $template : ( null !== $template ? json_decode( (string) $template, true ) : null );
+		$pkg->entitlements = is_array( $template ) ? array_values( $template ) : array();
+		$pkg->sort_order   = (int) ( $row['sort_order'] ?? 0 );
+		$pkg->status       = (int) ( $row['status'] ?? 1 );
+		$pkg->created_at   = (string) ( $row['created_at'] ?? '' );
 		return $pkg;
 	}
 
@@ -114,6 +116,24 @@ class Package {
 	/** Whether this package bills on a recurring schedule. */
 	public function is_recurring(): bool {
 		return self::TYPE_RECURRING === $this->billing_type;
+	}
+
+	/**
+	 * How the package is billed, as package extras are priced: `month` (recurring every 1 month),
+	 * `year` (recurring every 1 year), `lifetime`, or null for anything else (one-time, other
+	 * intervals), which takes no extras. A trial does not change the key; a new purchase with a trial
+	 * is offered no extras by the caller.
+	 *
+	 * @return string|null
+	 */
+	public function billing_key(): ?string {
+		if ( self::TYPE_LIFETIME === $this->billing_type ) {
+			return 'lifetime';
+		}
+		if ( $this->is_recurring() && 1 === (int) $this->billing_interval && in_array( $this->billing_period, array( 'month', 'year' ), true ) ) {
+			return $this->billing_period;
+		}
+		return null;
 	}
 
 	/**

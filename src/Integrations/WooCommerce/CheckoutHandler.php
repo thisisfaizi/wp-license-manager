@@ -144,8 +144,9 @@ class CheckoutHandler {
 			}
 
 			// Plan/package-driven items are fulfilled by PlanCheckout — skip them
-			// here so they are not processed twice.
-			if ( $item->get_meta( '_wplm_package_id' ) ) {
+			// here so they are not processed twice. That includes lines built at purchase (1.2.7)
+			// and package extras added to an existing licence (1.3.0), which carry no package id.
+			if ( $item->get_meta( '_wplm_package_id' ) || $item->get_meta( '_wplm_dynamic_package' ) || $item->get_meta( '_wplm_extras' ) ) {
 				continue;
 			}
 
@@ -272,13 +273,21 @@ class CheckoutHandler {
 
 		/** @var \WC_Order_Item_Product $item */
 		foreach ( $order->get_items() as $item ) {
-			// Also cancel any subscription bound to this item.
-			$sub_id = (int) $item->get_meta( '_wplm_subscription_id' );
-			if ( $sub_id > 0 ) {
-				try {
-					$this->subscription_service->cancel( $sub_id, false );
-				} catch ( \Exception $e ) {
-					unset( $e ); // Subscription already cancelled or not found.
+			// Also cancel any subscription bound to this item, and the add-ons-only subscription a
+			// lifetime licence bought with it (v2). Cancelling never changes a licence's status; the
+			// licence below is suspended or revoked only because this order issued it.
+			// The add-ons subscription only when this line issued the licence: an add-ons subscription
+			// an existing licence's order opened may be shared by later orders' add-ons; refunding that
+			// order removes its own add-ons, and the subscription ends only once nothing is left to bill.
+			$keys = '' !== (string) $item->get_meta( '_wplm_license_ids' ) ? array( '_wplm_subscription_id', '_wplm_addons_subscription_id' ) : array( '_wplm_subscription_id' );
+			foreach ( $keys as $meta_key ) {
+				$sub_id = (int) $item->get_meta( $meta_key );
+				if ( $sub_id > 0 ) {
+					try {
+						$this->subscription_service->cancel( $sub_id, false );
+					} catch ( \Exception $e ) {
+						unset( $e ); // Subscription already cancelled or not found.
+					}
 				}
 			}
 

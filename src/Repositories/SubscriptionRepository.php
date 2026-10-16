@@ -119,6 +119,59 @@ class SubscriptionRepository {
 		return array_map( array( Subscription::class, 'from_row' ), $rows );
 	}
 
+	/**
+	 * Whether the 1.3.0 database upgrade (the `addons_license_id` column) has run. Between uploading the
+	 * plugin and the next admin page load it has not, and the add-ons lookups must not query it.
+	 *
+	 * @return bool
+	 */
+	public static function has_addons_column(): bool {
+		return version_compare( (string) get_option( 'wplm_db_version', '0' ), '1.3.0', '>=' );
+	}
+
+	/**
+	 * The open add-ons-only subscription of a lifetime licence (the newest that is active, in trial,
+	 * pending, on hold, or set to cancel and still inside its paid period), or null. One set to cancel
+	 * whose period is over has ended in all but name — nothing moves it on — so it no longer holds its
+	 * modules or forces the cycle of new add-ons.
+	 *
+	 * @param int $license_id Licence id.
+	 * @return Subscription|null
+	 */
+	public function find_addons_for_license( int $license_id ): ?Subscription {
+		if ( ! self::has_addons_column() ) {
+			return null;
+		}
+		global $wpdb;
+		$table = $wpdb->prefix . 'wplm_subscriptions';
+		$row   = $wpdb->get_row(
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+			$wpdb->prepare( "SELECT * FROM `{$table}` WHERE addons_license_id = %d AND ( status IN ('active','trial','pending','on-hold') OR ( status = 'pending-cancel' AND next_payment > UTC_TIMESTAMP() ) ) ORDER BY id DESC LIMIT 1", $license_id ),
+			ARRAY_A
+		);
+		return is_array( $row ) ? Subscription::from_row( $row ) : null;
+	}
+
+	/**
+	 * Every add-ons-only subscription of a licence, newest first (any status).
+	 *
+	 * @param int $license_id Licence id.
+	 * @return Subscription[]
+	 */
+	public function get_addons_for_license( int $license_id ): array {
+		if ( ! self::has_addons_column() ) {
+			return array();
+		}
+		global $wpdb;
+		$table = $wpdb->prefix . 'wplm_subscriptions';
+		$rows  = $wpdb->get_results(
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is a constant.
+			$wpdb->prepare( "SELECT * FROM `{$table}` WHERE addons_license_id = %d ORDER BY id DESC", $license_id ),
+			ARRAY_A
+		);
+		return is_array( $rows ) ? array_map( array( Subscription::class, 'from_row' ), $rows ) : array();
+	}
+
 	// -------------------------------------------------------------------------
 	// Mutations
 	// -------------------------------------------------------------------------

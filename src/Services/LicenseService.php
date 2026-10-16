@@ -563,6 +563,93 @@ class LicenseService {
 	}
 
 	/**
+	 * Take back what a refunded renewal added to a classic licence's term, from what the renewal moved
+	 * its expiry (`from` → `to`): see {@see expiry_taken_back()}. A licence the renewal started timing
+	 * (`from` null: it had no expiry) gets no expiry again while it still ends exactly at `to`. Nothing
+	 * changes when the licence is gone, a profile licence or perpetual (`$why` = `gone`), ends before
+	 * `to` — moved back already, or by hand (`earlier`) — or was renewed afresh after the refunded period
+	 * had ended (`over`), so running it twice moves it back once. Through update(), so the offline token
+	 * is re-signed.
+	 *
+	 * Fires `wplm_license_term_extended` with the earlier expiry as the new one.
+	 *
+	 * @param int         $id            Licence id.
+	 * @param string|null $from          Its expiry before the renewal (UTC), null when it had none.
+	 * @param string      $to            The expiry the renewal set (UTC).
+	 * @param string      $interval_spec The renewal's period, e.g. "P1M" ('' when unknown).
+	 * @param string|null $why           Set, when nothing changed, to `gone`, `earlier` or `over`.
+	 * @return array{from: string, to: string|null}|null Its expiry before and after, or null when unchanged.
+	 */
+	public function roll_back_term( int $id, ?string $from, string $to, string $interval_spec = '', ?string &$why = null ): ?array {
+		$why     = null;
+		$license = $this->license_repo->find_by_id( $id );
+		if ( null === $license || null !== $license->profile || null === $license->expires_at ) {
+			$why = 'gone';
+			return null;
+		}
+		$earlier = self::expiry_taken_back( $license->expires_at, $from, $to, $interval_spec );
+		if ( false === $earlier ) {
+			$why = strtotime( $license->expires_at . ' UTC' ) < strtotime( $to . ' UTC' ) ? 'earlier' : 'over';
+			return null;
+		}
+		$this->update( $id, array( 'expires_at' => $earlier ) );
+
+		/** This action is documented in LicenseService::extend_term(). */
+		do_action( 'wplm_license_term_extended', $id, $earlier, $license->expires_at );
+
+		return array(
+			'from' => $license->expires_at,
+			'to'   => $earlier,
+		);
+	}
+
+	/**
+	 * Where a classic licence's expiry (or a date that follows it) goes when a refunded renewal that moved
+	 * it `from` → `to` is taken back:
+	 * - still `to` → `from`, exactly (null: it had no expiry);
+	 * - later, reached from `to` by renewals that each continued from the old end (`to` plus whole
+	 *   `$interval_spec`s, {@see extend_term()}) → exactly one period less, counted from `to` the same
+	 *   way — never by the time a renewal paid after grace skipped;
+	 * - else false: earlier than `to` (moved back already, or by hand), or a later renewal started afresh
+	 *   after the refunded period had ended, which then has no bearing on the date.
+	 *
+	 * @param string      $current       UTC datetime now.
+	 * @param string|null $from          Before the renewal (UTC), null when there was no expiry.
+	 * @param string      $to            After it (UTC).
+	 * @param string      $interval_spec The renewal's period, e.g. "P1M" ('' when unknown).
+	 * @return string|null|false UTC datetime, null for no expiry, or false when left as it is.
+	 */
+	public static function expiry_taken_back( string $current, ?string $from, string $to, string $interval_spec ) {
+		$c = strtotime( $current . ' UTC' );
+		$e = strtotime( $to . ' UTC' );
+		if ( false === $c || false === $e || $c < $e ) {
+			return false;
+		}
+		if ( null !== $from && strtotime( $from . ' UTC' ) >= $e ) {
+			return false;
+		}
+		if ( $c === $e ) {
+			return null === $from ? null : gmdate( 'Y-m-d H:i:s', (int) strtotime( $from . ' UTC' ) );
+		}
+		if ( '' === $interval_spec ) {
+			return false;
+		}
+		$spec = new \DateInterval( $interval_spec );
+		$prev = ( new \DateTimeImmutable( '@' . $e ) )->setTimezone( new \DateTimeZone( 'UTC' ) );
+		for ( $i = 0; $i < 5000; $i++ ) {
+			$next = $prev->add( $spec );
+			if ( $next->getTimestamp() === $c ) {
+				return $prev->format( 'Y-m-d H:i:s' );
+			}
+			if ( $next->getTimestamp() > $c ) {
+				return false;
+			}
+			$prev = $next;
+		}
+		return false;
+	}
+
+	/**
 	 * Delete a license by primary key.
 	 *
 	 * @param int $id License row id.

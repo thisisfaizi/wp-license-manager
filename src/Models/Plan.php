@@ -26,8 +26,17 @@ class Plan {
 	public const KIND_STANDALONE = 'standalone';
 	/** A plan that sells add-ons to a licence the customer already has (no new key). */
 	public const KIND_ADDON = 'addon';
+	/**
+	 * A plan whose one package is built at purchase: the product page shows a form a product add-on
+	 * supplies (`wplm_dynamic_package_form`), and the package comes from the `wplm_dynamic_package`
+	 * filter. It has no stored packages.
+	 */
+	public const KIND_DYNAMIC = 'dynamic';
 
-	/** standalone | addon. */
+	/** Every kind a plan may have. */
+	public const KINDS = array( self::KIND_STANDALONE, self::KIND_ADDON, self::KIND_DYNAMIC );
+
+	/** standalone | addon | dynamic. */
 	public string $kind       = self::KIND_STANDALONE;
 	public int $status        = 1; // 1 active, 0 inactive.
 	public string $created_at = '';
@@ -39,6 +48,11 @@ class Plan {
 	/** Whether this plan sells add-ons to an existing licence. */
 	public function is_addon(): bool {
 		return self::KIND_ADDON === $this->kind;
+	}
+
+	/** Whether this plan's package is built at purchase (see {@see self::KIND_DYNAMIC}). */
+	public function is_dynamic(): bool {
+		return self::KIND_DYNAMIC === $this->kind;
 	}
 
 	/**
@@ -53,7 +67,7 @@ class Plan {
 		$plan->name        = (string) ( $row['name'] ?? '' );
 		$plan->description = isset( $row['description'] ) ? (string) $row['description'] : null;
 		$plan->profile     = isset( $row['profile'] ) && '' !== $row['profile'] ? (string) $row['profile'] : null;
-		$plan->kind        = self::KIND_ADDON === ( $row['kind'] ?? '' ) ? self::KIND_ADDON : self::KIND_STANDALONE;
+		$plan->kind        = in_array( $row['kind'] ?? '', self::KINDS, true ) ? (string) $row['kind'] : self::KIND_STANDALONE;
 		$plan->status      = (int) ( $row['status'] ?? 1 );
 		$plan->created_at  = (string) ( $row['created_at'] ?? '' );
 		$plan->updated_at  = (string) ( $row['updated_at'] ?? '' );

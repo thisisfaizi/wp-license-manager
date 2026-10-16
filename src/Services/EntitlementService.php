@@ -75,6 +75,16 @@ class EntitlementService {
 	}
 
 	/**
+	 * Every line a subscription pays for.
+	 *
+	 * @param int $subscription_id Subscription id.
+	 * @return Entitlement[]
+	 */
+	public function subscription_lines( int $subscription_id ): array {
+		return $this->repo->get_by_subscription( $subscription_id );
+	}
+
+	/**
 	 * What the licence grants on a given day, in the v2 token's shape.
 	 *
 	 * - `modules[code].until` is the latest `paid_through` among that module's lines, or null when
@@ -190,21 +200,28 @@ class EntitlementService {
 	 * - paid on or before `paid_through + grace` → the new period continues from the old end;
 	 * - paid after that (the module had gone read-only) → a full period from today.
 	 *
-	 * @param int      $subscription_id Subscription that was paid.
-	 * @param int      $interval        Billing interval (e.g. 1).
-	 * @param string   $period          day|week|month|year.
-	 * @param int|null $now             Unix time of the payment (default: now).
+	 * @param int        $subscription_id Subscription that was paid.
+	 * @param int        $interval        Billing interval (e.g. 1).
+	 * @param string     $period          day|week|month|year.
+	 * @param int|null   $now             Unix time of the payment (default: now).
+	 * @param array|null $moved           Filled, when given, with what moved: line id => `from` (the old
+	 *                                    paid-through date) and `to` (the new one), both Y-m-d — what a
+	 *                                    refund of this renewal takes back ({@see roll_back_line()}).
+	 * @param int[]      $skip            Lines this payment did not pay for (an add-on already paid
+	 *                                    through the period it buys: {@see \WPLM\Services\Subscriptions\RenewalProcessor::items_paid_ahead()}):
+	 *                                    left as they are, and not counted for the next payment.
 	 * @return string|null The next payment (UTC datetime): the start of the day after the latest new
 	 *                     paid-through date, in the site's time zone. Null when no dated line moved.
 	 */
-	public function extend_subscription_lines( int $subscription_id, int $interval, string $period, ?int $now = null ): ?string {
+	public function extend_subscription_lines( int $subscription_id, int $interval, string $period, ?int $now = null, ?array &$moved = null, array $skip = array() ): ?string {
 		$now    = $now ?? time();
 		$today  = wp_date( 'Y-m-d', $now );
 		$latest = null;
 		$grace  = array();
+		$skip   = array_map( 'intval', $skip );
 
 		foreach ( $this->repo->get_by_subscription( $subscription_id ) as $line ) {
-			if ( null === $line->paid_through ) {
+			if ( null === $line->paid_through || in_array( (int) $line->id, $skip, true ) ) {
 				continue;
 			}
 
@@ -220,6 +237,12 @@ class EntitlementService {
 			$through = self::renewed_paid_through( $line->paid_through, $today, $grace[ $line->license_id ], $interval, $period );
 
 			$this->repo->update( $line->id, array( 'paid_through' => $through ) );
+			if ( is_array( $moved ) ) {
+				$moved[ $line->id ] = array(
+					'from' => $line->paid_through,
+					'to'   => $through,
+				);
+			}
 			/** This action is documented in EntitlementService::add_line(). */
 			do_action( 'wplm_entitlement_saved', $this->repo->find_by_id( $line->id ), 'extended' );
 
@@ -235,6 +258,147 @@ class EntitlementService {
 		return ( new \DateTimeImmutable( self::add_period( $latest, 1, 'day' ) . ' 00:00:00', wp_timezone() ) )
 			->setTimezone( new \DateTimeZone( 'UTC' ) )
 			->format( 'Y-m-d H:i:s' );
+	}
+
+	/**
+	 * The paid-through date a renewal paid now would give a subscription's lines: the earliest of what
+	 * {@see extend_subscription_lines()} would set each dated line to (the renewal rule, with each
+	 * licence profile's grace). Null when the subscription has no dated line on a profile licence.
+	 *
+	 * @param int      $subscription_id Subscription.
+	 * @param int      $interval        Billing interval.
+	 * @param string   $period          day|week|month|year.
+	 * @param int|null $now             Unix time (default: now).
+	 * @return string|null Y-m-d
+	 */
+	public function renewal_target( int $subscription_id, int $interval, string $period, ?int $now = null ): ?string {
+		$today  = wp_date( 'Y-m-d', $now ?? time() );
+		$target = null;
+		$grace  = array();
+		foreach ( $this->repo->get_by_subscription( $subscription_id ) as $line ) {
+			if ( null === $line->paid_through ) {
+				continue;
+			}
+			if ( ! array_key_exists( $line->license_id, $grace ) ) {
+				$license                    = $this->licenses->find_by_id( $line->license_id );
+				$profile                    = null !== $license ? $this->profiles->get( $license->profile ) : null;
+				$grace[ $line->license_id ] = null !== $profile ? $profile->grace_days() : null;
+			}
+			if ( null === $grace[ $line->license_id ] ) {
+				continue;
+			}
+			$through = self::renewed_paid_through( $line->paid_through, $today, $grace[ $line->license_id ], $interval, $period );
+			if ( null === $target || strcmp( $through, $target ) < 0 ) {
+				$target = $through;
+			}
+		}
+		return $target;
+	}
+
+	/**
+	 * Take back what a refunded renewal added to one line, from what the renewal moved it (`from` →
+	 * `to`): see {@see taken_back()}. Nothing changes when the line is gone or lifetime (`$why` = `gone`),
+	 * ends before `to` — moved back already, or by hand (`earlier`) — or was renewed afresh after the
+	 * refunded period had ended (`over`), so running it twice moves it back once.
+	 *
+	 * The caller decides which lines the renewal moved (its snapshot, or for a renewal paid before
+	 * snapshots, the lines it set that were there when it was paid). The line's own `order_id` says
+	 * nothing about that: an order's id is given when the order is created, not when it is paid, so a
+	 * line added while a renewal invoice was still unpaid has a later order id and was still moved by it.
+	 *
+	 * Fires `wplm_entitlement_saved` with `rolled_back`, only for a line that moved.
+	 *
+	 * @param int         $id       Line id.
+	 * @param string      $from     The paid-through date before the renewal (Y-m-d).
+	 * @param string      $to       The paid-through date the renewal set (Y-m-d).
+	 * @param int         $interval The renewal's billing interval.
+	 * @param string      $period   Its billing period (day|week|month|year).
+	 * @param string|null $why      Set, when nothing changed, to `gone`, `earlier` or `over`.
+	 * @return array{from: string, to: string}|null The line's date before and after, or null when unchanged.
+	 */
+	public function roll_back_line( int $id, string $from, string $to, int $interval = 0, string $period = '', ?string &$why = null ): ?array {
+		$why  = null;
+		$line = $this->repo->find_by_id( $id );
+		if ( null === $line || null === $line->paid_through ) {
+			$why = 'gone';
+			return null;
+		}
+		$through = self::taken_back( $line->paid_through, $from, $to, $interval, $period );
+		if ( null === $through ) {
+			$why = strcmp( $line->paid_through, $to ) < 0 || strcmp( $from, $to ) >= 0 ? 'earlier' : 'over';
+			return null;
+		}
+		$this->repo->update( $line->id, array( 'paid_through' => $through ) );
+		/** This action is documented in EntitlementService::add_line(). */
+		do_action( 'wplm_entitlement_saved', $this->repo->find_by_id( $line->id ), 'rolled_back' );
+		return array(
+			'from' => $line->paid_through,
+			'to'   => $through,
+		);
+	}
+
+	/**
+	 * Where a paid-through date goes when a refunded renewal that moved it `from` → `to` is taken back:
+	 * - still `to` → `from`, exactly;
+	 * - later, reached from `to` by renewals that each continued from the old end (`to` plus whole
+	 *   periods, {@see renewed_paid_through()}) → exactly one period less, counted from `to` the same
+	 *   way, so a month goes back as a month whatever its length, and never by the days a renewal paid
+	 *   after grace skipped;
+	 * - else null: earlier than `to` (moved back already, or by hand), or a later renewal started afresh
+	 *   after the refunded period had ended, which then has no bearing on the date.
+	 *
+	 * @param string $date     The date now (Y-m-d).
+	 * @param string $from     Before the renewal (Y-m-d).
+	 * @param string $to       After it (Y-m-d).
+	 * @param int    $interval Its billing interval.
+	 * @param string $period   Its billing period.
+	 * @return string|null Y-m-d, or null when the date is left as it is.
+	 */
+	public static function taken_back( string $date, string $from, string $to, int $interval, string $period ): ?string {
+		if ( strcmp( $from, $to ) >= 0 || strcmp( $date, $to ) < 0 ) {
+			return null;
+		}
+		return $date === $to ? $from : self::one_period_back( $date, $to, $interval, $period );
+	}
+
+	/**
+	 * A paid-through date reached from `$to` by renewals that each continued from the old end, one such
+	 * period less (counted from `$to`); null when `$date` is not on that chain (or is `$to` itself).
+	 *
+	 * @param string $date     Y-m-d, after `$to`.
+	 * @param string $to       Y-m-d.
+	 * @param int    $interval Billing interval.
+	 * @param string $period   Billing period.
+	 * @return string|null Y-m-d.
+	 */
+	public static function one_period_back( string $date, string $to, int $interval, string $period ): ?string {
+		if ( $interval <= 0 || ! in_array( $period, array( 'day', 'week', 'month', 'year' ), true ) ) {
+			return null;
+		}
+		$prev = $to;
+		for ( $i = 0; $i < 5000; $i++ ) {
+			$next = self::renewed_paid_through( $prev, $prev, 0, $interval, $period );
+			if ( $next === $date ) {
+				return $prev;
+			}
+			if ( strcmp( $next, $date ) > 0 ) {
+				return null;
+			}
+			$prev = $next;
+		}
+		return null;
+	}
+
+	/**
+	 * A line's name for notes: the module or limit label from its licence's profile, else its code.
+	 *
+	 * @param Entitlement $line The line.
+	 * @return string
+	 */
+	public function line_label( Entitlement $line ): string {
+		$license = $this->licenses->find_by_id( $line->license_id );
+		$profile = null !== $license ? $this->profiles->get( $license->profile ) : null;
+		return null !== $profile ? $profile->code_label( $line->code ) : $line->code;
 	}
 
 	/**

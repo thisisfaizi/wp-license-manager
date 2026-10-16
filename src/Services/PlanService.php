@@ -80,9 +80,9 @@ class PlanService {
 	 * Create a plan.
 	 *
 	 * @param array $data name, description, status, profile (licence profile code or null), kind
-	 *                    (standalone|addon; an add-on plan must sell a profile).
+	 *                    (standalone|addon|dynamic; an add-on or dynamic plan must sell a profile).
 	 * @return int New plan id.
-	 * @throws \InvalidArgumentException When name is empty, the profile is unknown, or an add-on plan has no profile.
+	 * @throws \InvalidArgumentException When name is empty, the profile is unknown, or an add-on or dynamic plan has no profile.
 	 */
 	public function create_plan( array $data ): int {
 		$name = trim( (string) ( $data['name'] ?? '' ) );
@@ -105,20 +105,25 @@ class PlanService {
 	/**
 	 * Validate a plan kind against the profile it will sell.
 	 *
-	 * @param mixed       $kind    Raw kind; anything but 'addon' is standalone.
+	 * @param mixed       $kind    Raw kind; anything but 'addon' or 'dynamic' is standalone.
 	 * @param string|null $profile The plan's profile code.
 	 * @return string
-	 * @throws \InvalidArgumentException When an add-on plan has no profile: an add-on adds lines to an
-	 *                                   entitlement licence, and a classic licence has none.
+	 * @throws \InvalidArgumentException When an add-on or dynamic plan has no profile: an add-on adds
+	 *                                   lines to an entitlement licence, a dynamic package is built of
+	 *                                   them, and a classic licence has none.
 	 */
 	private function checked_kind( $kind, ?string $profile ): string {
-		if ( Plan::KIND_ADDON !== $kind ) {
+		if ( Plan::KIND_ADDON !== $kind && Plan::KIND_DYNAMIC !== $kind ) {
 			return Plan::KIND_STANDALONE;
 		}
 		if ( null === $profile ) {
-			throw new \InvalidArgumentException( 'An add-on plan must sell a licence type with modules and limits.' );
+			throw new \InvalidArgumentException(
+				Plan::KIND_ADDON === $kind
+					? 'An add-on plan must sell a licence type with modules and limits.'
+					: 'A plan built at purchase must sell a licence type with modules and limits.'
+			);
 		}
-		return Plan::KIND_ADDON;
+		return (string) $kind;
 	}
 
 	/**

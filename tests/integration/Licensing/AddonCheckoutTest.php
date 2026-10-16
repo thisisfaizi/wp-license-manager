@@ -10,6 +10,7 @@
 namespace WPLM\Tests\Integration\Licensing;
 
 use WPLM\Admin\LicenceAdminActions;
+use WPLM\Integrations\WooCommerce\AddonSettlement;
 use WPLM\Integrations\WooCommerce\PlanCheckout;
 use WPLM\Integrations\WooCommerce\SelfServiceRenewal;
 use WPLM\Licensing\ProfileRegistry;
@@ -765,5 +766,191 @@ class AddonCheckoutTest extends TestCase {
 
 		WC()->cart->empty_cart();
 		wc_clear_notices();
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Final review (2026-10-15): a line refunded in full is never added; an order paid later is checked
+	// ---------------------------------------------------------------------------------------------
+
+	/** An order of two stored add-ons for a licence, not paid yet. */
+	private function two_addons_order( array $base, string $first, string $second ): \WC_Order {
+		$order = wc_create_order( array( 'customer_id' => $base['customer'] ) );
+		foreach ( array( $first, $second ) as $name ) {
+			$item = $order->get_item( $order->add_product( $this->addon_product, 1 ) );
+			$item->add_meta_data( '_wplm_package_id', $this->addon( $name )->id, true );
+			$item->add_meta_data( '_wplm_addon_license_id', $base['license_id'], true );
+			$item->save();
+		}
+		$order->set_payment_method( 'bacs' );
+		$order->set_billing_email( 'customer' . $base['customer'] . '@example.org' );
+		$order->calculate_totals();
+		$order->save();
+		return $order;
+	}
+
+	public function test_a_stored_addon_refunded_in_full_is_never_added_when_the_order_is_completed_again(): void {
+		$base  = $this->customer_with( 'month' );
+		$order = $this->two_addons_order( $base, 'FBR monthly', 'Extra user monthly' );
+		add_option( 'wplm_addons_lock_' . $base['license_id'], (string) time(), '', 'no' );
+		$order->update_status( 'on-hold' );
+		$order->update_status( 'completed' );
+		delete_option( 'wplm_addons_lock_' . $base['license_id'] );
+		$order = wc_get_order( $order->get_id() );
+		$fbr   = array_values( $order->get_items() )[0];
+		$this->assertNotWPError(
+			wc_create_refund(
+				array(
+					'order_id'   => $order->get_id(),
+					'amount'     => (float) $fbr->get_total(),
+					'line_items' => array(
+						$fbr->get_id() => array(
+							'qty'          => 1,
+							'refund_total' => (float) $fbr->get_total(),
+						),
+					),
+				)
+			)
+		);
+
+		$order->update_status( 'processing' );
+		wc_get_order( $order->get_id() )->update_status( 'completed' );
+
+		$order = wc_get_order( $order->get_id() );
+		$this->assertNull( $this->line( $base['license_id'], 'fbr', 'addon' ), 'Refunded: never added.' );
+		$this->assertNotNull( $this->line( $base['license_id'], 'users', 'addon' ), 'The line paid for is added.' );
+		$this->assertSame( 6000.0, $this->total( $base['subscription_id'] ), 'Billed for the plan and the user, never the refunded FBR.' );
+		$this->assertSame( '1', (string) $order->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertStringContainsString( 'refunded in full', $this->notes_of( $order ) );
+	}
+
+	public function test_a_stored_addon_order_paid_later_is_refused_when_the_licence_has_since_got_it(): void {
+		$base  = $this->customer_with( 'month' );
+		$stale = wc_create_order( array( 'customer_id' => $base['customer'] ) );
+		$item  = $stale->get_item( $stale->add_product( $this->addon_product, 1 ) );
+		$item->add_meta_data( '_wplm_package_id', $this->addon( 'FBR monthly' )->id, true );
+		$item->add_meta_data( '_wplm_addon_license_id', $base['license_id'], true );
+		$item->save();
+		$stale->calculate_totals();
+		$stale->save();
+		$stale->update_status( 'failed' );
+		$this->buy_addon( $this->addon( 'FBR monthly' ), $base['customer'], $base['license_id'] );
+
+		wc_clear_notices();
+		do_action( 'woocommerce_before_pay_action', wc_get_order( $stale->get_id() ) );
+		$notices = wc_get_notices( 'error' );
+		$errors  = new \WP_Error();
+		do_action( 'woocommerce_checkout_validate_order_before_payment', wc_get_order( $stale->get_id() ), $errors );
+		wc_clear_notices();
+
+		$this->assertNotEmpty( $notices, 'Never charged twice for one add-on.' );
+		$this->assertStringContainsString( 'already has FBR', (string) ( $notices[0]['notice'] ?? '' ) );
+		$this->assertTrue( $errors->has_errors() );
+	}
+
+	private function notes_of( \WC_Order $order ): string {
+		return implode( "\n", array_map( static fn( $n ) => $n->content, wc_get_order_notes( array( 'order_id' => $order->get_id() ) ) ) );
+	}
+
+	/** A stored add-on order for a licence, not paid yet. */
+	private function addon_order( string $name, array $base ): \WC_Order {
+		$order = wc_create_order( array( 'customer_id' => $base['customer'] ) );
+		$item  = $order->get_item( $order->add_product( $this->addon_product, 1 ) );
+		$item->add_meta_data( '_wplm_package_id', $this->addon( $name )->id, true );
+		$item->add_meta_data( '_wplm_addon_license_id', $base['license_id'], true );
+		$item->save();
+		$order->set_payment_method( 'bacs' );
+		$order->set_billing_email( 'customer' . $base['customer'] . '@example.org' );
+		$order->calculate_totals();
+		$order->save();
+		return $order;
+	}
+
+	public function test_a_stored_addon_is_refused_before_payment_while_a_paid_order_not_completed_yet_adds_it(): void {
+		$base  = $this->customer_with( 'month' );
+		$stale = $this->addon_order( 'FBR monthly', $base );
+		$stale->update_status( 'failed' );
+		$paid = $this->addon_order( 'FBR monthly', $base );
+		$paid->update_status( 'on-hold' ); // A bank transfer awaiting the shop.
+
+		wc_clear_notices();
+		do_action( 'woocommerce_before_pay_action', wc_get_order( $stale->get_id() ) );
+		$notices = wc_get_notices( 'error' );
+		$errors  = new \WP_Error();
+		do_action( 'woocommerce_checkout_validate_order_before_payment', wc_get_order( $stale->get_id() ), $errors );
+		wc_clear_notices();
+
+		$this->assertNotEmpty( $notices, 'Never charged twice for one add-on.' );
+		$this->assertStringContainsString( 'Your order #' . $paid->get_order_number() . ', not completed yet, already adds FBR', (string) ( $notices[0]['notice'] ?? '' ) );
+		$this->assertTrue( $errors->has_errors() );
+
+		// Add to cart, and the checkout's check of the cart.
+		wc_load_cart();
+		WC()->cart->empty_cart();
+		wp_set_current_user( $base['customer'] );
+		$_POST['wplm_target_license_id'] = (string) $base['license_id'];
+		$_POST['wplm_package_id']        = (string) $this->addon( 'FBR monthly' )->id;
+		wc_clear_notices();
+		$this->assertFalse( $this->checkout()->validate_add_to_cart( true, $this->addon_product->get_id(), 1 ) );
+		$_POST['wplm_package_id'] = (string) $this->addon( 'Extra user monthly' )->id;
+		wc_clear_notices();
+		$this->assertTrue( $this->checkout()->validate_add_to_cart( true, $this->addon_product->get_id(), 1 ), 'A limit adds up: never held.' );
+		unset( $_POST['wplm_package_id'], $_POST['wplm_target_license_id'] );
+		$this->assertNotFalse(
+			WC()->cart->add_to_cart(
+				$this->addon_product->get_id(),
+				1,
+				0,
+				array(),
+				array(
+					'wplm_package_id'       => $this->addon( 'FBR monthly' )->id,
+					'wplm_addon_license_id' => $base['license_id'],
+				)
+			)
+		);
+		wc_clear_notices();
+		$this->checkout()->check_cart_addons();
+		$this->assertSame( 1, wc_notice_count( 'error' ), 'The checkout stops.' );
+		WC()->cart->empty_cart();
+		wc_clear_notices();
+	}
+
+	public function test_a_stored_addon_refused_for_good_is_marked_settled_and_holds_nothing(): void {
+		$base  = $this->customer_with( 'month' );
+		$stale = $this->addon_order( 'FBR monthly', $base );
+		$stale->update_status( 'processing' ); // Paid; its FBR is held for it.
+		$this->buy_addon( $this->addon( 'FBR monthly' ), $base['customer'], $base['license_id'] ); // FBR added by another order since.
+		$total = $this->total( $base['subscription_id'] );
+		wc_get_order( $stale->get_id() )->update_status( 'completed' );
+
+		$stale   = wc_get_order( $stale->get_id() );
+		$refusal = implode( "\n", array_filter( explode( "\n", $this->notes_of( $stale ) ), static fn( $n ) => false !== strpos( $n, 'already has FBR' ) ) );
+		$this->assertStringContainsString( 'A retry cannot add it: refund this line, or use Mark add-ons settled.', $refusal );
+		$this->assertStringNotContainsString( 'Completed again', $refusal, 'A retry never cures "already has".' );
+		$this->assertSame( '', (string) $stale->get_meta( '_wplm_plan_fulfilled' ) );
+		$this->assertArrayHasKey( 'fbr', $this->service()->unfulfilled_addon_modules( $base['license'] ) );
+
+		$admin  = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$result = ( new AddonSettlement( $this->service() ) )->settle( $stale->get_id(), array( $this->the_item( $stale )->get_id() ), $admin, 'Credited on the next invoice' );
+
+		$this->assertTrue( $result['ok'], $result['message'] );
+		$stale = wc_get_order( $stale->get_id() );
+		$this->assertSame( '1', (string) $stale->get_meta( '_wplm_plan_fulfilled' ), 'Its only line is done.' );
+		$this->assertSame( array(), $this->service()->unfulfilled_addon_modules( $base['license'] ), 'FBR is no longer held.' );
+		$this->assertCount( 1, array_filter( $this->lines( $base['license_id'] ), static fn( $l ) => 'fbr' === $l->code ), 'Nothing written.' );
+		$this->assertSame( $total, $this->total( $base['subscription_id'] ), 'Nothing billed.' );
+		$this->assertStringContainsString( 'marked settled by', $this->notes_of( $stale ) );
+
+		// Even with the order's fulfilled mark gone, completing it again never adds the settled add-on.
+		$stale->delete_meta_data( '_wplm_plan_fulfilled' );
+		$stale->save();
+		$items = count( $this->items( $base['subscription_id'] ) );
+		$stale->update_status( 'processing' );
+		wc_get_order( $stale->get_id() )->update_status( 'completed' );
+
+		$this->assertCount( 1, array_filter( $this->lines( $base['license_id'] ), static fn( $l ) => 'fbr' === $l->code ), 'Never added.' );
+		$this->assertCount( $items, $this->items( $base['subscription_id'] ), 'Never billed.' );
+		$this->assertSame( $total, $this->total( $base['subscription_id'] ) );
+		$this->assertSame( '', (string) $this->the_item( wc_get_order( $stale->get_id() ) )->get_meta( '_wplm_entitlement_ids' ) );
+		$this->assertSame( '1', (string) wc_get_order( $stale->get_id() )->get_meta( '_wplm_plan_fulfilled' ), 'Its only line is done.' );
 	}
 }
