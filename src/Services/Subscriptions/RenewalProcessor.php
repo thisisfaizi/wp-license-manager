@@ -244,7 +244,7 @@ class RenewalProcessor {
 	 * `$skip`, or else what the order recorded when it was issued ({@see SKIPPED_META}), so an item left
 	 * out of the invoice is not extended, however late the invoice is paid. The snapshot keeps it
 	 * (`skipped`). An item that joined the subscription after the invoice was issued and before it was
-	 * paid is not on the invoice, yet is extended with the rest (known gap, left for the owner to decide).
+	 * paid is not on the invoice, yet is extended with the rest (a known limitation).
 	 *
 	 * A renewal completed again after a refund rolled it back extends only the lines it moved the first
 	 * time (its earlier snapshot): a line that joined the subscription meanwhile kept the period its own

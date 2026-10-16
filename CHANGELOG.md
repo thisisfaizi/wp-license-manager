@@ -279,7 +279,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   - **Completed again after a refund, a renewal extends only what it extended the first time** (its
     earlier snapshot): an add-on that joined meanwhile keeps the period its own order paid for, and the
     next renewal charges for it with the rest.
-  - **Known gap, for the owner:** an add-on bought while a renewal invoice is unpaid is not on that
+  - **Known limitation:** an add-on bought while a renewal invoice is unpaid is not on that
     invoice, yet paying the invoice extends it with the rest (one period not charged). A refund of the
     invoice takes it back.
   - **Skipped once at the next renewal** (`RenewalProcessor::items_paid_ahead()`). An add-on item whose
