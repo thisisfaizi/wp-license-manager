@@ -336,7 +336,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
   skipping the webhooks, the cancellation email, the status hooks and the licence sync. They now call
   `SubscriptionService::pause()` / `resume()` / `cancel()`, like the REST API and My Account. A button
   the status no longer allows changes nothing and says so; a subscription already cancelled or expired
-  is not cancelled again (no second email or webhook).
+  is not cancelled again (no second email or webhook). Bulk Cancel now checks the list's nonce
+  (`bulk-subscriptions`), so a crafted link cannot cancel subscriptions, and its notice counts only
+  the subscriptions it cancelled and names how many it could not.
 - `AddonService::apply()` now writes through one private line writer, shared with the new
   `AddonService::apply_extras()` and `AddonService::apply_extras_to_licence()`. If it fails part-way,
   it removes what it wrote through the service, which also detaches any subscription items.

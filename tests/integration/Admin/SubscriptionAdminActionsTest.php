@@ -206,11 +206,12 @@ class SubscriptionAdminActionsTest extends TestCase {
 
 		$_REQUEST['action']       = 'bulk-cancel';
 		$_REQUEST['subscription'] = array_map( 'strval', $bulk );
+		$_REQUEST['_wpnonce']     = wp_create_nonce( 'bulk-subscriptions' );
 		try {
 			$this->table()->render_page();
 			$this->fail( 'Expected a redirect.' );
 		} catch ( SubscriptionAdminRedirect $redirect ) {
-			unset( $redirect );
+			$this->assertStringContainsString( 'bulk_cancelled=2&bulk_failed=0', $redirect->getMessage() );
 		}
 
 		foreach ( array_merge( array( $row ), $bulk ) as $id ) {
@@ -220,17 +221,55 @@ class SubscriptionAdminActionsTest extends TestCase {
 		$this->assertSame( array( 'subscription.cancelled', 'subscription.cancelled', 'subscription.cancelled' ), $this->events );
 	}
 
+	/** @dataProvider bad_bulk_nonces */
+	public function test_bulk_cancel_without_the_list_nonce_cancels_nothing( ?string $nonce ): void {
+		$ids                      = array( $this->subscription(), $this->subscription() );
+		$_REQUEST['action']       = 'bulk-cancel';
+		$_REQUEST['subscription'] = array_map( 'strval', $ids );
+		if ( 'other-action' === $nonce ) {
+			$nonce = wp_create_nonce( 'wplm_cancel_subscription_' . $ids[0] ); // A real nonce, for the row action.
+		}
+		if ( null !== $nonce ) {
+			$_REQUEST['_wpnonce'] = $nonce;
+		}
+		$died = false;
+		try {
+			$this->table()->render_page();
+		} catch ( \WPDieException $e ) {
+			$died = true;
+		} catch ( SubscriptionAdminRedirect $redirect ) {
+			$this->fail( 'Redirected as if done: ' . $redirect->getMessage() );
+		}
+
+		$this->assertTrue( $died, 'Refused.' );
+		foreach ( $ids as $id ) {
+			$this->assertSame( 'active', $this->subscription_row( $id )['status'] );
+		}
+		$this->assertSame( array(), $this->cancelled, 'No cancelled hook.' );
+		$this->assertSame( array(), $this->events, 'No webhook.' );
+		$this->assertSame( array(), tests_retrieve_phpmailer_instance()->mock_sent, 'No email.' );
+	}
+
+	public static function bad_bulk_nonces(): array {
+		return array(
+			'none'             => array( null ),
+			'forged'           => array( 'not-a-nonce' ),
+			'another action\'s' => array( 'other-action' ),
+		);
+	}
+
 	public function test_cancelling_an_ended_subscription_again_sends_nothing(): void {
 		$open  = $this->subscription();
 		$ended = array( $this->subscription( 'cancelled' ), $this->subscription( 'expired' ) );
 
 		$_REQUEST['action']       = 'bulk-cancel';
 		$_REQUEST['subscription'] = array_map( 'strval', array_merge( array( $open ), $ended ) );
+		$_REQUEST['_wpnonce']     = wp_create_nonce( 'bulk-subscriptions' );
 		try {
 			$this->table()->render_page();
 			$this->fail( 'Expected a redirect.' );
 		} catch ( SubscriptionAdminRedirect $redirect ) {
-			unset( $redirect );
+			$this->assertStringContainsString( 'bulk_cancelled=1&bulk_failed=2', $redirect->getMessage(), 'Only what was cancelled is counted; the rest is reported.' );
 		}
 
 		$this->assertSame( array( $open ), $this->cancelled, 'Only the open one is cancelled.' );

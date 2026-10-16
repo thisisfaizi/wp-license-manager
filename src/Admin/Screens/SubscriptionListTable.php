@@ -290,16 +290,22 @@ class SubscriptionListTable extends \WP_List_Table {
 			exit;
 		}
 
-		// Handle bulk cancel.
+		// Handle bulk cancel: the list's own nonce (WP_List_Table prints `bulk-subscriptions`), so a link
+		// alone cannot cancel subscriptions, email their customers and end perpetual licences.
 		if ( 'bulk-cancel' === $this->current_action() ) {
-			// phpcs:ignore WordPress.Security.NonceVerification.Missing,WordPress.Security.NonceVerification.Recommended
-			$ids = array_map( 'absint', (array) ( $_REQUEST['subscription'] ?? array() ) );
+			check_admin_referer( 'bulk-' . $this->_args['plural'] );
+			// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- nonce verified above.
+			$ids    = array_values( array_unique( array_filter( array_map( 'absint', (array) ( $_REQUEST['subscription'] ?? array() ) ) ) ) );
+			$done   = 0;
+			$failed = 0;
 			foreach ( $ids as $sid ) {
-				if ( $sid > 0 ) {
-					$this->change_status( 'cancel', $sid );
+				if ( $this->change_status( 'cancel', $sid ) ) {
+					++$done;
+				} else {
+					++$failed;
 				}
 			}
-			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&bulk_cancelled=' . count( $ids ) ) );
+			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&bulk_cancelled=' . $done . '&bulk_failed=' . $failed ) );
 			exit;
 		}
 
@@ -322,6 +328,28 @@ class SubscriptionListTable extends \WP_List_Table {
 			if ( ! empty( $_GET['failed'] ) ) :
 				?>
 				<div class="notice notice-error is-dismissible"><p><?php esc_html_e( 'The subscription was not changed: its status no longer allows it. Reload and try again.', 'wp-license-manager' ); ?></p></div>
+				<?php
+			endif;
+			if ( ! empty( $_GET['bulk_cancelled'] ) ) :
+				$count = absint( $_GET['bulk_cancelled'] );
+				?>
+				<div class="notice notice-success is-dismissible"><p>
+				<?php
+				/* translators: %d: number of subscriptions cancelled */
+				echo esc_html( sprintf( _n( '%d subscription cancelled.', '%d subscriptions cancelled.', $count, 'wp-license-manager' ), $count ) );
+				?>
+				</p></div>
+				<?php
+			endif;
+			if ( ! empty( $_GET['bulk_failed'] ) ) :
+				$count = absint( $_GET['bulk_failed'] );
+				?>
+				<div class="notice notice-error is-dismissible"><p>
+				<?php
+				/* translators: %d: number of subscriptions not changed */
+				echo esc_html( sprintf( _n( '%d subscription was not cancelled: it no longer exists, or its status no longer allows it.', '%d subscriptions were not cancelled: they no longer exist, or their status no longer allows it.', $count, 'wp-license-manager' ), $count ) );
+				?>
+				</p></div>
 				<?php
 			endif;
 			// phpcs:enable
