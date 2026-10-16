@@ -241,9 +241,14 @@ class RenewalProcessor {
 	 * earlier refund of it is cleared (completing a refunded renewal again applies it again).
 	 *
 	 * An add-on item the renewal did not charge for ({@see items_paid_ahead()}) keeps its lines as they are:
-	 * `$skip`, or else what the order recorded when it was issued ({@see SKIPPED_META}), so what was billed
-	 * and what is extended always agree, however late the invoice is paid. The snapshot keeps it
-	 * (`skipped`).
+	 * `$skip`, or else what the order recorded when it was issued ({@see SKIPPED_META}), so an item left
+	 * out of the invoice is not extended, however late the invoice is paid. The snapshot keeps it
+	 * (`skipped`). An item that joined the subscription after the invoice was issued and before it was
+	 * paid is not on the invoice, yet is extended with the rest (known gap, left for the owner to decide).
+	 *
+	 * A renewal completed again after a refund rolled it back extends only the lines it moved the first
+	 * time (its earlier snapshot): a line that joined the subscription meanwhile kept the period its own
+	 * order paid for when the refund took the rest back, and this order never charged for it.
 	 *
 	 * @param Subscription $sub      The subscription being paid.
 	 * @param int|null     $order_id WooCommerce order that carried the payment, if any.
@@ -269,6 +274,9 @@ class RenewalProcessor {
 		foreach ( $skip as $skipped ) {
 			$skip_lines = array_merge( $skip_lines, array_map( 'intval', (array) ( $skipped['line_ids'] ?? array() ) ) );
 		}
+		// Completed again after a refund rolled it back: only what it moved the first time.
+		$skip_lines = array_merge( $skip_lines, $this->not_moved_before( $sub->id, $order ) );
+
 		$snapshot = array(
 			'subscription_id' => $sub->id,
 			'interval'        => $sub->billing_interval,
@@ -632,9 +640,13 @@ class RenewalProcessor {
 		$lines   = array();
 		$skipped = 0;
 		$over    = 0;
+		// Every line in the snapshot was moved by this payment, whatever order added it: an order's id is
+		// given when it is created, so a line bought while this renewal's invoice was still unpaid has a
+		// later order id and was still extended (and charged) by it. A line that joined after the payment
+		// is never in the snapshot ({@see joined_since()}).
 		foreach ( $moves as $line_id => $move ) {
 			$why  = null;
-			$back = is_array( $move ) && isset( $move['from'], $move['to'] ) ? $this->entitlements->roll_back_line( (int) $line_id, (string) $move['from'], (string) $move['to'], $n, $period, $why, $order->get_id() ) : null;
+			$back = is_array( $move ) && isset( $move['from'], $move['to'] ) ? $this->entitlements->roll_back_line( (int) $line_id, (string) $move['from'], (string) $move['to'], $n, $period, $why ) : null;
 			if ( null !== $back ) {
 				$lines[ (int) $line_id ] = $back;
 			} elseif ( 'over' === $why ) {
@@ -933,8 +945,8 @@ class RenewalProcessor {
 				if ( $new_through !== $line->paid_through ) {
 					continue; // Not what this renewal set.
 				}
-				if ( null !== $line->order_id && $line->order_id > $order->get_id() ) {
-					$kept[ $line->id ] = $line; // Joined on a later order, co-termed: keeps its period.
+				if ( self::added_after_payment( $line, $order ) ) {
+					$kept[ $line->id ] = $line; // Joined after the renewal, co-termed: keeps its period.
 					continue;
 				}
 				$snapshot['lines'][ $line->id ] = array(
@@ -942,7 +954,7 @@ class RenewalProcessor {
 					'to'   => $new_through,
 				);
 				$why                            = null;
-				$back                           = $this->entitlements->roll_back_line( $line->id, $old_through, $new_through, $sub->billing_interval, $sub->billing_period, $why, $order->get_id() );
+				$back                           = $this->entitlements->roll_back_line( $line->id, $old_through, $new_through, $sub->billing_interval, $sub->billing_period, $why );
 				if ( null === $back ) {
 					++$skipped;
 					continue;
@@ -956,6 +968,55 @@ class RenewalProcessor {
 		return true;
 	}
 
+
+	/**
+	 * For a renewal order a refund rolled back, now paid again: the subscription's lines its earlier
+	 * snapshot did not move (they joined since, or were left out then), so applying it again extends
+	 * exactly what it extended — and charged for — the first time. Nothing when the order was not rolled
+	 * back, or its snapshot is not a complete record of the subscription's lines (a classic licence's
+	 * expiry, a payment cut off part-way, none at all).
+	 *
+	 * @param int            $subscription_id The subscription.
+	 * @param \WC_Order|null $order           The renewal order, before this payment writes to it.
+	 * @return int[] Line ids.
+	 */
+	private function not_moved_before( int $subscription_id, ?\WC_Order $order ): array {
+		if ( null === $order || '' === (string) $order->get_meta( self::ROLLED_BACK_META ) ) {
+			return array();
+		}
+		$before = json_decode( (string) $order->get_meta( self::SNAPSHOT_META ), true );
+		if ( ! is_array( $before ) || (int) ( $before['subscription_id'] ?? 0 ) !== $subscription_id || ! is_array( $before['after'] ?? null ) || ! is_array( $before['lines'] ?? null ) || isset( $before['license'] ) ) {
+			return array();
+		}
+		$out = array();
+		foreach ( $this->entitlements->subscription_lines( $subscription_id ) as $line ) {
+			if ( ! array_key_exists( $line->id, $before['lines'] ) && ! array_key_exists( (string) $line->id, $before['lines'] ) ) {
+				$out[] = (int) $line->id;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether a line was added after a renewal order was paid, for a renewal with no snapshot: added by
+	 * an order created after the renewal's, and written at or after the moment the renewal was paid
+	 * (WooCommerce's paid date, else its completed date). It joined the subscription afterwards,
+	 * co-termed with what the renewal set, and was not moved by it. A line added while the renewal's
+	 * invoice was still unpaid also has a later order id, but was there when the payment extended the
+	 * subscription's lines, so it was moved. With no date to go by, the later order id decides.
+	 *
+	 * @param \WPLM\Models\Entitlement $line  The line.
+	 * @param \WC_Order                 $order The renewal order.
+	 * @return bool
+	 */
+	private static function added_after_payment( \WPLM\Models\Entitlement $line, \WC_Order $order ): bool {
+		if ( null === $line->order_id || $line->order_id <= $order->get_id() ) {
+			return false;
+		}
+		$paid    = $order->get_date_paid() ?? $order->get_date_completed();
+		$created = '' !== $line->created_at ? strtotime( $line->created_at . ' UTC' ) : false;
+		return null === $paid || false === $created || $created >= $paid->getTimestamp();
+	}
 
 	/**
 	 * The records, the hooks and the note every rollback ends with (the order is stamped already).

@@ -61,6 +61,41 @@ class PaidAheadRenewalTest extends TestCase {
 	 * @return array{license_id:int, subscription_id:int, customer:int, p0:string, p1:string, factory:int, factory_order:int, item:int, total:float, item_total:float}
 	 */
 	private function refunded_with_factory_joined(): array {
+		list( $bought, $customer ) = $this->monthly_profile();
+		$sub_id                    = $bought['subscription_id'];
+		$p0                        = EntitlementService::add_period( wp_date( 'Y-m-d' ), -1, 'day' );
+		$this->lines_through( $sub_id, $p0 );
+
+		$renewal = $this->renew( $sub_id );
+		$p1      = EntitlementService::renewed_paid_through( $p0, $p0, 0, 1, 'month' );
+		$this->assertSame( array( $p1 ), $this->dates( $sub_id ) );
+
+		// Factory is bought on a later order and joins the subscription, paid through the renewed month.
+		list( $factory, $sub_item, $order_id ) = $this->buy_factory( $bought, $customer );
+		$this->assertSame( $p1, $factory->paid_through, 'Co-termed with the renewed month.' );
+
+		wc_get_order( $renewal->get_id() )->update_status( 'refunded' );
+		$this->assertSame( 'on-hold', $this->subscription_row( $sub_id )['status'] );
+		$this->assertSame( $p1, $this->through( $factory->id ), 'Factory keeps the period it was bought for.' );
+		$this->assertSame( array( $p0, $p1 ), $this->dates( $sub_id ), 'The rest is back a month.' );
+
+		return array(
+			'license_id'      => $bought['license_id'],
+			'subscription_id' => $sub_id,
+			'customer'        => $customer,
+			'p0'              => $p0,
+			'p1'              => $p1,
+			'factory'         => $factory->id,
+			'factory_order'   => $order_id,
+			'item'            => $sub_item->id,
+			'total'           => (float) $this->subscription_row( $sub_id )['recurring_total'],
+			'item_total'      => (float) $sub_item->line_total,
+			'renewal'         => $renewal->get_id(),
+		);
+	}
+
+	/** @return array{0: array, 1: int} A monthly profile licence (base and users, 5000) and its customer. */
+	private function monthly_profile(): array {
 		$plan     = $this->create_plan(
 			array(
 				array(
@@ -83,15 +118,17 @@ class PaidAheadRenewalTest extends TestCase {
 		);
 		$customer = $this->create_customer();
 		$bought   = $this->buy( $this->create_plan_product( $plan['plan_id'] ), $plan['packages'][0], $customer );
-		$sub_id   = $bought['subscription_id'];
-		$p0       = EntitlementService::add_period( wp_date( 'Y-m-d' ), -1, 'day' );
-		$this->lines_through( $sub_id, $p0 );
+		$this->assertGreaterThan( 0, $bought['subscription_id'] );
+		return array( $bought, $customer );
+	}
 
-		$renewal = $this->renew( $sub_id );
-		$p1      = EntitlementService::renewed_paid_through( $p0, $p0, 0, 1, 'month' );
-		$this->assertSame( array( $p1 ), $this->dates( $sub_id ) );
-
-		// Factory is bought on a later order and joins the subscription, paid through the renewed month.
+	/**
+	 * The customer buys the Factory add-on (1500 a month) for the licence on a new order: it joins the
+	 * subscription, co-termed with its lines, and is billed as an item of it.
+	 *
+	 * @return array{0: \WPLM\Models\Entitlement, 1: object, 2: int} Factory's line, its subscription item, the order.
+	 */
+	private function buy_factory( array $bought, int $customer ): array {
 		$addons  = $this->create_plan(
 			array(
 				array(
@@ -124,38 +161,20 @@ class PaidAheadRenewalTest extends TestCase {
 		$order->update_status( 'completed' );
 
 		$factory = null;
-		foreach ( $this->make( EntitlementRepository::class )->get_by_subscription( $sub_id ) as $line ) {
+		foreach ( $this->make( EntitlementRepository::class )->get_by_subscription( $bought['subscription_id'] ) as $line ) {
 			if ( 'factory' === $line->code ) {
 				$factory = $line;
 			}
 		}
 		$this->assertNotNull( $factory, 'Factory joined the subscription.' );
-		$this->assertSame( $p1, $factory->paid_through, 'Co-termed with the renewed month.' );
 		$sub_item = null;
-		foreach ( $this->make( SubscriptionRepository::class )->get_items( $sub_id ) as $sub_item_row ) {
+		foreach ( $this->make( SubscriptionRepository::class )->get_items( $bought['subscription_id'] ) as $sub_item_row ) {
 			if ( in_array( $factory->id, array_map( 'intval', (array) ( $sub_item_row->meta['entitlement_ids'] ?? array() ) ), true ) ) {
 				$sub_item = $sub_item_row;
 			}
 		}
 		$this->assertNotNull( $sub_item, 'Billed as an item of the subscription.' );
-
-		wc_get_order( $renewal->get_id() )->update_status( 'refunded' );
-		$this->assertSame( 'on-hold', $this->subscription_row( $sub_id )['status'] );
-		$this->assertSame( $p1, $this->through( $factory->id ), 'Factory keeps the period it was bought for.' );
-		$this->assertSame( array( $p0, $p1 ), $this->dates( $sub_id ), 'The rest is back a month.' );
-
-		return array(
-			'license_id'      => $bought['license_id'],
-			'subscription_id' => $sub_id,
-			'customer'        => $customer,
-			'p0'              => $p0,
-			'p1'              => $p1,
-			'factory'         => $factory->id,
-			'factory_order'   => $order->get_id(),
-			'item'            => $sub_item->id,
-			'total'           => (float) $this->subscription_row( $sub_id )['recurring_total'],
-			'item_total'      => (float) $sub_item->line_total,
-		);
+		return array( $factory, $sub_item, $order->get_id() );
 	}
 
 	private function lines_through( int $subscription_id, string $through ): void {
@@ -425,6 +444,73 @@ class PaidAheadRenewalTest extends TestCase {
 		$notes = $this->notes( $invoice->get_id() );
 		$this->assertStringContainsString( 'Kept: Factory (paid through ' . $s['p1'] . ') — not charged by this renewal, so not taken back.', $notes );
 		$this->assertStringNotContainsString( 'joined after this renewal', $notes );
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// An add-on bought while a renewal invoice was unpaid; a refunded renewal paid again
+	// ---------------------------------------------------------------------------------------------
+
+	/**
+	 * Renew now (early) → Factory bought before the invoice is paid → invoice paid → refunded in full:
+	 * paying it moved Factory with the rest, so the refund takes Factory back with the rest, and the next
+	 * invoice charges for Factory (nothing is "paid ahead").
+	 */
+	public function test_an_add_on_bought_while_the_renewal_invoice_was_unpaid_goes_back_on_its_refund_and_is_charged_next_time(): void {
+		list( $bought, $customer ) = $this->monthly_profile();
+		$sub_id                    = $bought['subscription_id'];
+		$p0                        = EntitlementService::add_period( wp_date( 'Y-m-d' ), 5, 'day' );
+		$this->lines_through( $sub_id, $p0 );
+		$base_total = (float) $this->subscription_row( $sub_id )['recurring_total'];
+
+		$invoice = $this->make( SelfServiceRenewal::class )->create_renewal_order_object( $sub_id );
+		$this->assertSame( $base_total, (float) $invoice->get_total(), 'The invoice bills the base.' );
+		list( $factory, $sub_item, $by ) = $this->buy_factory( $bought, $customer );
+		$this->assertGreaterThan( $invoice->get_id(), $by, 'Bought on an order created after the invoice.' );
+		$this->assertSame( $p0, $factory->paid_through, 'Co-termed with the lines as they are.' );
+		$total = (float) $this->subscription_row( $sub_id )['recurring_total'];
+		$this->assertSame( $base_total + (float) $sub_item->line_total, $total );
+
+		$this->pay( $invoice );
+		$p1 = EntitlementService::renewed_paid_through( $p0, $p0, 0, 1, 'month' );
+		$this->assertSame( array( $p1 ), $this->dates( $sub_id ), 'Paying the invoice moved every line, Factory too.' );
+
+		wc_get_order( $invoice->get_id() )->update_status( 'refunded' );
+
+		$this->assertSame( $p0, $this->through( $factory->id ), 'Moved by the refunded renewal: taken back with the rest.' );
+		$this->assertSame( array( $p0 ), $this->dates( $sub_id ) );
+		$this->assertSame( $this->start_of_day_after( $p0 ), $this->subscription_row( $sub_id )['next_payment'] );
+		$this->assertStringNotContainsString( 'removed or moved back since', $this->notes( $invoice->get_id() ) );
+
+		$this->make( SubscriptionService::class )->resume( $sub_id );
+		$sub = $this->make( SubscriptionRepository::class )->find_by_id( $sub_id );
+		$this->assertSame( array(), $this->make( RenewalProcessor::class )->items_paid_ahead( $sub ), 'Nothing is paid ahead.' );
+		$next = $this->make( SelfServiceRenewal::class )->create_renewal_order_object( $sub_id );
+		$this->assertSame( $total, (float) $next->get_total(), 'Factory is invoiced with the rest.' );
+		$this->assertStringNotContainsString( 'not charged this time', $this->notes( $next->get_id() ) );
+	}
+
+	/**
+	 * Renew → Factory joins → renewal refunded (Factory kept) → the renewal completed again: it extends
+	 * only what it extended the first time, so Factory keeps the period its own order paid for, and the
+	 * next renewal charges for Factory with the rest.
+	 */
+	public function test_a_refunded_renewal_completed_again_does_not_extend_the_add_on_that_joined_meanwhile(): void {
+		$s      = $this->refunded_with_factory_joined();
+		$sub_id = $s['subscription_id'];
+		$p2     = EntitlementService::renewed_paid_through( $s['p1'], $s['p1'], 0, 1, 'month' );
+
+		wc_get_order( $s['renewal'] )->update_status( 'completed' );
+
+		$this->assertSame( 'active', $this->subscription_row( $sub_id )['status'] );
+		$this->assertSame( $s['p1'], $this->through( $s['factory'] ), 'Not charged by this renewal: not extended.' );
+		$this->assertSame( array( $s['p1'] ), $this->dates( $sub_id ), 'In step again.' );
+		$this->assertSame( $this->start_of_day_after( $s['p1'] ), $this->subscription_row( $sub_id )['next_payment'] );
+
+		$next = $this->make( SelfServiceRenewal::class )->create_renewal_order_object( $sub_id );
+		$this->assertSame( $s['total'], (float) $next->get_total(), 'Factory is invoiced with the rest.' );
+		$this->assertStringNotContainsString( 'not charged this time', $this->notes( $next->get_id() ) );
+		$this->pay( $next );
+		$this->assertSame( array( $p2 ), $this->dates( $sub_id ), 'All lines move together.' );
 	}
 
 	/** @dataProvider external_totals */

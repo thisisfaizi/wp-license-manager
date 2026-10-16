@@ -271,9 +271,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
     move back, and the subscription's next payment follows them alone. An add-on bought after the
     renewal (co-termed with the renewed period) keeps the period it was bought for; the note says
     "Kept: Factory, added by order #N (paid through D)". `wplm_entitlement_saved( $line, 'rolled_back' )`
-    fires only for the lines that moved. A renewal paid before snapshots keeps a line a later order
-    added the same way (`EntitlementService::roll_back_line()`'s new `$renewal_order` guard, why
-    `joined`).
+    fires only for the lines that moved. Every line in the snapshot moves back, whatever order added it:
+    an add-on bought while the renewal's invoice was still unpaid (Renew now, early) has a later order
+    id, yet paying the invoice extended it, so the refund takes it back with the rest and the next
+    renewal charges for it. A renewal paid before snapshots keeps a line only when a later order added
+    it at or after the moment the renewal was paid (the order's paid date, else its completed date).
+  - **Completed again after a refund, a renewal extends only what it extended the first time** (its
+    earlier snapshot): an add-on that joined meanwhile keeps the period its own order paid for, and the
+    next renewal charges for it with the rest.
+  - **Known gap, for the owner:** an add-on bought while a renewal invoice is unpaid is not on that
+    invoice, yet paying the invoice extends it with the rest (one period not charged). A refund of the
+    invoice takes it back.
   - **Skipped once at the next renewal** (`RenewalProcessor::items_paid_ahead()`). An add-on item whose
     lines already reach the date the next renewal gives the subscription's lines
     (`EntitlementService::renewal_target()`) is not charged that time and its lines are not extended:

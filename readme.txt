@@ -102,7 +102,7 @@ The signing private key, encryption key, and HMAC secrets are stored as non-auto
 = 1.3.0 =
 * New: package extras at purchase and for an existing licence (see CHANGELOG.md for the full list).
 * New: Mark add-ons settled on the WooCommerce order screen (posts storage and HPOS) for add-on lines refused at fulfilment; refusal notes a retry cannot cure now say to refund the line or mark it settled instead of completing the order again. Settling cancels an add-ons subscription opened for the line that never billed, and Undo settled add-ons reopens a settled line.
-* New: a full refund of a renewal order takes the period it paid for back; a partial refund changes nothing and says so. Refunding the latest renewal puts the subscription on hold (resume it to keep billing). A dated add-on that joined after the renewal keeps its period, and the next renewal skips it once while it is paid ahead. Card (cron) renewal orders are marked as renewals, so completing one again after a refund applies it again, once.
+* New: a full refund of a renewal order takes the period it paid for back; a partial refund changes nothing and says so. Refunding the latest renewal puts the subscription on hold (resume it to keep billing). A dated add-on that joined after the renewal keeps its period, and the next renewal skips it once while it is paid ahead; one bought while the renewal invoice was still unpaid was extended by it, so it goes back with the rest. Card (cron) renewal orders are marked as renewals, so completing one again after a refund applies it again, once.
 * Fix: the subscription screen's Pause, Resume and Cancel buttons now go through the subscription service, sending the same webhooks and emails as everywhere else.
 
 = 1.0.8 =

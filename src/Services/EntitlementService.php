@@ -298,10 +298,13 @@ class EntitlementService {
 	/**
 	 * Take back what a refunded renewal added to one line, from what the renewal moved it (`from` →
 	 * `to`): see {@see taken_back()}. Nothing changes when the line is gone or lifetime (`$why` = `gone`),
-	 * was written by an order later than the refunded renewal's (`joined`: it joined the subscription
-	 * after the renewal and keeps the period it was bought for), ends before `to` — moved back already,
-	 * or by hand (`earlier`) — or was renewed afresh after the refunded period had ended (`over`), so
-	 * running it twice moves it back once.
+	 * ends before `to` — moved back already, or by hand (`earlier`) — or was renewed afresh after the
+	 * refunded period had ended (`over`), so running it twice moves it back once.
+	 *
+	 * The caller decides which lines the renewal moved (its snapshot, or for a renewal paid before
+	 * snapshots, the lines it set that were there when it was paid). The line's own `order_id` says
+	 * nothing about that: an order's id is given when the order is created, not when it is paid, so a
+	 * line added while a renewal invoice was still unpaid has a later order id and was still moved by it.
 	 *
 	 * Fires `wplm_entitlement_saved` with `rolled_back`, only for a line that moved.
 	 *
@@ -310,19 +313,14 @@ class EntitlementService {
 	 * @param string      $to       The paid-through date the renewal set (Y-m-d).
 	 * @param int         $interval The renewal's billing interval.
 	 * @param string      $period   Its billing period (day|week|month|year).
-	 * @param string|null $why      Set, when nothing changed, to `gone`, `joined`, `earlier` or `over`.
-	 * @param int         $renewal_order The refunded renewal's order (0: not checked).
+	 * @param string|null $why      Set, when nothing changed, to `gone`, `earlier` or `over`.
 	 * @return array{from: string, to: string}|null The line's date before and after, or null when unchanged.
 	 */
-	public function roll_back_line( int $id, string $from, string $to, int $interval = 0, string $period = '', ?string &$why = null, int $renewal_order = 0 ): ?array {
+	public function roll_back_line( int $id, string $from, string $to, int $interval = 0, string $period = '', ?string &$why = null ): ?array {
 		$why  = null;
 		$line = $this->repo->find_by_id( $id );
 		if ( null === $line || null === $line->paid_through ) {
 			$why = 'gone';
-			return null;
-		}
-		if ( $renewal_order > 0 && null !== $line->order_id && $line->order_id > $renewal_order ) {
-			$why = 'joined';
 			return null;
 		}
 		$through = self::taken_back( $line->paid_through, $from, $to, $interval, $period );

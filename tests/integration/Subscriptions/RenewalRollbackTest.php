@@ -761,6 +761,82 @@ class RenewalRollbackTest extends TestCase {
 		$this->assertStringContainsString( 'Kept: Factory, added by order #' . $by, $this->notes( $order ) );
 	}
 
+	/**
+	 * Renew now, early: the invoice is created; a dated add-on joins on a later order, co-termed with the
+	 * lines as they are; then the invoice is paid, which moves every line, the add-on's too. A refund of
+	 * it takes back what it moved — the add-on included, although its order id is later than the
+	 * renewal's (an order id is given when an order is created, not when it is paid).
+	 */
+	public function test_a_line_added_while_the_invoice_was_unpaid_is_taken_back_with_the_rest(): void {
+		$bought  = $this->buy_profile( 'month' );
+		$sub_id  = $bought['subscription_id'];
+		$from    = $this->through( $sub_id );
+		$p0      = (string) reset( $from );
+		$next0   = $this->subscription_row( $sub_id )['next_payment'];
+		$invoice = $this->make( SelfServiceRenewal::class )->create_renewal_order_object( $sub_id );
+		list( $joined, $by ) = $this->join_line( $bought, 'factory', $p0 );
+		$this->assertGreaterThan( $invoice->get_id(), $by );
+		$invoice->set_status( 'on-hold' );
+		$invoice->save();
+		$invoice->update_status( 'completed' );
+		$p1 = $this->next_month( $p0 );
+		$this->assertSame( $p1, $this->through( $sub_id )[ $joined ], 'Paying the invoice moved the new line too.' );
+		$this->saved = array();
+
+		$order = $this->refund( wc_get_order( $invoice->get_id() ) );
+
+		$this->assertSame( $p0, $this->through( $sub_id )[ $joined ], 'This renewal moved it: back with the rest.' );
+		$this->assertSame( $this->all( $this->through( $sub_id ), $p0 ), $this->through( $sub_id ) );
+		$this->assertSame( $next0, $this->subscription_row( $sub_id )['next_payment'] );
+		$this->assertContains( $joined, array_map( static fn( $c ) => $c[0]->id, $this->saved ), 'Announced as rolled back.' );
+		$notes = $this->notes( $order );
+		$this->assertStringNotContainsString( 'removed or moved back since', $notes );
+		$this->assertStringNotContainsString( 'Kept:', $notes );
+	}
+
+	/** The same in an earlier renewal refunded under a later one: the line goes back one period, not left a period ahead. */
+	public function test_a_line_added_while_an_earlier_invoice_was_unpaid_goes_back_when_it_is_refunded_under_a_later_one(): void {
+		$bought  = $this->buy_profile( 'month' );
+		$sub_id  = $bought['subscription_id'];
+		$from    = $this->through( $sub_id );
+		$p0      = (string) reset( $from );
+		$invoice = $this->make( SelfServiceRenewal::class )->create_renewal_order_object( $sub_id );
+		list( $joined ) = $this->join_line( $bought, 'factory', $p0 );
+		$invoice->set_status( 'on-hold' );
+		$invoice->save();
+		$invoice->update_status( 'completed' );
+		$this->renew( $sub_id );
+		$p1 = $this->next_month( $p0 );
+
+		$this->refund( wc_get_order( $invoice->get_id() ) );
+
+		$this->assertSame( $this->all( $this->through( $sub_id ), $p1 ), $this->through( $sub_id ), 'Every line one month back, the added one too.' );
+		$this->assertSame( $this->start_of_day_after( $p1 ), $this->subscription_row( $sub_id )['next_payment'] );
+		unset( $joined );
+	}
+
+	public function test_a_renewal_paid_before_snapshots_takes_back_a_line_added_before_it_was_paid(): void {
+		$bought  = $this->buy_profile( 'month' );
+		$sub_id  = $bought['subscription_id'];
+		$from    = $this->through( $sub_id );
+		$p0      = (string) reset( $from );
+		$invoice = $this->make( SelfServiceRenewal::class )->create_renewal_order_object( $sub_id );
+		list( $joined, $by ) = $this->join_line( $bought, 'factory', $p0 );
+		$this->assertGreaterThan( $invoice->get_id(), $by );
+		$this->set_row( 'entitlements', $joined, array( 'created_at' => $this->utc( -HOUR_IN_SECONDS ) ) );
+		$invoice->set_status( 'on-hold' );
+		$invoice->save();
+		$invoice->update_status( 'completed' );
+		$order = $this->forget_snapshot( $invoice );
+		$this->assertSame( $this->next_month( $p0 ), $this->through( $sub_id )[ $joined ] );
+
+		$order = $this->refund( $order );
+
+		$this->assertSame( $p0, $this->through( $sub_id )[ $joined ], 'There when the renewal was paid: moved by it, so taken back.' );
+		$this->assertSame( $this->all( $this->through( $sub_id ), $p0 ), $this->through( $sub_id ) );
+		$this->assertStringNotContainsString( 'Kept:', $this->notes( $order ) );
+	}
+
 	public function test_a_rollback_run_again_while_it_runs_takes_back_one_period(): void {
 		$bought = $this->buy_profile( 'month' );
 		$sub_id = $bought['subscription_id'];
