@@ -20,8 +20,13 @@ defined( 'ABSPATH' ) || exit;
 do_action( 'woocommerce_email_header', $email_heading, $email );
 ?>
 
+<?php if ( $subscription instanceof \WPLM\Models\Subscription && $subscription->is_addons_only() ) : ?>
+<p><?php echo esc_html( sprintf( /* translators: %s: "Add-ons for licence ending ABCD" */ __( 'This is the subscription for your %s. Your licence itself is for life and keeps working; only these add-ons stop, after their paid period and grace.', 'wp-license-manager' ), lcfirst( \WPLM\Services\AddonService::label_for( $subscription ) ) ) ); ?></p>
+<?php endif; ?>
 <?php if ( ! empty( $at_period_end ) ) : ?>
 <p><?php esc_html_e( 'Your subscription has been set to cancel at the end of the current billing period. You will continue to have access until then.', 'wp-license-manager' ); ?></p>
+<?php elseif ( $subscription instanceof \WPLM\Models\Subscription && $subscription->is_addons_only() ) : ?>
+<p><?php esc_html_e( 'Your add-ons subscription has been cancelled.', 'wp-license-manager' ); ?></p>
 <?php else : ?>
 <p><?php esc_html_e( 'Your subscription has been cancelled. Access to any associated software licenses has been revoked.', 'wp-license-manager' ); ?></p>
 <?php endif; ?>

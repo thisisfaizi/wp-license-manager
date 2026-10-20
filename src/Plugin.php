@@ -269,6 +269,13 @@ final class Plugin {
 			)
 		);
 		$this->container->bind(
+			Services\PackageExtrasService::class,
+			fn( $c ) => new Services\PackageExtrasService(
+				$c->make( Licensing\ProfileRegistry::class ),
+				$c->make( Services\EntitlementService::class )
+			)
+		);
+		$this->container->bind(
 			Services\AddonService::class,
 			fn( $c ) => new Services\AddonService(
 				$c->make( Services\EntitlementService::class ),
@@ -276,7 +283,8 @@ final class Plugin {
 				$c->make( Repositories\LicenseRepository::class ),
 				$c->make( Services\PlanService::class ),
 				$c->make( Licensing\ProfileRegistry::class ),
-				$c->make( Repositories\SubscriptionRepository::class )
+				$c->make( Repositories\SubscriptionRepository::class ),
+				$c->make( Services\PackageExtrasService::class )
 			)
 		);
 		$this->container->bind(
@@ -434,12 +442,12 @@ final class Plugin {
 		// "unexpected output during activation" warning (plugins_loaded fires
 		// inside the activation request before the activation hook runs).
 		add_action( 'admin_init', array( $this, 'maybe_upgrade_db' ) );
-		// A licence server is mostly REST and cron traffic; an update must not wait for someone
-		// to open wp-admin before its schema exists.
+		// A licence server is mostly REST, cron and storefront traffic; an update must not wait for
+		// someone to open wp-admin before its schema exists (a shop order completed first would
+		// otherwise miss it). Every request checks: one cached option compared with a constant. In the
+		// activation request `init` has already run when this file is loaded, so it never runs there.
 		add_action( 'rest_api_init', array( $this, 'maybe_upgrade_db' ), 1 );
-		if ( wp_doing_cron() ) {
-			add_action( 'init', array( $this, 'maybe_upgrade_db' ), 1 );
-		}
+		add_action( 'init', array( $this, 'maybe_upgrade_db' ), 1 );
 
 		// i18n.
 		add_action( 'init', array( $this, 'load_textdomain' ) );
@@ -537,6 +545,11 @@ final class Plugin {
 			$this->container->make( Services\Subscriptions\SubscriptionService::class ),
 			$this->container->make( Services\EntitlementService::class ),
 			$this->container->make( Licensing\ProfileRegistry::class ),
+			$this->container->make( Services\AddonService::class )
+		) )->register();
+
+		// "Mark add-ons settled" on the order screen: closes add-on lines fulfilment refused for good.
+		( new Integrations\WooCommerce\AddonSettlement(
 			$this->container->make( Services\AddonService::class )
 		) )->register();
 

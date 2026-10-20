@@ -96,6 +96,9 @@ class PlanListTable extends \WP_List_Table {
 		}
 		$names = array_map( static fn( $p ) => $p->name, $item->packages );
 		$names = array_filter( $names );
+		if ( ! $names && $item->is_addon() && has_filter( 'wplm_package_extras' ) ) {
+			return '<em>' . esc_html__( 'Add-ons priced by a plugin', 'wp-license-manager' ) . '</em>';
+		}
 		return $names ? esc_html( implode( ', ', $names ) ) : '<em>' . esc_html__( 'No license types yet', 'wp-license-manager' ) . '</em>';
 	}
 

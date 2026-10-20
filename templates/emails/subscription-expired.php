@@ -19,7 +19,12 @@ defined( 'ABSPATH' ) || exit;
 do_action( 'woocommerce_email_header', $email_heading, $email );
 ?>
 
+<?php if ( $subscription instanceof \WPLM\Models\Subscription && $subscription->is_addons_only() ) : ?>
+<p><?php echo esc_html( sprintf( /* translators: %s: "Add-ons for licence ending ABCD" */ __( 'This is the subscription for your %s. Your licence itself is for life and keeps working; only these add-ons stop, after their paid period and grace.', 'wp-license-manager' ), lcfirst( \WPLM\Services\AddonService::label_for( $subscription ) ) ) ); ?></p>
+<?php endif; ?>
+<?php if ( ! ( $subscription instanceof \WPLM\Models\Subscription && $subscription->is_addons_only() ) ) : ?>
 <p><?php esc_html_e( 'Your subscription has expired. To continue using the software, please renew or start a new subscription.', 'wp-license-manager' ); ?></p>
+<?php endif; ?>
 
 <table cellspacing="0" cellpadding="6" style="width:100%;border-collapse:collapse;">
 	<tr>

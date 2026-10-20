@@ -11,6 +11,7 @@ defined( 'ABSPATH' ) || exit;
 
 use WPLM\Repositories\RenewalRepository;
 use WPLM\Repositories\SubscriptionRepository;
+use WPLM\Services\Subscriptions\SubscriptionService;
 
 if ( ! class_exists( 'WP_List_Table' ) ) {
 	require_once ABSPATH . 'wp-admin/includes/class-wp-list-table.php';
@@ -26,6 +27,9 @@ class SubscriptionListTable extends \WP_List_Table {
 
 	/** @var RenewalRepository */
 	private RenewalRepository $renewal_repo;
+
+	/** @var SubscriptionService The one status path: Pause, Resume and Cancel go through it. */
+	private SubscriptionService $service;
 
 	/**
 	 * Translated subscription-status labels keyed by status slug.
@@ -46,12 +50,14 @@ class SubscriptionListTable extends \WP_List_Table {
 	}
 
 	/**
-	 * @param SubscriptionRepository $repo
-	 * @param RenewalRepository      $renewal_repo
+	 * @param SubscriptionRepository   $repo
+	 * @param RenewalRepository        $renewal_repo
+	 * @param SubscriptionService|null $service      Status changes (default: the plugin's).
 	 */
-	public function __construct( SubscriptionRepository $repo, RenewalRepository $renewal_repo ) {
+	public function __construct( SubscriptionRepository $repo, RenewalRepository $renewal_repo, ?SubscriptionService $service = null ) {
 		$this->repo         = $repo;
 		$this->renewal_repo = $renewal_repo;
+		$this->service      = $service ?? \WPLM\Plugin::get_instance()->container()->make( SubscriptionService::class );
 		parent::__construct(
 			array(
 				'singular' => 'subscription',
@@ -175,7 +181,9 @@ class SubscriptionListTable extends \WP_List_Table {
 			),
 		);
 
+		$label = $item instanceof \WPLM\Models\Subscription ? \WPLM\Services\AddonService::label_for( $item ) : '';
 		return '<strong><a href="' . esc_url( $edit_url ) . '">#' . esc_html( (string) $id ) . '</a></strong>'
+			. ( '' !== $label ? '<br><span class="wplm-addons-only">' . esc_html( $label ) . '</span>' : '' )
 			. $this->row_actions( $actions );
 	}
 
@@ -277,21 +285,27 @@ class SubscriptionListTable extends \WP_List_Table {
 		// Handle cancel row action.
 		if ( 'cancel' === $action && $id > 0 ) {
 			check_admin_referer( 'wplm_cancel_subscription_' . $id );
-			$this->repo->update_status( $id, 'cancelled' );
-			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&cancelled=1' ) );
+			$done = $this->change_status( 'cancel', $id );
+			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&' . ( $done ? 'cancelled=1' : 'failed=1' ) ) );
 			exit;
 		}
 
-		// Handle bulk cancel.
+		// Handle bulk cancel: the list's own nonce (WP_List_Table prints `bulk-subscriptions`), so a link
+		// alone cannot cancel subscriptions, email their customers and end perpetual licences.
 		if ( 'bulk-cancel' === $this->current_action() ) {
-			// phpcs:ignore WordPress.Security.NonceVerification.Missing,WordPress.Security.NonceVerification.Recommended
-			$ids = array_map( 'absint', (array) ( $_REQUEST['subscription'] ?? array() ) );
+			check_admin_referer( 'bulk-' . $this->_args['plural'] );
+			// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- nonce verified above.
+			$ids    = array_values( array_unique( array_filter( array_map( 'absint', (array) ( $_REQUEST['subscription'] ?? array() ) ) ) ) );
+			$done   = 0;
+			$failed = 0;
 			foreach ( $ids as $sid ) {
-				if ( $sid > 0 ) {
-					$this->repo->update_status( $sid, 'cancelled' );
+				if ( $this->change_status( 'cancel', $sid ) ) {
+					++$done;
+				} else {
+					++$failed;
 				}
 			}
-			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&bulk_cancelled=' . count( $ids ) ) );
+			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&bulk_cancelled=' . $done . '&bulk_failed=' . $failed ) );
 			exit;
 		}
 
@@ -309,6 +323,33 @@ class SubscriptionListTable extends \WP_List_Table {
 			if ( ! empty( $_GET['saved'] ) ) :
 				?>
 				<div class="notice notice-success is-dismissible"><p><?php esc_html_e( 'Subscription updated.', 'wp-license-manager' ); ?></p></div>
+				<?php
+			endif;
+			if ( ! empty( $_GET['failed'] ) ) :
+				?>
+				<div class="notice notice-error is-dismissible"><p><?php esc_html_e( 'The subscription was not changed: its status no longer allows it. Reload and try again.', 'wp-license-manager' ); ?></p></div>
+				<?php
+			endif;
+			if ( ! empty( $_GET['bulk_cancelled'] ) ) :
+				$count = absint( $_GET['bulk_cancelled'] );
+				?>
+				<div class="notice notice-success is-dismissible"><p>
+				<?php
+				/* translators: %d: number of subscriptions cancelled */
+				echo esc_html( sprintf( _n( '%d subscription cancelled.', '%d subscriptions cancelled.', $count, 'wp-license-manager' ), $count ) );
+				?>
+				</p></div>
+				<?php
+			endif;
+			if ( ! empty( $_GET['bulk_failed'] ) ) :
+				$count = absint( $_GET['bulk_failed'] );
+				?>
+				<div class="notice notice-error is-dismissible"><p>
+				<?php
+				/* translators: %d: number of subscriptions not changed */
+				echo esc_html( sprintf( _n( '%d subscription was not cancelled: it no longer exists, or its status no longer allows it.', '%d subscriptions were not cancelled: they no longer exist, or their status no longer allows it.', $count, 'wp-license-manager' ), $count ) );
+				?>
+				</p></div>
 				<?php
 			endif;
 			// phpcs:enable
@@ -362,6 +403,12 @@ class SubscriptionListTable extends \WP_List_Table {
 			</p>
 
 			<?php
+			// phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			if ( ! empty( $_GET['failed'] ) ) :
+				?>
+			<div class="notice notice-error is-dismissible"><p><?php esc_html_e( 'The subscription was not changed: its status no longer allows it. Reload and try again.', 'wp-license-manager' ); ?></p></div>
+				<?php
+			endif;
 			// phpcs:ignore WordPress.Security.NonceVerification.Recommended
 			if ( ! empty( $_GET['saved'] ) ) :
 				?>
@@ -431,7 +478,12 @@ class SubscriptionListTable extends \WP_List_Table {
 							<tr>
 								<th><?php esc_html_e( 'Bound License', 'wp-license-manager' ); ?></th>
 								<td>
-									<?php if ( $sub->license_id ) : ?>
+									<?php if ( $sub->is_addons_only() ) : ?>
+										<a href="<?php echo esc_url( admin_url( 'admin.php?page=wplm-licenses&action=edit&id=' . (int) $sub->addons_license_id ) ); ?>">
+											<?php echo esc_html( \WPLM\Services\AddonService::label_for( $sub ) ); ?>
+										</a>
+										<p class="description"><?php esc_html_e( 'This subscription bills only add-ons of a lifetime licence. Whatever happens to it (on hold, cancelled, expired), the licence keeps its status; only the add-ons it pays for lapse after grace.', 'wp-license-manager' ); ?></p>
+									<?php elseif ( $sub->license_id ) : ?>
 										<a href="<?php echo esc_url( admin_url( 'admin.php?page=wplm-licenses&action=edit&id=' . (int) $sub->license_id ) ); ?>">
 											<?php
 											/* translators: %d: license ID */
@@ -656,38 +708,62 @@ class SubscriptionListTable extends \WP_List_Table {
 	// Inline action handlers called from render_page() before edit routing
 	// -------------------------------------------------------------------------
 
-	/** Handle pause/resume actions from the edit screen action buttons. */
+	/**
+	 * Handle the Pause / Resume / Cancel buttons of the edit screen. Each goes through
+	 * {@see SubscriptionService} — the path the REST API and My Account use — so the webhooks
+	 * (`subscription.paused`, `subscription.resumed`, `subscription.cancelled`), emails and the licence
+	 * sync happen exactly as everywhere else.
+	 */
 	public function handle_inline_actions(): bool {
 		// phpcs:disable WordPress.Security.NonceVerification.Recommended
 		$action = sanitize_text_field( wp_unslash( $_GET['action'] ?? '' ) );
 		$id     = absint( $_GET['id'] ?? 0 );
 		// phpcs:enable
 
-		if ( ! $id ) {
+		$nonces = array(
+			'pause'            => 'wplm_pause_subscription_',
+			'resume'           => 'wplm_resume_subscription_',
+			'cancel_from_edit' => 'wplm_cancel_subscription_',
+		);
+		if ( ! $id || ! isset( $nonces[ $action ] ) ) {
 			return false;
 		}
-
-		if ( 'pause' === $action ) {
-			check_admin_referer( 'wplm_pause_subscription_' . $id );
-			$this->repo->update_status( $id, 'on-hold' );
-			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&action=edit&id=' . $id . '&saved=1' ) );
-			exit;
+		check_admin_referer( $nonces[ $action ] . $id );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You do not have permission to do this.', 'wp-license-manager' ) );
 		}
 
-		if ( 'resume' === $action ) {
-			check_admin_referer( 'wplm_resume_subscription_' . $id );
-			$this->repo->update_status( $id, 'active' );
-			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&action=edit&id=' . $id . '&saved=1' ) );
-			exit;
-		}
+		$done = $this->change_status( 'cancel_from_edit' === $action ? 'cancel' : $action, $id );
+		wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&action=edit&id=' . $id . ( $done ? '&saved=1' : '&failed=1' ) ) );
+		exit;
+	}
 
-		if ( 'cancel_from_edit' === $action ) {
-			check_admin_referer( 'wplm_cancel_subscription_' . $id );
-			$this->repo->update_status( $id, 'cancelled' );
-			wp_safe_redirect( admin_url( 'admin.php?page=wplm-subscriptions&action=edit&id=' . $id . '&saved=1' ) );
-			exit;
+	/**
+	 * Pause, resume or cancel (at once) one subscription through {@see SubscriptionService}.
+	 *
+	 * @param string $action pause|resume|cancel.
+	 * @param int    $id     Subscription id.
+	 * A subscription already cancelled or expired is not cancelled again (no second email or webhook).
+	 *
+	 * @return bool False when its status does not allow it (or it is gone): nothing changed.
+	 */
+	private function change_status( string $action, int $id ): bool {
+		$sub = $this->repo->find_by_id( $id );
+		if ( null === $sub || ( 'cancel' === $action && in_array( $sub->status, array( 'cancelled', 'expired' ), true ) ) ) {
+			return false;
 		}
-
+		try {
+			switch ( $action ) {
+				case 'pause':
+					return $this->service->pause( $id );
+				case 'resume':
+					return $this->service->resume( $id );
+				case 'cancel':
+					return $this->service->cancel( $id );
+			}
+		} catch ( \RuntimeException $e ) {
+			unset( $e );
+		}
 		return false;
 	}
 }

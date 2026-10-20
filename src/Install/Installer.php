@@ -339,6 +339,7 @@ class Installer {
   parent_order_id BIGINT DEFAULT NULL,
   user_id BIGINT NOT NULL,
   license_id BIGINT DEFAULT NULL,
+  addons_license_id BIGINT DEFAULT NULL,
   status VARCHAR(20) NOT NULL DEFAULT 'pending',
   billing_interval SMALLINT NOT NULL DEFAULT 1,
   billing_period VARCHAR(10) NOT NULL DEFAULT 'month',
@@ -358,7 +359,8 @@ class Installer {
   KEY user_id (user_id),
   KEY status (status),
   KEY next_payment (next_payment),
-  KEY license_id (license_id)
+  KEY license_id (license_id),
+  KEY addons_license_id (addons_license_id)
 ) ENGINE=InnoDB {$charset_collate};",
 
 			// 13 — subscription_items

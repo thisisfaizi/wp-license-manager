@@ -223,6 +223,9 @@ class OrderEmailKeys {
 			if ( null === $profile ) {
 				continue;
 			}
+			if ( $order->get_id() === $license->order_id ) {
+				continue; // Extras bought with a new licence are part of it, not added to one the customer had.
+			}
 			$sentences[] = sprintf(
 				/* translators: 1: "licence ending ABCD", 2: what was added */
 				__( 'Added to your %1$s: %2$s.', 'wp-license-manager' ),

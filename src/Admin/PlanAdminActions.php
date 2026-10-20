@@ -117,6 +117,11 @@ class PlanAdminActions {
 			}
 		}
 
+		// An add-on plan may sell only package extras (1.3.0), priced by a plugin: no rows needed then.
+		if ( $addon && array() === $packages && ! has_filter( 'wplm_package_extras' ) ) {
+			$warnings[] = __( 'This add-on plan has no add-on types, and no active plugin prices add-ons (the wplm_package_extras filter), so its products cannot be bought yet.', 'wp-license-manager' );
+		}
+
 		$fields = array(
 			'name'        => $name,
 			'description' => sanitize_textarea_field( (string) ( $post['plan_description'] ?? '' ) ),

@@ -18,6 +18,12 @@ class Subscription {
 	public ?int $parent_order_id = null;
 	public int $user_id          = 0;
 	public ?int $license_id      = null;
+	/**
+	 * An add-ons-only subscription (1.3.0): it bills only recurring add-ons of this lifetime licence.
+	 * It is never bound through `license_id`, so nothing that follows a subscription's status to its
+	 * licence ever reaches the licence; only its own lines lapse.
+	 */
+	public ?int $addons_license_id = null;
 
 	/**
 	 * Status: pending | trial | active | on-hold | pending-cancel | cancelled | expired
@@ -41,6 +47,15 @@ class Subscription {
 	public int $failed_attempts    = 0;
 	public string $created_at      = '';
 	public string $updated_at      = '';
+
+	/**
+	 * Whether this subscription bills only recurring add-ons of a lifetime licence (1.3.0).
+	 *
+	 * @return bool
+	 */
+	public function is_addons_only(): bool {
+		return null !== $this->addons_license_id && $this->addons_license_id > 0;
+	}
 
 	/**
 	 * Whether the subscription is currently active (not in trial, on-hold, etc.).
@@ -91,26 +106,27 @@ class Subscription {
 	 * @return self
 	 */
 	public static function from_row( array $row ): self {
-		$s                   = new self();
-		$s->id               = (int) ( $row['id'] ?? 0 );
-		$s->parent_order_id  = isset( $row['parent_order_id'] ) ? (int) $row['parent_order_id'] : null;
-		$s->user_id          = (int) ( $row['user_id'] ?? 0 );
-		$s->license_id       = isset( $row['license_id'] ) ? (int) $row['license_id'] : null;
-		$s->status           = $row['status'] ?? 'pending';
-		$s->billing_interval = (int) ( $row['billing_interval'] ?? 1 );
-		$s->billing_period   = $row['billing_period'] ?? 'month';
-		$s->recurring_total  = (float) ( $row['recurring_total'] ?? 0.0 );
-		$s->currency         = $row['currency'] ?? 'USD';
-		$s->signup_fee       = (float) ( $row['signup_fee'] ?? 0.0 );
-		$s->trial_end        = $row['trial_end'] ?? null;
-		$s->next_payment     = $row['next_payment'] ?? null;
-		$s->last_payment     = $row['last_payment'] ?? null;
-		$s->end_date         = $row['end_date'] ?? null;
-		$s->payment_method   = $row['payment_method'] ?? null;
-		$s->payment_token_id = isset( $row['payment_token_id'] ) ? (int) $row['payment_token_id'] : null;
-		$s->failed_attempts  = (int) ( $row['failed_attempts'] ?? 0 );
-		$s->created_at       = $row['created_at'] ?? '';
-		$s->updated_at       = $row['updated_at'] ?? '';
+		$s                    = new self();
+		$s->id                = (int) ( $row['id'] ?? 0 );
+		$s->parent_order_id   = isset( $row['parent_order_id'] ) ? (int) $row['parent_order_id'] : null;
+		$s->user_id           = (int) ( $row['user_id'] ?? 0 );
+		$s->license_id        = isset( $row['license_id'] ) ? (int) $row['license_id'] : null;
+		$s->addons_license_id = isset( $row['addons_license_id'] ) ? (int) $row['addons_license_id'] : null;
+		$s->status            = $row['status'] ?? 'pending';
+		$s->billing_interval  = (int) ( $row['billing_interval'] ?? 1 );
+		$s->billing_period    = $row['billing_period'] ?? 'month';
+		$s->recurring_total   = (float) ( $row['recurring_total'] ?? 0.0 );
+		$s->currency          = $row['currency'] ?? 'USD';
+		$s->signup_fee        = (float) ( $row['signup_fee'] ?? 0.0 );
+		$s->trial_end         = $row['trial_end'] ?? null;
+		$s->next_payment      = $row['next_payment'] ?? null;
+		$s->last_payment      = $row['last_payment'] ?? null;
+		$s->end_date          = $row['end_date'] ?? null;
+		$s->payment_method    = $row['payment_method'] ?? null;
+		$s->payment_token_id  = isset( $row['payment_token_id'] ) ? (int) $row['payment_token_id'] : null;
+		$s->failed_attempts   = (int) ( $row['failed_attempts'] ?? 0 );
+		$s->created_at        = $row['created_at'] ?? '';
+		$s->updated_at        = $row['updated_at'] ?? '';
 		return $s;
 	}
 
@@ -121,26 +137,27 @@ class Subscription {
 	 */
 	public function to_array(): array {
 		return array(
-			'id'               => $this->id,
-			'parent_order_id'  => $this->parent_order_id,
-			'user_id'          => $this->user_id,
-			'license_id'       => $this->license_id,
-			'status'           => $this->status,
-			'status_label'     => $this->status_label(),
-			'billing_interval' => $this->billing_interval,
-			'billing_period'   => $this->billing_period,
-			'recurring_total'  => $this->recurring_total,
-			'currency'         => $this->currency,
-			'signup_fee'       => $this->signup_fee,
-			'trial_end'        => $this->trial_end,
-			'next_payment'     => $this->next_payment,
-			'last_payment'     => $this->last_payment,
-			'end_date'         => $this->end_date,
-			'payment_method'   => $this->payment_method,
-			'payment_token_id' => $this->payment_token_id,
-			'failed_attempts'  => $this->failed_attempts,
-			'created_at'       => $this->created_at,
-			'updated_at'       => $this->updated_at,
+			'id'                => $this->id,
+			'parent_order_id'   => $this->parent_order_id,
+			'user_id'           => $this->user_id,
+			'license_id'        => $this->license_id,
+			'addons_license_id' => $this->addons_license_id,
+			'status'            => $this->status,
+			'status_label'      => $this->status_label(),
+			'billing_interval'  => $this->billing_interval,
+			'billing_period'    => $this->billing_period,
+			'recurring_total'   => $this->recurring_total,
+			'currency'          => $this->currency,
+			'signup_fee'        => $this->signup_fee,
+			'trial_end'         => $this->trial_end,
+			'next_payment'      => $this->next_payment,
+			'last_payment'      => $this->last_payment,
+			'end_date'          => $this->end_date,
+			'payment_method'    => $this->payment_method,
+			'payment_token_id'  => $this->payment_token_id,
+			'failed_attempts'   => $this->failed_attempts,
+			'created_at'        => $this->created_at,
+			'updated_at'        => $this->updated_at,
 		);
 	}
 }

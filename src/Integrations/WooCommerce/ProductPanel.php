@@ -200,7 +200,12 @@ class ProductPanel {
 					$options[ $plan->id ] = sprintf( __( '%s (built at purchase)', 'wp-license-manager' ), $plan->name );
 					continue;
 				}
-				$count                = count( $plan->packages );
+				$count = count( $plan->packages );
+				if ( 0 === $count && $plan->is_addon() ) {
+					/* translators: %s: plan name */
+					$options[ $plan->id ] = sprintf( __( '%s (add-ons priced by a plugin)', 'wp-license-manager' ), $plan->name );
+					continue;
+				}
 				$options[ $plan->id ] = sprintf(
 					/* translators: 1: plan name, 2: number of license types */
 					_n( '%1$s (%2$d license type)', '%1$s (%2$d license types)', $count, 'wp-license-manager' ),

@@ -57,6 +57,41 @@ class SelfServiceRenewal {
 
 		// A due manual renewal (or exhausted card retries): one emailed invoice per cycle.
 		add_action( 'wplm_subscription_manual_renewal_due', array( $this, 'invoice_due_renewal' ), 10, 1 );
+
+		// A full refund of a renewal order takes its period back; a partial one only says it does not.
+		// Priority 10: before the add-ons' listeners (20), which then see the rolled-back dates.
+		add_action( 'woocommerce_order_status_refunded', array( $this, 'handle_refunded_order' ), 10, 1 );
+		add_action( 'woocommerce_order_partially_refunded', array( $this, 'handle_partial_refund' ), 10, 2 );
+	}
+
+	/**
+	 * `woocommerce_order_status_refunded`: a renewal order refunded in full takes back the period it paid
+	 * for ({@see RenewalProcessor::roll_back()}). Any other order is left alone.
+	 *
+	 * @param int $order_id WooCommerce order ID.
+	 * @return void
+	 */
+	public function handle_refunded_order( $order_id ): void {
+		$order = wc_get_order( (int) $order_id );
+		if ( $order instanceof \WC_Order ) {
+			$this->renewals->roll_back( $order );
+		}
+	}
+
+	/**
+	 * `woocommerce_order_partially_refunded`: a renewal order keeps its period; the note says so
+	 * ({@see RenewalProcessor::note_partial_refund()}).
+	 *
+	 * @param int $order_id  WooCommerce order ID.
+	 * @param int $refund_id Refund ID.
+	 * @return void
+	 */
+	public function handle_partial_refund( $order_id, $refund_id = 0 ): void {
+		unset( $refund_id );
+		$order = wc_get_order( (int) $order_id );
+		if ( $order instanceof \WC_Order ) {
+			$this->renewals->note_partial_refund( $order );
+		}
 	}
 
 	/**
@@ -159,12 +194,21 @@ class SelfServiceRenewal {
 			return null;
 		}
 
-		// Let third-party code (e.g. a gateway module) build the WC order.
-		$external_id = (int) apply_filters( 'wplm_create_renewal_order', 0, $sub );
+		// An add-on already paid through the period this renewal buys is not invoiced this time
+		// (RenewalProcessor::items_paid_ahead()); the order records it, so paying it extends the rest only.
+		$skip   = $this->renewals->items_paid_ahead( $sub );
+		$amount = $this->renewals->renewal_amount( $sub, $skip );
+
+		// Let third-party code (e.g. a gateway module) build the WC order, billed at $amount. It leaves the
+		// paid-ahead add-ons out only when it billed that amount.
+		$external_id = (int) apply_filters( 'wplm_create_renewal_order', 0, $sub, $amount );
 		if ( $external_id > 0 ) {
 			$ext_order = wc_get_order( $external_id );
 			if ( $ext_order instanceof \WC_Order ) {
 				$this->stamp_renewal( $ext_order, $sub );
+				if ( array() !== $skip && abs( (float) $ext_order->get_total() - $amount ) < 0.005 ) {
+					$this->renewals->stamp_skipped( $ext_order, $skip );
+				}
 				$ext_order->save();
 				$this->record_invoice( $ext_order, $sub );
 				return $ext_order;
@@ -188,8 +232,10 @@ class SelfServiceRenewal {
 		// Deliberately NOT copying _wplm_package_id onto this line item —
 		// PlanCheckout::fulfill_order() would issue a brand-new license if it saw
 		// a package id. Renewal orders must NOT re-fulfill.
-		$product_id = $this->resolve_product_id( $sub );
-		$item_added = false;
+		// An add-ons-only subscription bills the add-ons of a lifetime licence: the invoice lists them,
+		// never the product the licence was bought as (that was paid once, for life).
+		$item_added = $sub->is_addons_only() && $this->add_addons_lines( $order, $sub, array_keys( $skip ) );
+		$product_id = $item_added || $sub->is_addons_only() ? 0 : $this->resolve_product_id( $sub );
 
 		if ( $product_id > 0 ) {
 			$product = wc_get_product( $product_id );
@@ -198,8 +244,8 @@ class SelfServiceRenewal {
 					$product,
 					1,
 					array(
-						'subtotal' => $sub->recurring_total,
-						'total'    => $sub->recurring_total,
+						'subtotal' => $amount,
+						'total'    => $amount,
 					)
 				);
 				$item_added = true;
@@ -208,8 +254,8 @@ class SelfServiceRenewal {
 
 		if ( ! $item_added ) {
 			$fee = new \WC_Order_Item_Fee();
-			$fee->set_name( __( 'License Renewal', 'wp-license-manager' ) );
-			$fee->set_total( $sub->recurring_total );
+			$fee->set_name( $sub->is_addons_only() ? \WPLM\Services\AddonService::label_for( $sub ) : __( 'License Renewal', 'wp-license-manager' ) );
+			$fee->set_total( $amount );
 			$order->add_item( $fee );
 		}
 
@@ -224,6 +270,7 @@ class SelfServiceRenewal {
 
 		$order->set_currency( $sub->currency ?: get_woocommerce_currency() );
 		$this->stamp_renewal( $order, $sub );
+		$this->renewals->stamp_skipped( $order, $skip );
 		$order->calculate_totals();
 		$order->save();
 
@@ -309,22 +356,14 @@ class SelfServiceRenewal {
 	// Private helpers
 	// -------------------------------------------------------------------------
 
+	/** Mark a renewal order (shared with the card path: {@see RenewalProcessor::stamp_renewal_order()}). */
 	private function stamp_renewal( \WC_Order $order, Subscription $sub ): void {
-		$order->update_meta_data( '_wplm_is_renewal', '1' );
-		$order->update_meta_data( '_wplm_subscription_id', (string) $sub->id );
-		$order->update_meta_data( '_wplm_renewal_term_days', (string) $this->term_days( $sub ) );
-		$order->update_meta_data( '_wplm_renewal_cycle', $this->cycle_key( $sub ) );
+		$this->renewals->stamp_renewal_order( $order, $sub );
 	}
 
-	/** The paid-through date (UTC) that identifies the cycle being renewed. */
+	/** The paid-through date (UTC) that identifies the cycle being renewed ({@see RenewalProcessor::cycle_key()}). */
 	private function cycle_key( Subscription $sub ): string {
-		if ( null !== $sub->license_id ) {
-			$license = $this->license_service->get_by_id( $sub->license_id );
-			if ( null !== $license && null !== $license->expires_at ) {
-				return (string) $license->expires_at;
-			}
-		}
-		return (string) ( $sub->next_payment ?? gmdate( 'Y-m-d H:i:s' ) );
+		return $this->renewals->cycle_key( $sub );
 	}
 
 	/**
@@ -368,6 +407,53 @@ class SelfServiceRenewal {
 	}
 
 	/**
+	 * One fee line per add-on an add-ons-only subscription bills ("FBR — Add-ons for licence ending
+	 * ABCD"), at what it bills. Nothing is added (false) when its items do not add up to its recurring
+	 * total: the caller then bills the total on one line.
+	 *
+	 * Items this renewal does not charge for (already paid ahead) are left off.
+	 *
+	 * @param \WC_Order     $order The renewal order.
+	 * @param Subscription $sub   The add-ons-only subscription.
+	 * @param int[]        $skip  Items not charged this time.
+	 * @return bool Whether the lines were added.
+	 */
+	private function add_addons_lines( \WC_Order $order, Subscription $sub, array $skip = array() ): bool {
+		$items = $this->sub_repo->get_items( $sub->id );
+		$sum   = 0.0;
+		foreach ( $items as $sub_item ) {
+			$sum += $sub_item->line_total;
+		}
+		if ( array() === $items || abs( round( $sum - (float) $sub->recurring_total, 4 ) ) >= 0.00005 ) {
+			return false;
+		}
+		$for = \WPLM\Services\AddonService::label_for( $sub );
+		foreach ( $items as $sub_item ) {
+			if ( in_array( (int) $sub_item->id, array_map( 'intval', $skip ), true ) ) {
+				continue;
+			}
+			$label = (string) ( $sub_item->meta['label'] ?? '' );
+			if ( '' === $label ) {
+				$label = __( 'Add-on', 'wp-license-manager' );
+			}
+			if ( $sub_item->quantity > 1 ) {
+				/* translators: 1: quantity, 2: add-on name */
+				$label = sprintf( __( '%1$d × %2$s', 'wp-license-manager' ), $sub_item->quantity, $label );
+			}
+			$fee = new \WC_Order_Item_Fee();
+			/* translators: 1: add-on, 2: "Add-ons for licence ending ABCD" */
+			$fee->set_name( '' !== $for ? sprintf( __( '%1$s — %2$s', 'wp-license-manager' ), $label, $for ) : $label );
+			$fee->set_total( $sub_item->line_total );
+			// Taxed as the product it was bought on would be (a fee is taxable by default).
+			$product = $sub_item->product_id > 0 ? wc_get_product( $sub_item->product_id ) : null;
+			$fee->set_tax_status( $product instanceof \WC_Product ? $product->get_tax_status() : 'none' );
+			$fee->set_tax_class( $product instanceof \WC_Product ? $product->get_tax_class() : '' );
+			$order->add_item( $fee );
+		}
+		return true;
+	}
+
+	/**
 	 * Find the WooCommerce product ID for the subscription so the renewal order carries a
 	 * recognisable line item: the item that spawned it on the parent order, else the licence's
 	 * product.
@@ -398,16 +484,5 @@ class SelfServiceRenewal {
 		}
 
 		return 0;
-	}
-
-	/** Approximate billing term in days, stored as order meta for display only. */
-	private function term_days( Subscription $sub ): int {
-		$map = array(
-			'day'   => 1,
-			'week'  => 7,
-			'month' => 30,
-			'year'  => 365,
-		);
-		return (int) $sub->billing_interval * ( $map[ $sub->billing_period ] ?? 30 );
 	}
 }

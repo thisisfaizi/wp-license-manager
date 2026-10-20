@@ -109,6 +109,12 @@ class SubscriptionService {
 			'failed_attempts'  => 0,
 		);
 
+		// Only written when set: before the 1.3.0 database upgrade has run the column does not exist yet,
+		// and every other subscription must still be created.
+		if ( ! empty( $args['addons_license_id'] ) ) {
+			$data['addons_license_id'] = (int) $args['addons_license_id'];
+		}
+
 		$id = $this->sub_repo->create( $data );
 
 		// Insert subscription items if provided.
@@ -195,6 +201,12 @@ class SubscriptionService {
 	 * @return bool
 	 */
 	public function bind_license( int $sub_id, int $license_id ): bool {
+		$sub = $this->sub_repo->find_by_id( $sub_id );
+		if ( null !== $sub && $sub->is_addons_only() ) {
+			// An add-ons-only subscription must never be bound: its status would reach the licence.
+			\WPLM\Support\Logger::error( 'SubscriptionService: refused to bind add-ons-only subscription ' . $sub_id . ' to licence ' . $license_id . '.' );
+			return false;
+		}
 		return $this->sub_repo->update( $sub_id, array( 'license_id' => $license_id ) );
 	}
 
@@ -311,7 +323,9 @@ class SubscriptionService {
 		// Sync the licence. Billing never locks a licence by changing its status: access ends
 		// because the paid term (expires_at + grace) runs out, and only an owner action
 		// (suspend, revoke, terminate, refund) changes status. Audit F3/F4.
-		if ( null !== $sub->license_id ) {
+		// An add-ons-only subscription never touches its licence, whatever its status: only its own
+		// lines lapse, by their paid-through day and grace (1.3.0).
+		if ( null !== $sub->license_id && ! $sub->is_addons_only() ) {
 			$license = $this->license_service->get_by_id( $sub->license_id );
 
 			if ( null !== $license ) {

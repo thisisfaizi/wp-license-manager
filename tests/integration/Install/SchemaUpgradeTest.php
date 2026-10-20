@@ -157,7 +157,7 @@ class SchemaUpgradeTest extends TestCase {
 		Plugin::get_instance()->maybe_upgrade_db();
 
 		$this->assertSame( '', $wpdb->last_error );
-		$this->assertSame( '1.2.2', get_option( 'wplm_db_version' ) );
+		$this->assertSame( WPLM_DB_VERSION, get_option( 'wplm_db_version' ) );
 		$this->assertTrue( $this->has_column( 'plans', 'kind' ) );
 		$this->assertTrue( $this->has_column( 'entitlements', 'order_id' ) );
 		$this->assertNotEmpty( $wpdb->get_results( "SHOW INDEX FROM {$p}entitlements WHERE Key_name = 'order_id'" ), 'The order lookup is indexed.' );
@@ -169,5 +169,95 @@ class SchemaUpgradeTest extends TestCase {
 		$this->assertNull( $line->order_id );
 
 		$wpdb->delete( $p . 'plans', array( 'id' => $plan_id ) );
+	}
+
+	/** 1.2.2 → 1.3.0: subscriptions gain addons_license_id (add-ons-only subscriptions); rows survive. */
+	public function test_a_1_2_2_database_gains_addons_only_subscriptions_and_keeps_its_rows(): void {
+		global $wpdb;
+		$p = $wpdb->prefix . 'wplm_';
+		$wpdb->query( "ALTER TABLE {$p}subscriptions DROP INDEX addons_license_id, DROP COLUMN addons_license_id" );
+		$wpdb->insert(
+			$p . 'subscriptions',
+			array(
+				'user_id'         => 1,
+				'license_id'      => 42,
+				'status'          => 'active',
+				'recurring_total' => 5000,
+				'created_at'      => gmdate( 'Y-m-d H:i:s' ),
+				'updated_at'      => gmdate( 'Y-m-d H:i:s' ),
+			)
+		);
+		$sub_id = (int) $wpdb->insert_id;
+		update_option( 'wplm_db_version', '1.2.2' );
+		$wpdb->query( 'COMMIT' );
+		$this->assertFalse( $this->has_column( 'subscriptions', 'addons_license_id' ), 'Precondition: the downgrade took.' );
+
+		Plugin::get_instance()->maybe_upgrade_db();
+
+		$this->assertSame( '', $wpdb->last_error );
+		$this->assertSame( '1.3.0', get_option( 'wplm_db_version' ) );
+		$this->assertTrue( $this->has_column( 'subscriptions', 'addons_license_id' ) );
+		$this->assertNotEmpty( $wpdb->get_results( "SHOW INDEX FROM {$p}subscriptions WHERE Key_name = 'addons_license_id'" ) );
+		$sub = $this->make( \WPLM\Repositories\SubscriptionRepository::class )->find_by_id( $sub_id );
+		$this->assertSame( 42, $sub->license_id, 'An existing subscription keeps its licence.' );
+		$this->assertFalse( $sub->is_addons_only() );
+
+		$wpdb->delete( $p . 'subscriptions', array( 'id' => $sub_id ) );
+	}
+
+	/** Between uploading 1.3.0 and the upgrade (the next admin page), subscriptions are still created. */
+	public function test_subscriptions_are_created_before_the_1_3_0_upgrade_has_run(): void {
+		global $wpdb;
+		$p = $wpdb->prefix . 'wplm_';
+		$wpdb->query( "ALTER TABLE {$p}subscriptions DROP INDEX addons_license_id, DROP COLUMN addons_license_id" );
+		update_option( 'wplm_db_version', '1.2.2' );
+		$wpdb->query( 'COMMIT' );
+
+		$sub = $this->make( \WPLM\Services\Subscriptions\SubscriptionService::class )->create(
+			array(
+				'user_id'          => 1,
+				'billing_interval' => 1,
+				'billing_period'   => 'month',
+				'recurring_total'  => 5000,
+				'currency'         => 'PKR',
+			)
+		);
+		$this->assertGreaterThan( 0, $sub->id );
+		$this->assertFalse( $sub->is_addons_only() );
+		$repo = $this->make( \WPLM\Repositories\SubscriptionRepository::class );
+		$this->assertNull( $repo->find_addons_for_license( 42 ), 'No query on a column that is not there yet.' );
+		$this->assertSame( array(), $repo->get_addons_for_license( 42 ) );
+		$this->assertSame( '', $wpdb->last_error );
+
+		$wpdb->delete( $p . 'subscriptions', array( 'id' => $sub->id ) );
+	}
+
+	/**
+	 * A storefront order completed before any admin, REST or cron request ran the 1.3.0 upgrade still
+	 * gets its add-ons subscription: the upgrade runs on every request (it is a version check), and
+	 * opening an add-ons subscription runs it first if it has not.
+	 */
+	public function test_an_addons_subscription_opened_before_the_1_3_0_upgrade_runs_it_first(): void {
+		global $wpdb;
+		$this->assertNotFalse( has_action( 'init', array( Plugin::get_instance(), 'maybe_upgrade_db' ) ), 'Every request checks the schema version.' );
+
+		$p = $wpdb->prefix . 'wplm_';
+		$wpdb->query( "ALTER TABLE {$p}subscriptions DROP INDEX addons_license_id, DROP COLUMN addons_license_id" );
+		update_option( 'wplm_db_version', '1.2.2' );
+		$wpdb->query( 'COMMIT' );
+
+		$license     = new \WPLM\Models\License();
+		$license->id = 424242;
+		$order       = new \WC_Order();
+		$order->set_customer_id( 1 );
+		$order->set_currency( 'PKR' );
+		$sub = $this->make( \WPLM\Services\AddonService::class )->create_addons_subscription( $license, $order, 'month' );
+
+		$this->assertSame( '', $wpdb->last_error );
+		$this->assertTrue( $this->has_column( 'subscriptions', 'addons_license_id' ) );
+		$this->assertSame( 424242, $sub->addons_license_id, 'Linked to its licence.' );
+		$this->assertTrue( $sub->is_addons_only() );
+
+		$wpdb->delete( $p . 'subscriptions', array( 'id' => $sub->id ) );
 	}
 }

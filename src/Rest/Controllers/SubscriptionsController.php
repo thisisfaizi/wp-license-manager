@@ -353,7 +353,9 @@ class SubscriptionsController extends BaseController {
 	/**
 	 * POST /subscriptions/{id}/switch
 	 *
-	 * Body: new_plan array (product_id, recurring_total, billing_interval, billing_period, max_activations).
+	 * Body: new_plan array (product_id, recurring_total, billing_interval, billing_period, max_activations,
+	 * and — so an add-on the new plan already grants stops being billed — package_id or modules).
+	 * With add-on items on the subscription, recurring_total is the new plan's own price (see SwitchManager).
 	 *
 	 * @param \WP_REST_Request $req Request object.
 	 * @return \WP_REST_Response|\WP_Error
@@ -381,6 +383,12 @@ class SubscriptionsController extends BaseController {
 			}
 			if ( isset( $body['max_activations'] ) ) {
 				$new_plan['max_activations'] = absint( $body['max_activations'] );
+			}
+			if ( isset( $body['package_id'] ) ) {
+				$new_plan['package_id'] = absint( $body['package_id'] );
+			}
+			if ( isset( $body['modules'] ) && is_array( $body['modules'] ) ) {
+				$new_plan['modules'] = array_values( array_filter( array_map( 'sanitize_key', array_map( 'strval', $body['modules'] ) ) ) );
 			}
 
 			/** @var SwitchManager $switch_manager */
