@@ -9,6 +9,7 @@ namespace WPLM\Admin;
 
 defined( 'ABSPATH' ) || exit;
 
+use WPLM\Licensing\Profile;
 use WPLM\Licensing\ProfileRegistry;
 use WPLM\Models\Entitlement;
 use WPLM\Models\Plan;
@@ -42,8 +43,8 @@ class PlanAdminActions {
 	 * Create or update a plan and its packages from the editor.
 	 *
 	 * @param array $post Unslashed form fields: plan_id, plan_name, plan_description, plan_status,
-	 *                    plan_profile, plan_addon (checkbox: the plan sells add-ons to an existing
-	 *                    licence), packages[] (each with entitlements[modules][] and
+	 *                    plan_profile, plan_kind (standalone|addon|dynamic; the pre-1.2.7 checkbox
+	 *                    plan_addon is still accepted), packages[] (each with entitlements[modules][] and
 	 *                    entitlements[limits][code]).
 	 * @return array{ok: bool, message: string, plan_id: int, warnings: string[]}
 	 */
@@ -60,9 +61,13 @@ class PlanAdminActions {
 			/* translators: %s: profile code */
 			return $this->result( false, sprintf( __( 'Unknown licence type "%s".', 'wp-license-manager' ), $code ), $plan_id );
 		}
-		$addon = ! empty( $post['plan_addon'] );
+		$kind  = self::posted_kind( $post );
+		$addon = Plan::KIND_ADDON === $kind;
 		if ( $addon && null === $profile ) {
-			return $this->result( false, __( 'An add-on plan adds modules and limits to a customer\'s existing licence, so it needs a licence type with modules and limits. Choose one, or untick "This plan sells add-ons to an existing licence".', 'wp-license-manager' ), $plan_id );
+			return $this->result( false, __( 'An add-on plan adds modules and limits to a customer\'s existing licence, so it needs a licence type with modules and limits. Choose one, or choose "This plan sells a licence".', 'wp-license-manager' ), $plan_id );
+		}
+		if ( Plan::KIND_DYNAMIC === $kind ) {
+			return $this->save_dynamic_plan( $plan_id, $name, $post, $profile );
 		}
 
 		$packages = array();
@@ -117,7 +122,7 @@ class PlanAdminActions {
 			'description' => sanitize_textarea_field( (string) ( $post['plan_description'] ?? '' ) ),
 			'status'      => empty( $post['plan_status'] ) ? 0 : 1,
 			'profile'     => null !== $profile ? $profile->code : null,
-			'kind'        => $addon ? Plan::KIND_ADDON : Plan::KIND_STANDALONE,
+			'kind'        => $kind,
 		);
 
 		try {
@@ -131,6 +136,59 @@ class PlanAdminActions {
 			return $this->result( false, $e->getMessage(), $plan_id );
 		}
 
+		return $this->result( true, __( 'Plan saved.', 'wp-license-manager' ), $plan_id, $warnings );
+	}
+
+	/**
+	 * The plan kind the editor posted: `plan_kind` (standalone|addon|dynamic), or the checkbox
+	 * `plan_addon` that editors before 1.2.7 posted.
+	 *
+	 * @param array $post Unslashed form fields.
+	 * @return string
+	 */
+	private static function posted_kind( array $post ): string {
+		$kind = sanitize_key( (string) ( $post['plan_kind'] ?? '' ) );
+		if ( in_array( $kind, Plan::KINDS, true ) ) {
+			return $kind;
+		}
+		return ! empty( $post['plan_addon'] ) ? Plan::KIND_ADDON : Plan::KIND_STANDALONE;
+	}
+
+	/**
+	 * Save a plan whose package is built at purchase. It has no licence types of its own, so the
+	 * posted rows are ignored and the plan's stored packages are left as they are (old orders and
+	 * subscriptions may still point at them; a dynamic plan never sells them).
+	 *
+	 * @param int          $plan_id Plan id (0 = new).
+	 * @param string       $name    Plan name.
+	 * @param array        $post    Unslashed form fields.
+	 * @param Profile|null $profile The licence profile it sells.
+	 * @return array{ok: bool, message: string, plan_id: int, warnings: string[]}
+	 */
+	private function save_dynamic_plan( int $plan_id, string $name, array $post, ?Profile $profile ): array {
+		if ( null === $profile ) {
+			return $this->result( false, __( 'A plan built at purchase writes modules and limits onto the licence, so it needs a licence type with modules and limits. Choose one, or choose another kind of plan.', 'wp-license-manager' ), $plan_id );
+		}
+		$fields = array(
+			'name'        => $name,
+			'description' => sanitize_textarea_field( (string) ( $post['plan_description'] ?? '' ) ),
+			'status'      => empty( $post['plan_status'] ) ? 0 : 1,
+			'profile'     => $profile->code,
+			'kind'        => Plan::KIND_DYNAMIC,
+		);
+		try {
+			if ( $plan_id > 0 ) {
+				$this->plans->update_plan( $plan_id, $fields );
+			} else {
+				$plan_id = $this->plans->create_plan( $fields );
+			}
+		} catch ( \InvalidArgumentException | \RuntimeException $e ) {
+			return $this->result( false, $e->getMessage(), $plan_id );
+		}
+		$warnings = array();
+		if ( ! has_filter( 'wplm_dynamic_package' ) ) {
+			$warnings[] = __( 'No active plugin builds packages for this plan (the wplm_dynamic_package filter), so its products cannot be bought yet.', 'wp-license-manager' );
+		}
 		return $this->result( true, __( 'Plan saved.', 'wp-license-manager' ), $plan_id, $warnings );
 	}
 

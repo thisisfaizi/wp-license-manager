@@ -6,6 +6,67 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.2.7] — 2026-10-14
+
+### Added
+- **Plans built at purchase (`dynamic`).** A plan can now let the customer build their package on the
+  product page instead of choosing one of the plan's licence types. WP License Manager stays
+  product-agnostic: a plugin for the licence profile supplies the form, the prices and the package
+  through the hooks below. Without such a plugin the product cannot be bought (the cart refuses it).
+  - **Plan editor:** "What the plan sells" is now a choice of three: a licence, add-ons to an existing
+    licence, or **"The customer builds the package at purchase"**. A built-at-purchase plan needs a
+    licence profile and has no licence types: the rows are hidden, and the save ignores them and leaves
+    any stored ones untouched. The editor warns when nothing is hooked into `wplm_dynamic_package`.
+    The old `plan_addon` checkbox value is still accepted.
+  - **Plans list:** such a plan shows "(built at purchase)" and "Built at purchase" in place of its
+    licence types. The product **Licensing** tab lists it as "Name (built at purchase)".
+  - No database change: `wplm_plans.kind` stores `dynamic`.
+- **Hooks for a plugin that builds packages:**
+  - `do_action( 'wplm_dynamic_package_form', Plan $plan, WC_Product $product )` prints the form on the
+    product page. Its fields post as `wplm_dynamic[...]`.
+  - `apply_filters( 'wplm_dynamic_package', null, array $spec, Plan $plan, WC_Product $product )` returns
+    the `Package` for that choice, or a `WP_Error` whose message the customer sees.
+  - `apply_filters( 'wplm_dynamic_price_html', $html, Plan $plan, WC_Product $product )` is the price shown
+    for the product (for example "From …").
+  - `apply_filters( 'wplm_dynamic_package_snapshot', array $snapshot, Package $package, array $spec )`
+    adds keys to the order-line snapshot (for example a price-list version). It cannot change the
+    package's own fields.
+- **What WPLM holds a built package to, whatever the filter returns** (`PlanCheckout::dynamic_package()`):
+  - It must be a `Package` of the plan.
+  - **Billing:** recurring every 1 month or every 1 year, or lifetime. One-time packages are refused.
+  - **Price:** a finite price of 0 or more, rounded to the shop's decimals.
+  - **Entitlements:** a template valid for the plan's profile, with at least one line.
+  - **Forced:** id 0, no sign-up fee, trial, length or "valid for" days, status active.
+  - **Computers per key:** the filter's value if it is 1 or more, otherwise 1.
+
+  Anything else is refused with "This plan cannot be bought right now. Please contact us." The reason
+  is logged.
+- **The browser's price is never used.** The cart line stores only the customer's choice
+  (`wplm_dynamic_spec`, sanitised). The package is rebuilt from it on add to cart, on every cart total
+  (the line price), in the cart display, in `woocommerce_check_cart_items` (a choice that can no longer
+  be built stops the checkout, with the reason) and when the order line is saved. Such a product is
+  sold one per line (quantity 1, no quantity box).
+- **The order line keeps the sale:** `_wplm_plan_id`, `_wplm_dynamic_spec` (the choice, JSON) and
+  `_wplm_dynamic_package` (a JSON snapshot of the package), plus the visible "License Type" (the
+  package name). It never stores `_wplm_package_id`.
+- **Fulfilment issues from the snapshot** on Completed, so a price change after the order never alters
+  the sale:
+  - **Monthly or yearly:** one licence and a subscription that renews at the snapshot price. Its item
+    meta carries `dynamic_spec`.
+  - **Lifetime:** undated lines and no subscription.
+  - Completing again issues nothing more (`_wplm_license_ids`).
+  - Renewals, refunds, add-ons and My Account treat it like any other licence.
+  - A snapshot that is unreadable or belongs to another plan issues nothing. It leaves an order note
+    and stays retryable.
+- The classic checkout handler skips built-at-purchase lines, as it skips package lines.
+
+### Changed
+- `Package::from_row()` also accepts entitlements as an array (a snapshot made with `to_array()`).
+
+### Deploy
+- Deploy this before any plugin that builds packages (Super Ledger Licensing 1.3.0). Nothing changes
+  for existing plans.
+
 ## [1.2.6] — 2026-10-13
 
 ### Added
