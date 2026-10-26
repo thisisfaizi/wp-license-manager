@@ -48,6 +48,7 @@ class Menu {
 		add_action( 'admin_post_wplm_save_webhook', array( $this, 'handle_save_webhook' ) );
 		add_action( 'admin_post_wplm_test_webhook', array( $this, 'handle_test_webhook' ) );
 		add_action( 'admin_post_wplm_add_blacklist', array( $this, 'handle_add_blacklist' ) );
+		add_action( 'admin_post_' . Screens\ApiKeyListTable::REVOKE_ACTION, array( $this, 'handle_revoke_api_key' ) );
 		add_action( 'admin_post_wplm_update_subscription', array( $this, 'handle_update_subscription' ) );
 		add_action( 'admin_post_wplm_save_plan', array( $this, 'handle_save_plan' ) );
 
@@ -547,6 +548,12 @@ class Menu {
 			),
 			array(
 				'parent'   => 'wplm-dashboard',
+				'title'    => __( 'API Keys', 'wp-license-manager' ),
+				'slug'     => 'wplm-api-keys',
+				'callback' => array( $this, 'page_api_keys' ),
+			),
+			array(
+				'parent'   => 'wplm-dashboard',
 				'title'    => __( 'Settings', 'wp-license-manager' ),
 				'slug'     => 'wplm-settings',
 				'callback' => array( $this, 'page_settings' ),
@@ -742,6 +749,18 @@ class Menu {
 	public function page_blacklist(): void {
 		( new Screens\BlacklistTable(
 			$this->container->make( \WPLM\Repositories\BlacklistRepository::class )
+		) )->render_page();
+	}
+
+	/**
+	 * Render the API Keys management page.
+	 *
+	 * @return void
+	 */
+	public function page_api_keys(): void {
+		( new Screens\ApiKeyListTable(
+			$this->container->make( \WPLM\Repositories\ApiKeyRepository::class ),
+			$this->container->make( \WPLM\Services\ApiKeyService::class )
 		) )->render_page();
 	}
 
@@ -962,6 +981,19 @@ class Menu {
 		}
 
 		wp_safe_redirect( admin_url( 'admin.php?page=wplm-blacklist&added=1' ) );
+		exit;
+	}
+
+	/** Revoke an API key from the API Keys screen's row action. */
+	public function handle_revoke_api_key(): void {
+		$id = absint( $_GET['id'] ?? 0 ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- checked on the next line.
+		check_admin_referer( Screens\ApiKeyListTable::REVOKE_ACTION . '_' . $id );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You do not have permission to do this.', 'wp-license-manager' ) );
+		}
+
+		Flash::set( get_current_user_id(), $this->container->make( \WPLM\Services\ApiKeyService::class )->revoke( $id ) );
+		wp_safe_redirect( admin_url( 'admin.php?page=wplm-api-keys' ) );
 		exit;
 	}
 

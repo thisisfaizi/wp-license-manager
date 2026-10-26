@@ -4,7 +4,7 @@ Tags: licensing, license key, woocommerce, software licensing, subscriptions
 Requires at least: 5.8
 Tested up to: 6.5
 Requires PHP: 8.0
-Stable tag: 1.3.0
+Stable tag: 1.3.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -98,6 +98,11 @@ Each license payload is signed with Ed25519. The public key is exposed at `GET /
 The signing private key, encryption key, and HMAC secrets are stored as non-autoloaded options (or as `wp-config.php` constants if you prefer). Only the Ed25519 public key is ever exposed.
 
 == Changelog ==
+
+= 1.3.1 =
+* New: License Manager > API Keys screen. Create a key for the management REST API (the secret is shown once), see when each key was last used, and revoke one.
+* Fix: POST /api-keys failed with a fatal error, and GET /api-keys/{id} could not find any key.
+* Security: a WPLM API key now works only on wplm/v1 routes. Before, it signed in as its owner on every REST route, so a key owned by an administrator, even a read key, could act as that administrator on the rest of the WordPress REST API. Review your keys after updating.
 
 = 1.3.0 =
 * New: package extras at purchase and for an existing licence (see CHANGELOG.md for the full list).

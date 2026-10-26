@@ -6,6 +6,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.3.1] - 2026-10-27
+
+### Added
+- **License Manager → API Keys screen.** Create a key for the management REST API, pick read, write
+  or read and write, see its owner, the last seven characters of its consumer key and when it was last
+  used, and revoke it. The consumer secret is shown once, on the page that created it: it is stored only
+  as a SHA-256 hash and is never kept in plain text, not even in a transient across a redirect.
+- **`ApiKeyService`** issues and revokes keys for both the screen and `POST /api-keys`. It refuses an
+  unknown permission or a user that does not exist.
+- **`ApiKeyRepository::find()`.**
+
+### Fixed
+- `POST /api-keys` called `ApiKeyRepository::insert()`, which does not exist, so creating a key over
+  REST was a fatal error. With no admin screen either, there was no supported way to get a first key.
+- The stored `truncated_key` was an ellipsis plus seven characters (eight) for a `CHAR(7)` column, so
+  the insert would have failed even with the right method. It now stores the last seven characters
+  and the screen adds the ellipsis.
+- `GET /api-keys/{id}` called a missing `ApiKeyRepository::find()`.
+- A key's `created_at` defaulted to site time while `last_access_at` is UTC. Both are UTC now.
+
+### Security
+- **A WPLM API key acts only on `wplm/v1` routes.** `BasicAuth` signed the request in as the key's
+  owner on every REST route, so a key owned by an administrator (even a `read` key) could act as that
+  administrator on `wp/v2` and other plugins' routes. It now passes through outside `wplm/v1`
+  (`BasicAuth::is_wplm_request()`, which reads the raw request so it works for pretty and plain
+  permalinks and for sites in a subdirectory).
+
+### Tests
+- `ApiKeysTest` (6): issue over REST with a write key, fetch by id, a read key refused on POST, a
+  revoked key no longer signs in, the `wplm/v1` scope (including `wplm/v10` and plain permalinks), and
+  bad input refused. Scope and truncated-key length mutation-checked.
+
+---
+
 ## [1.3.0] — 2026-10-15
 
 ### Added
