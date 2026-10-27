@@ -8,7 +8,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/version-1.3.0-6366F1?style=for-the-badge)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.3.1-6366F1?style=for-the-badge)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-active%20development-F59E0B?style=for-the-badge)](#-status)
 [![PHP](https://img.shields.io/badge/PHP-8.0%2B-777BB4?style=for-the-badge&logo=php&logoColor=white)](https://www.php.net)
 [![WordPress](https://img.shields.io/badge/WordPress-5.8%2B-21759B?style=for-the-badge&logo=wordpress&logoColor=white)](https://wordpress.org)
@@ -37,16 +37,15 @@ WPLM is in **active development**. It is not on WordPress.org yet and there are 
 
 | Area | Where it stands |
 |---|---|
-| Plugin | **1.3.0** on `main` ([PR #10](https://github.com/thisisfaizi/wp-license-manager/pull/10), merged 2026-10-14). Full history in [CHANGELOG.md](CHANGELOG.md). |
+| Plugin | **1.3.1** on `main` ([PR #12](https://github.com/thisisfaizi/wp-license-manager/pull/12), merged 2026-10-27: API Keys screen, keys scoped to `wplm/v1`). Full history in [CHANGELOG.md](CHANGELOG.md). |
 | Compatibility | PHP 8.0+, WordPress 5.8+ (tested up to 6.5), WooCommerce 6.0+ (tested up to 9.0) |
 | Releases | None tagged yet. Install from `main` (see [Installation](#-installation)). |
-| Tests | 27 integration test classes that run against a real WordPress, WooCommerce and MySQL ([tests/README.md](tests/README.md)) |
+| Tests | 28 integration test classes that run against a real WordPress, WooCommerce and MySQL ([tests/README.md](tests/README.md)) |
 | CI | Not set up yet. Lint and tests run locally before each merge. |
 | Client SDKs | Dart, Python, PHP and JavaScript at **0.2.0** on GitHub. Not published to pub.dev, PyPI, Packagist or npm yet. |
 
 > [!WARNING]
-> **Known limitations**
-> - **No way to create the first REST API key yet.** There is no admin screen or WP-CLI command for API keys, and `POST /api-keys` needs a write key to call. The management endpoints in [Quick start](#-quick-start) need one. The public client endpoints (`/validate`, `/activate`, `/public-key` and friends) work without a key.
+> **Known limitation**
 > - An add-on bought while a renewal invoice is unpaid is not on that invoice, yet paying the invoice extends it with the rest (one period not charged). See the 1.3.0 notes in [CHANGELOG.md](CHANGELOG.md).
 
 ---
@@ -107,7 +106,7 @@ WPLM is in **active development**. It is not on WordPress.org yet and there are 
 
 ### 🌐 REST API & Webhooks
 - 39 routes (54 route and method pairs) under `wp-json/wplm/v1`: licenses, devices, generators, subscriptions, releases, webhooks, analytics, API keys
-- WPLM API keys (`ck_…` / `cs_…`) over HTTP Basic auth, scoped `read`, `write` or `read_write`, stored as SHA-256 hashes
+- WPLM API keys (`ck_…` / `cs_…`) over HTTP Basic auth, created under **License Manager → API Keys**, scoped `read`, `write` or `read_write`, stored as SHA-256 hashes, valid only on `wplm/v1`
 - Public client endpoints: validate, activate, deactivate, heartbeat, CRL, public key, update check and download
 - Webhooks signed with HMAC-SHA256, with retries, plus Slack, Discord and email presets
 
@@ -216,7 +215,7 @@ Responses are wrapped as `{ "success": true, "data": { … }, "meta": { … } }`
 
 ### Issue a license (management API)
 
-Management routes use a WPLM API key over HTTP Basic auth: the consumer key (`ck_…`) is the username and the consumer secret (`cs_…`) is the password. The key needs `write` or `read_write` permission. See [Known limitations](#-status) about creating the first key.
+Management routes use a WPLM API key over HTTP Basic auth: the consumer key (`ck_…`) is the username and the consumer secret (`cs_…`) is the password. Create one under **License Manager → API Keys** with `write` or `read_write` permission. Copy the secret when it appears: it is shown once and stored only as a hash. A key works only on `wplm/v1` routes, not on the rest of the WordPress REST API.
 
 ```bash
 curl -X POST https://yoursite.com/wp-json/wplm/v1/licenses \
