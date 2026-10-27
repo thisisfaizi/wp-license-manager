@@ -66,7 +66,7 @@ This plugin does not connect to any external service on its own. It is a licensi
 
 == Installation ==
 
-1. Upload the `wp-license-manager` folder to `/wp-content/plugins/`, or install the ZIP via Plugins → Add New → Upload Plugin.
+1. Download wp-license-manager-x.y.z.zip from the latest GitHub release (https://github.com/thisisfaizi/wp-license-manager/releases/latest) and install it via Plugins → Add New → Upload Plugin, or upload the `wp-license-manager` folder to `/wp-content/plugins/`.
 2. Activate the plugin through the Plugins menu in WordPress.
 3. On activation, the plugin creates its database tables and generates its cryptographic secrets automatically.
 4. Visit License Manager → Settings to configure defaults, then Generators to create your first key generator.
@@ -74,9 +74,9 @@ This plugin does not connect to any external service on its own. It is a licensi
 
 = Requirements =
 
-* PHP 7.4 or higher (8.1+ recommended) with the sodium extension (bundled with PHP 7.2+).
+* PHP 8.0 or higher with the sodium extension (bundled with PHP 7.2+).
 * WordPress 5.8 or higher.
-* WooCommerce 6.0+ is optional — core licensing and subscriptions work standalone.
+* WooCommerce 6.0+ is optional: core licensing and subscriptions work standalone.
 * MySQL 5.7 / MariaDB 10.3 or higher.
 
 == Frequently Asked Questions ==
