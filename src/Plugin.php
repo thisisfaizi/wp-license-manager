@@ -466,6 +466,9 @@ final class Plugin {
 		// Licence profiles come from add-ons; a deactivated one silently stops its licences' tokens.
 		( new Admin\UnregisteredProfileNotice( $this->container->make( Licensing\ProfileRegistry::class ) ) )->register();
 
+		// Delete on a second copy runs that copy's uninstall, which before 1.3.2 wiped everything.
+		( new Admin\DuplicateCopyNotice() )->register();
+
 		// REST API.
 		add_action(
 			'rest_api_init',
