@@ -134,6 +134,10 @@ final class Plugin {
 			fn( $c ) => new Repositories\ApiKeyRepository()
 		);
 		$this->container->bind(
+			Services\ApiKeyService::class,
+			fn( $c ) => new Services\ApiKeyService( $c->make( Repositories\ApiKeyRepository::class ) )
+		);
+		$this->container->bind(
 			Repositories\SubscriptionRepository::class,
 			fn( $c ) => new Repositories\SubscriptionRepository()
 		);

@@ -49,6 +49,24 @@ class ApiKeyRepository {
 	}
 
 	/**
+	 * Find an API key row by primary key.
+	 *
+	 * @param int $id Row id.
+	 * @return ApiKey|null
+	 */
+	public function find( int $id ): ?ApiKey {
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'wplm_api_keys';
+		$row   = $wpdb->get_row(
+			$wpdb->prepare( "SELECT * FROM `{$table}` WHERE id = %d LIMIT 1", $id ),
+			ARRAY_A
+		);
+
+		return $row ? ApiKey::from_row( $row ) : null;
+	}
+
+	/**
 	 * Return all API key rows ordered by creation date.
 	 *
 	 * @return ApiKey[]
@@ -84,7 +102,7 @@ class ApiKeyRepository {
 	public function create( array $data ): int {
 		global $wpdb;
 
-		$data['created_at'] = $data['created_at'] ?? current_time( 'mysql' );
+		$data['created_at'] = $data['created_at'] ?? current_time( 'mysql', true );
 
 		$result = $wpdb->insert(
 			$wpdb->prefix . 'wplm_api_keys',

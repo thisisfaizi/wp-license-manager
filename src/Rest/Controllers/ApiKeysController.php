@@ -11,6 +11,7 @@ defined( 'ABSPATH' ) || exit;
 
 use WPLM\Models\ApiKey;
 use WPLM\Repositories\ApiKeyRepository;
+use WPLM\Services\ApiKeyService;
 use WPLM\Support\ResponseFactory;
 
 /**
@@ -50,7 +51,7 @@ class ApiKeysController extends BaseController {
 						'permissions' => array(
 							'required' => true,
 							'type'     => 'string',
-							'enum'     => array( 'read', 'write', 'read_write' ),
+							'enum'     => ApiKeyService::PERMISSIONS,
 						),
 						'user_id'     => array(
 							'type'    => 'integer',
@@ -126,45 +127,19 @@ class ApiKeysController extends BaseController {
 	 * @return \WP_REST_Response|\WP_Error
 	 */
 	public function create_item( \WP_REST_Request $req ) {
-		$description = sanitize_text_field( wp_unslash( $req->get_param( 'description' ) ) );
-		$permissions = sanitize_text_field( wp_unslash( $req->get_param( 'permissions' ) ) );
-		$user_id     = absint( $req->get_param( 'user_id' ) ) ?: get_current_user_id();
-
-		// Generate plaintext credentials.
-		$raw_key    = 'ck_' . bin2hex( random_bytes( 20 ) );
-		$raw_secret = 'cs_' . bin2hex( random_bytes( 20 ) );
-
-		$data = array(
-			'user_id'         => $user_id,
-			'description'     => $description,
-			'permissions'     => $permissions,
-			'consumer_key'    => hash( 'sha256', $raw_key ),
-			'consumer_secret' => hash( 'sha256', $raw_secret ),
-			'truncated_key'   => '…' . substr( $raw_key, -7 ),
-			'last_access_at'  => null,
-			'created_at'      => current_time( 'mysql', true ),
+		/** @var ApiKeyService $service */
+		$service = $this->container->make( ApiKeyService::class );
+		$result  = $service->create(
+			absint( $req->get_param( 'user_id' ) ) ?: get_current_user_id(),
+			sanitize_text_field( wp_unslash( (string) $req->get_param( 'description' ) ) ),
+			sanitize_text_field( wp_unslash( (string) $req->get_param( 'permissions' ) ) )
 		);
 
-		/** @var ApiKeyRepository $repo */
-		$repo = $this->container->make( ApiKeyRepository::class );
-		$id   = $repo->insert( $data );
-
-		if ( ! $id ) {
-			return ResponseFactory::error( 'wplm_create_failed', __( 'Failed to create API key.', 'wp-license-manager' ), 500 );
+		if ( ! $result['ok'] ) {
+			return ResponseFactory::error( 'wplm_invalid_argument', $result['message'], 400 );
 		}
 
-		return ResponseFactory::success(
-			array(
-				'id'              => $id,
-				'consumer_key'    => $raw_key,
-				'consumer_secret' => $raw_secret,
-				'description'     => $description,
-				'permissions'     => $permissions,
-				'user_id'         => $user_id,
-			),
-			array(),
-			201
-		);
+		return ResponseFactory::success( $result['key'], array(), 201 );
 	}
 
 	/**

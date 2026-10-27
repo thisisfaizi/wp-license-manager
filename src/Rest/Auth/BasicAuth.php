@@ -21,6 +21,8 @@ use WPLM\Support\Logger;
  * stored SHA-256 hash to prevent timing attacks.
  *
  * Behaviour:
+ *   - Not a wplm/v1 request → pass through. A WPLM key only ever acts on WPLM's own
+ *     routes, never on wp/v2 or another plugin's, whatever its owner may do there.
  *   - No Authorization header → pass through (return $user unchanged).
  *   - Authorization: Basic present but invalid → return null (force unauthenticated).
  *   - Authorization: Basic present and valid → return the WP_User bound to the key.
@@ -69,6 +71,10 @@ class BasicAuth {
 	 * @return \WP_User|int|null
 	 */
 	public function authenticate( $user ) {
+		if ( ! self::is_wplm_request() ) {
+			return $user;
+		}
+
 		$header = $this->get_authorization_header();
 
 		// No Authorization header — pass through to let other auth mechanisms run.
@@ -155,6 +161,32 @@ class BasicAuth {
 	 */
 	public static function get_current_api_key(): ?ApiKey {
 		return self::$current_api_key;
+	}
+
+	/**
+	 * Whether this HTTP request is for a wplm/v1 REST route.
+	 *
+	 * Read from the raw request rather than the parsed query, which may not exist yet when
+	 * WordPress first determines the user. Covers both pretty (/wp-json/wplm/v1/...) and plain
+	 * (?rest_route=/wplm/v1/...) permalinks, and sites installed in a subdirectory.
+	 *
+	 * @return bool
+	 */
+	public static function is_wplm_request(): bool {
+		$namespace = '/wplm/v1';
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- routing only, no state change.
+		if ( isset( $_GET['rest_route'] ) ) {
+			// phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			$route = '/' . ltrim( sanitize_text_field( wp_unslash( $_GET['rest_route'] ) ), '/' );
+			return $route === $namespace || 0 === strpos( $route, $namespace . '/' );
+		}
+
+		$path   = (string) wp_parse_url( esc_url_raw( wp_unslash( $_SERVER['REQUEST_URI'] ?? '' ) ), PHP_URL_PATH );
+		$prefix = '/' . trim( rest_get_url_prefix(), '/' ) . $namespace;
+		$at     = strpos( $path, $prefix );
+
+		return false !== $at && in_array( substr( $path, $at + strlen( $prefix ), 1 ), array( '', '/' ), true );
 	}
 
 	// -------------------------------------------------------------------------
