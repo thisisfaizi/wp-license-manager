@@ -37,7 +37,7 @@ WPLM is in **active development**. It is not on WordPress.org yet and there are 
 
 | Area | Where it stands |
 |---|---|
-| Plugin | **1.3.1** on `main` ([PR #12](https://github.com/thisisfaizi/wp-license-manager/pull/12): API Keys screen, keys scoped to `wplm/v1`). Full history in [CHANGELOG.md](CHANGELOG.md). |
+| Plugin | **1.3.1** on `main` ([PR #12](https://github.com/thisisfaizi/wp-license-manager/pull/12), merged 2026-10-27: API Keys screen, keys scoped to `wplm/v1`). Full history in [CHANGELOG.md](CHANGELOG.md). |
 | Compatibility | PHP 8.0+, WordPress 5.8+ (tested up to 6.5), WooCommerce 6.0+ (tested up to 9.0) |
 | Releases | None tagged yet. Install from `main` (see [Installation](#-installation)). |
 | Tests | 28 integration test classes that run against a real WordPress, WooCommerce and MySQL ([tests/README.md](tests/README.md)) |
