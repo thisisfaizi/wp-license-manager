@@ -8,7 +8,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/version-1.3.1-6366F1?style=for-the-badge)](CHANGELOG.md)
+[![Release](https://img.shields.io/github/v/release/thisisfaizi/wp-license-manager?style=for-the-badge&color=6366F1&label=release)](https://github.com/thisisfaizi/wp-license-manager/releases/latest)
 [![Status](https://img.shields.io/badge/status-active%20development-F59E0B?style=for-the-badge)](#-status)
 [![PHP](https://img.shields.io/badge/PHP-8.0%2B-777BB4?style=for-the-badge&logo=php&logoColor=white)](https://www.php.net)
 [![WordPress](https://img.shields.io/badge/WordPress-5.8%2B-21759B?style=for-the-badge&logo=wordpress&logoColor=white)](https://wordpress.org)
@@ -33,13 +33,13 @@ Sell licenses through WooCommerce, verify them offline in milliseconds, and mana
 
 ## 🚦 Status
 
-WPLM is in **active development**. It is not on WordPress.org yet and there are no tagged releases, so you install it from `main`.
+WPLM is in **active development**. It is not on WordPress.org yet: install it from the [latest release](https://github.com/thisisfaizi/wp-license-manager/releases/latest) ZIP.
 
 | Area | Where it stands |
 |---|---|
-| Plugin | **1.3.1** on `main` ([PR #12](https://github.com/thisisfaizi/wp-license-manager/pull/12), merged 2026-10-27: API Keys screen, keys scoped to `wplm/v1`). Full history in [CHANGELOG.md](CHANGELOG.md). |
+| Plugin | **1.3.1** ([PR #12](https://github.com/thisisfaizi/wp-license-manager/pull/12), merged 2026-10-27: API Keys screen, keys scoped to `wplm/v1`). Full history in [CHANGELOG.md](CHANGELOG.md). |
 | Compatibility | PHP 8.0+, WordPress 5.8+ (tested up to 6.5), WooCommerce 6.0+ (tested up to 9.0) |
-| Releases | None tagged yet. Install from `main` (see [Installation](#-installation)). |
+| Releases | [v1.3.1](https://github.com/thisisfaizi/wp-license-manager/releases/tag/v1.3.1), 2026-10-27, with an installable plugin ZIP (see [Installation](#-installation)). |
 | Tests | 28 integration test classes that run against a real WordPress, WooCommerce and MySQL ([tests/README.md](tests/README.md)) |
 | CI | Not set up yet. Lint and tests run locally before each merge. |
 | Client SDKs | Dart, Python, PHP and JavaScript at **0.2.0** on GitHub. Not published to pub.dev, PyPI, Packagist or npm yet. |
@@ -184,9 +184,17 @@ Customer → My Account → Subscriptions → [Renew] →
 
 ## 📥 Installation
 
-WPLM is not on WordPress.org or Packagist yet. Install it from this repository.
+WPLM is not on WordPress.org or Packagist yet. Install it from a GitHub release.
 
-**Option A: clone into your plugins folder** (needs shell access)
+**Option A: upload the release ZIP** (recommended, no shell needed)
+
+1. Open the [latest release](https://github.com/thisisfaizi/wp-license-manager/releases/latest) and download **wp-license-manager-x.y.z.zip** under *Assets*.
+2. In WordPress, go to **Plugins → Add New → Upload Plugin**, upload the ZIP and click **Install Now**.
+3. To update an existing copy, upload the newer ZIP the same way and choose **Replace current with uploaded**. Licenses, keys and settings stay in the database.
+
+Use the release asset, not GitHub's *Source code* or **Code → Download ZIP**: those unpack to a folder with a different name (so WordPress treats an update as a second plugin) and include the tests and dev files.
+
+**Option B: clone into your plugins folder** (needs shell access, tracks `main`)
 
 ```bash
 cd wp-content/plugins
@@ -194,11 +202,6 @@ git clone https://github.com/thisisfaizi/wp-license-manager.git
 cd wp-license-manager
 composer install --no-dev --optimize-autoloader   # optional, see note below
 ```
-
-**Option B: upload a ZIP** (no shell needed)
-
-1. On GitHub, open **Code → Download ZIP**.
-2. In WordPress, go to **Plugins → Add New → Upload Plugin** and upload the ZIP.
 
 Then activate **WP License Manager** under **Plugins → Installed Plugins**. Activation creates the WPLM tables and generates the Ed25519 signing keypair and the key-encryption key, so there is nothing else to configure before your first license.
 
