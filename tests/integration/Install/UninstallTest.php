@@ -114,7 +114,19 @@ class UninstallTest extends TestCase {
 		$this->assertSame( 1, $page->_sanitize_checkbox( '1' ) );
 	}
 
-	public function test_a_second_copy_under_another_folder_is_found(): void {
+	public function test_a_second_copy_is_found_and_the_running_one_never_is(): void {
+		// A plugins folder on disk: this copy, an old copy from GitHub's Download ZIP, and a single
+		// file loose in the plugins folder. The running copy is reached through a symlink, as on a
+		// host whose document root is one.
+		$root = get_temp_dir() . 'wplm-copies-' . wp_generate_password( 6, false );
+		$dir  = $root . '/plugins';
+		foreach ( array( 'wp-license-manager', 'wp-license-manager-main' ) as $folder ) {
+			wp_mkdir_p( "{$dir}/{$folder}" );
+			file_put_contents( "{$dir}/{$folder}/wp-license-manager.php", '<?php' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		}
+		file_put_contents( "{$dir}/wp-license-manager.php", '<?php' ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		symlink( $dir, $root . '/linked' );
+
 		$plugins = array(
 			'wp-license-manager/wp-license-manager.php'      => array(
 				'Name'    => 'WP License Manager',
@@ -124,16 +136,38 @@ class UninstallTest extends TestCase {
 				'Name'    => 'WP License Manager',
 				'Version' => '1.3.0',
 			),
+			'wp-license-manager.php'                         => array(
+				'Name'    => 'WP License Manager',
+				'Version' => '1.2.0',
+			),
 			'woocommerce/woocommerce.php'                    => array(
 				'Name'    => 'WooCommerce',
 				'Version' => '9.0',
 			),
 		);
+		$notice  = new DuplicateCopyNotice();
 
+		$found = $notice->other_copies( $plugins, $root . '/linked/wp-license-manager/wp-license-manager.php', $dir );
 		$this->assertSame(
-			array( 'wp-license-manager-main/wp-license-manager.php' => '1.3.0' ),
-			( new DuplicateCopyNotice() )->other_copies( $plugins, 'wp-license-manager/wp-license-manager.php' )
+			array(
+				'wp-license-manager-main/wp-license-manager.php' => '1.3.0',
+				'wp-license-manager.php'                         => '1.2.0',
+			),
+			$found,
+			'The running copy is never listed, even through a symlinked path.'
 		);
-		$this->assertSame( array(), ( new DuplicateCopyNotice() )->other_copies( array_slice( $plugins, 0, 1 ), 'wp-license-manager/wp-license-manager.php' ) );
+		$this->assertSame( array(), $notice->other_copies( array_slice( $plugins, 0, 1 ), "{$dir}/wp-license-manager/wp-license-manager.php", $dir ) );
+
+		$this->assertSame( 'rm -r ' . escapeshellarg( "{$dir}/wp-license-manager-main" ), DuplicateCopyNotice::removal_command( 'wp-license-manager-main/wp-license-manager.php', $dir ) );
+		$this->assertSame( 'rm ' . escapeshellarg( "{$dir}/wp-license-manager.php" ), DuplicateCopyNotice::removal_command( 'wp-license-manager.php', $dir ), 'A loose file never becomes rm -r of the plugins folder.' );
+
+		unlink( $root . '/linked' );
+		unlink( "{$dir}/wp-license-manager.php" );
+		foreach ( array( 'wp-license-manager', 'wp-license-manager-main' ) as $folder ) {
+			unlink( "{$dir}/{$folder}/wp-license-manager.php" );
+			rmdir( "{$dir}/{$folder}" );
+		}
+		rmdir( $dir );
+		rmdir( $root );
 	}
 }

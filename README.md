@@ -39,7 +39,7 @@ WPLM is in **active development**. It is not on WordPress.org yet: install it fr
 |---|---|
 | Plugin | **1.3.2**: deleting the plugin keeps your data unless you tick *Delete all data* in Settings. Full history in [CHANGELOG.md](CHANGELOG.md). |
 | Compatibility | PHP 8.0+, WordPress 5.8+ (tested up to 6.5), WooCommerce 6.0+ (tested up to 9.0) |
-| Releases | [v1.3.1](https://github.com/thisisfaizi/wp-license-manager/releases/tag/v1.3.1), 2026-10-27, with an installable plugin ZIP (see [Installation](#-installation)). |
+| Releases | [Latest release](https://github.com/thisisfaizi/wp-license-manager/releases/latest) on GitHub, with an installable plugin ZIP (see [Installation](#-installation)). |
 | Tests | 28 integration test classes that run against a real WordPress, WooCommerce and MySQL ([tests/README.md](tests/README.md)) |
 | CI | Not set up yet. Lint and tests run locally before each merge. |
 | Client SDKs | Dart, Python, PHP and JavaScript at **0.2.0** on GitHub. Not published to pub.dev, PyPI, Packagist or npm yet. |
