@@ -99,28 +99,7 @@ class Installer {
 		global $wpdb;
 		$p = $wpdb->prefix . 'wplm_';
 
-		$tables = array(
-			'licenses',
-			'machines',
-			'machine_components',
-			'activation_log',
-			'generators',
-			'api_keys',
-			'releases',
-			'webhooks',
-			'webhook_log',
-			'blacklist',
-			'license_meta',
-			'subscriptions',
-			'subscription_items',
-			'subscription_renewals',
-			'subscription_notes',
-			'plans',
-			'packages',
-			'entitlements',
-		);
-
-		foreach ( $tables as $table ) {
+		foreach ( Tables::NAMES as $table ) {
 			$full  = $p . $table;
 			$found = $wpdb->get_var(
 				$wpdb->prepare( 'SHOW TABLES LIKE %s', $full )

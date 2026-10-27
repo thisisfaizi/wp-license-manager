@@ -4,7 +4,7 @@ Tags: licensing, license key, woocommerce, software licensing, subscriptions
 Requires at least: 5.8
 Tested up to: 6.5
 Requires PHP: 8.0
-Stable tag: 1.3.1
+Stable tag: 1.3.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -72,6 +72,10 @@ This plugin does not connect to any external service on its own. It is a licensi
 4. Visit License Manager → Settings to configure defaults, then Generators to create your first key generator.
 5. (Optional) Activate WooCommerce to sell licenses and subscriptions.
 
+= Updating =
+
+Upload the newer ZIP the same way and choose Replace current with uploaded. If WordPress installs it as a second plugin instead (the old copy is in a folder with another name, such as wp-license-manager-main), never use Delete on the old copy: copies older than 1.3.2 delete all licences and settings when deleted. Deactivate it, then remove its folder with your host's file manager, FTP or SSH.
+
 = Requirements =
 
 * PHP 8.0 or higher with the sodium extension (bundled with PHP 7.2+).
@@ -98,6 +102,11 @@ Each license payload is signed with Ed25519. The public key is exposed at `GET /
 The signing private key, encryption key, and HMAC secrets are stored as non-autoloaded options (or as `wp-config.php` constants if you prefer). Only the Ed25519 public key is ever exposed.
 
 == Changelog ==
+
+= 1.3.2 =
+* Fix: deleting the plugin no longer deletes your data. Before, Delete on the Plugins screen dropped every licence, device, subscription and setting, with no setting to stop it. Now it keeps everything unless you tick Settings > Uninstall > Delete all data (off by default).
+* Fix: when that box is ticked, every WPLM table is dropped. Before, plans, packages and entitlements were left behind, and two scheduled events were never cleared.
+* New: a warning on every admin screen when a second copy of the plugin is installed under another folder name (a GitHub "Download ZIP" copy unpacks to wp-license-manager-main), with how to remove it without running its uninstall.
 
 = 1.3.1 =
 * New: License Manager > API Keys screen. Create a key for the management REST API (the secret is shown once), see when each key was last used, and revoke one.
@@ -147,6 +156,9 @@ The signing private key, encryption key, and HMAC secrets are stored as non-auto
 * Initial release: cryptographic licensing, device management, monitoring, revocation, native subscriptions, WooCommerce integration, and the full REST API.
 
 == Upgrade Notice ==
+
+= 1.3.2 =
+Deleting the plugin now keeps your data. If another copy of WP License Manager is installed in a different folder, do not use Delete on it: older copies delete everything when deleted. Deactivate it and remove its folder with your file manager, FTP or SSH.
 
 = 1.0.8 =
 Fixes device deactivation (adds a missing database column, migrated automatically). Recommended for all installs. Visit any admin page once after upgrading to apply the migration.

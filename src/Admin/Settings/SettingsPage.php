@@ -57,6 +57,7 @@ class SettingsPage {
 		'wplm_default_grace_days'       => 7,
 		'wplm_dunning_schedule'         => '1,3,5',
 		'wplm_webhook_retry_attempts'   => 3,
+		'wplm_delete_data_on_uninstall' => 0,
 	);
 
 	// -------------------------------------------------------------------------
@@ -127,6 +128,7 @@ class SettingsPage {
 			'wplm_qr_enabled',
 			'wplm_force_ssl',
 			'wplm_sub_engine_enabled',
+			'wplm_delete_data_on_uninstall',
 		);
 
 		foreach ( $checkbox_fields as $option ) {
@@ -327,6 +329,24 @@ class SettingsPage {
 			'wplm-settings',
 			'wplm_dunning'
 		);
+
+		// ------------------------------------------------------------------
+		// Section: Uninstall
+		// ------------------------------------------------------------------
+		add_settings_section(
+			'wplm_uninstall',
+			__( 'Uninstall', 'wp-license-manager' ),
+			array( $this, 'render_section_uninstall' ),
+			'wplm-settings'
+		);
+
+		add_settings_field(
+			'wplm_delete_data_on_uninstall',
+			__( 'Delete all data', 'wp-license-manager' ),
+			array( $this, 'render_field_delete_data_on_uninstall' ),
+			'wplm-settings',
+			'wplm_uninstall'
+		);
 	}
 
 	/**
@@ -450,6 +470,29 @@ class SettingsPage {
 	/** @return void */
 	public function render_section_dunning(): void {
 		echo '<p>' . esc_html__( 'Define retry schedules for failed payments and webhook delivery.', 'wp-license-manager' ) . '</p>';
+	}
+
+	/** @return void */
+	public function render_section_uninstall(): void {
+		echo '<p>' . esc_html__( 'Deactivating the plugin never deletes data. This decides what Delete on the Plugins screen does.', 'wp-license-manager' ) . '</p>';
+	}
+
+	/** @return void */
+	public function render_field_delete_data_on_uninstall(): void {
+		$value = (int) get_option( 'wplm_delete_data_on_uninstall', $this->defaults['wplm_delete_data_on_uninstall'] );
+		?>
+		<label for="wplm_delete_data_on_uninstall">
+			<input
+				type="checkbox"
+				id="wplm_delete_data_on_uninstall"
+				name="wplm_delete_data_on_uninstall"
+				value="1"
+				<?php checked( 1, $value ); ?>
+			>
+			<?php esc_html_e( 'When the plugin is deleted, also delete every licence, device, subscription, plan and setting.', 'wp-license-manager' ); ?>
+		</label>
+		<p class="description"><?php esc_html_e( 'This includes the signing keypair and encryption key stored in the database (copies defined in wp-config.php are not touched). Clients that trust the old public key stop accepting new licences, and it cannot be undone. Leave this off on a live licence server, and leave it off when replacing the plugin with a new copy.', 'wp-license-manager' ); ?></p>
+		<?php
 	}
 
 	// -------------------------------------------------------------------------
@@ -952,6 +995,7 @@ class SettingsPage {
 			'wplm_qr_enabled',
 			'wplm_force_ssl',
 			'wplm_sub_engine_enabled',
+			'wplm_delete_data_on_uninstall',
 		);
 		foreach ( $checkbox_keys as $key ) {
 			$output[ $key ] = ! empty( $input[ $key ] ) ? 1 : 0;

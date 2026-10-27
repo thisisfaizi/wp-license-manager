@@ -6,6 +6,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Thi
 
 ---
 
+## [1.3.2] - 2026-10-27
+
+### Fixed
+- **Deleting the plugin deleted all its data, with no way to stop it.** `uninstall.php` dropped the
+  licence tables and every `wplm_` option unless `wplm_keep_data_on_uninstall` was set, and no screen
+  ever set it. Uploading the release ZIP over a copy from GitHub's "Download ZIP" (folder
+  `wp-license-manager-main`) installs a second plugin, and Delete on the old copy wiped a live licence
+  server: licences, devices, activation log, subscriptions and generators. It now keeps everything
+  unless **Settings → Uninstall → Delete all data** is ticked, off by default. A site that set the
+  old keep option by hand keeps its data either way.
+- When the box is ticked, every table is dropped. The old list missed `plans`, `packages` and
+  `entitlements`; the installer and uninstall now share one list (`Install\Tables`). Every `wplm_`
+  option and transient goes too (the old list missed newer ones), and all five scheduled events are
+  cleared (it missed `wplm_five_minutes` and `wplm_lapse_notices`).
+
+### Added
+- **A notice when a second copy is installed** under another folder name
+  (`Admin\DuplicateCopyNotice`), saying not to use Delete on it, because a copy older than 1.3.2
+  runs its own uninstall, and how to remove its folder instead.
+
+### Tests
+- `UninstallTest` (6): the table list is every table the installer creates; by default nothing is
+  dropped and the keypair stays; ticked, every table, option and transient goes and other options
+  stay; the old keep option still wins; an unticked box saves as off; a second copy is found.
+  Mutation-checked (wipe by default, a table missing from the list).
+
+---
+
 ## [1.3.1] - 2026-10-27
 
 ### Added

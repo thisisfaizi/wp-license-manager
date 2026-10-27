@@ -37,7 +37,7 @@ WPLM is in **active development**. It is not on WordPress.org yet: install it fr
 
 | Area | Where it stands |
 |---|---|
-| Plugin | **1.3.1** ([PR #12](https://github.com/thisisfaizi/wp-license-manager/pull/12), merged 2026-10-27: API Keys screen, keys scoped to `wplm/v1`). Full history in [CHANGELOG.md](CHANGELOG.md). |
+| Plugin | **1.3.2**: deleting the plugin keeps your data unless you tick *Delete all data* in Settings. Full history in [CHANGELOG.md](CHANGELOG.md). |
 | Compatibility | PHP 8.0+, WordPress 5.8+ (tested up to 6.5), WooCommerce 6.0+ (tested up to 9.0) |
 | Releases | [v1.3.1](https://github.com/thisisfaizi/wp-license-manager/releases/tag/v1.3.1), 2026-10-27, with an installable plugin ZIP (see [Installation](#-installation)). |
 | Tests | 28 integration test classes that run against a real WordPress, WooCommerce and MySQL ([tests/README.md](tests/README.md)) |
@@ -193,6 +193,9 @@ WPLM is not on WordPress.org or Packagist yet. Install it from a GitHub release.
 3. To update an existing copy, upload the newer ZIP the same way and choose **Replace current with uploaded**. Licenses, keys and settings stay in the database.
 
 Use the release asset, not GitHub's *Source code* or **Code → Download ZIP**: those unpack to a folder with a different name (so WordPress treats an update as a second plugin) and include the tests and dev files.
+
+> [!CAUTION]
+> **Never use Delete on an old copy to make room for a new one.** If the update installs as a second plugin (the old copy sits in a folder with another name, such as `wp-license-manager-main`), deactivate the old copy and remove its folder with your host's file manager, FTP or SSH. Delete on the Plugins screen runs that copy's uninstall, and copies older than 1.3.2 delete every license, device, subscription and setting. From 1.3.2, Delete keeps your data unless **Settings → Uninstall → Delete all data** is ticked, and the plugin warns you when a second copy is installed.
 
 **Option B: clone into your plugins folder** (needs shell access, tracks `main`)
 
