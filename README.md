@@ -6,6 +6,12 @@
 
 </div>
 
+# WP License Manager
+
+**WP License Manager (WPLM)** is a self-hosted software license server and license key manager for WordPress plugins, themes and apps. It issues **Ed25519-signed license keys** that your software checks with **offline verification**, sells them through **WooCommerce**, and handles device seats, native subscriptions and a REST API from one WordPress plugin. It is an open-source alternative to Freemius and EDD Software Licensing.
+
+> Not to be confused with the older WordPress.org plugin of the same name.
+
 <div align="center">
 
 [![Release](https://img.shields.io/github/v/release/thisisfaizi/wp-license-manager?style=for-the-badge&color=6366F1&label=release)](https://github.com/thisisfaizi/wp-license-manager/releases/latest)
@@ -25,7 +31,7 @@
 Sell licenses through WooCommerce, verify them offline in milliseconds, and manage every seat from one admin dashboard.
 <br /><br />
 
-[Status](#-status) &nbsp;·&nbsp; [Features](#-features) &nbsp;·&nbsp; [Install](#-installation) &nbsp;·&nbsp; [Quick start](#-quick-start) &nbsp;·&nbsp; [SDKs](#-client-sdks) &nbsp;·&nbsp; [Docs](#-documentation) &nbsp;·&nbsp; [Contributing](#-contributing)
+[Status](#-status) &nbsp;·&nbsp; [Features](#-features) &nbsp;·&nbsp; [Compare](#-how-it-compares) &nbsp;·&nbsp; [Install](#-installation) &nbsp;·&nbsp; [Quick start](#-quick-start) &nbsp;·&nbsp; [SDKs](#-client-sdks) &nbsp;·&nbsp; [Docs](#-documentation) &nbsp;·&nbsp; [Contributing](#-contributing)
 
 </div>
 
@@ -124,6 +130,21 @@ WPLM is in **active development**. It is not on WordPress.org yet: install it fr
 </td>
 </tr>
 </table>
+
+---
+
+## 🆚 How it compares
+
+| | Type | Hosting | Pricing model | Store |
+|---|---|---|---|---|
+| **WP License Manager** | Open-source WordPress plugin (GPL-2.0-or-later) | Self-hosted | Free | WooCommerce (optional) |
+| **Freemius** | Hosted SaaS platform | Hosted | Revenue share | Freemius platform |
+| **EDD Software Licensing** | Paid add-on for Easy Digital Downloads | Self-hosted | Paid add-on | Easy Digital Downloads |
+| **License Manager for WooCommerce** | Free WooCommerce plugin for selling license keys | Self-hosted | Free plugin | WooCommerce |
+
+WPLM in one plugin: Ed25519-signed license payloads with offline validation, device seats, native subscriptions, a REST API under `wp-json/wplm/v1`, and client SDKs for Dart, Python, PHP and JavaScript.
+
+<sub>Product names are trademarks of their owners; listed for comparison only.</sub>
 
 ---
 
